@@ -34,6 +34,7 @@ const (
 	PermApproveOrders   Permission = "approve_orders"
 	PermManageFinance   Permission = "manage_finance"
 	PermManagePayroll   Permission = "manage_payroll"
+	PermManageHR        Permission = "manage_hr"
 	PermManageUsers     Permission = "manage_users"
 	PermAdmin           Permission = "admin"
 )
@@ -42,11 +43,11 @@ const (
 var rolePermissions = map[Role][]Permission{
 	RoleOwner: {
 		PermRead, PermManageInventory, PermManageOrders, PermApproveOrders,
-		PermManageFinance, PermManagePayroll, PermManageUsers, PermAdmin,
+		PermManageFinance, PermManagePayroll, PermManageHR, PermManageUsers, PermAdmin,
 	},
 	RoleAdmin: {
 		PermRead, PermManageInventory, PermManageOrders, PermApproveOrders,
-		PermManageFinance, PermManagePayroll, PermManageUsers, PermAdmin,
+		PermManageFinance, PermManagePayroll, PermManageHR, PermManageUsers, PermAdmin,
 	},
 	RoleFinance: {
 		PermRead, PermManageOrders, PermApproveOrders, PermManageFinance, PermManagePayroll,
@@ -55,7 +56,7 @@ var rolePermissions = map[Role][]Permission{
 		PermRead, PermManageInventory, PermManageOrders,
 	},
 	RoleHR: {
-		PermRead, PermManagePayroll, PermManageUsers,
+		PermRead, PermManagePayroll, PermManageHR, PermManageUsers,
 	},
 	RoleEmployee: {
 		PermRead,

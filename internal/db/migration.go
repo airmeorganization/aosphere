@@ -126,6 +126,55 @@ var Migrations = []Migration{
 		);
 		`,
 	},
+	{
+		Version: 5,
+		Name:    "005_business_lifecycles",
+		SQL: `
+		CREATE TABLE IF NOT EXISTS company_profiles (
+			org_id TEXT PRIMARY KEY REFERENCES organizations(id),
+			company_name TEXT NOT NULL,
+			currency TEXT NOT NULL DEFAULT 'USD',
+			timezone TEXT NOT NULL DEFAULT 'UTC',
+			tax_rate REAL NOT NULL DEFAULT 0.10,
+			address TEXT NOT NULL DEFAULT '',
+			phone TEXT NOT NULL DEFAULT '',
+			website TEXT NOT NULL DEFAULT '',
+			onboarding_completed BOOLEAN NOT NULL DEFAULT 1,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS notifications (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			user_id TEXT,
+			title TEXT NOT NULL,
+			message TEXT NOT NULL,
+			category TEXT NOT NULL DEFAULT 'system', -- alert, approval, inventory, finance
+			is_read BOOLEAN NOT NULL DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE INDEX IF NOT EXISTS idx_notifications_org ON notifications(org_id, is_read, created_at);
+
+		CREATE TABLE IF NOT EXISTS quotes (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			quote_number TEXT NOT NULL,
+			deal_id TEXT REFERENCES deals(id),
+			customer_id TEXT REFERENCES customers(id),
+			subtotal REAL NOT NULL DEFAULT 0.0,
+			tax_amount REAL NOT NULL DEFAULT 0.0,
+			total_amount REAL NOT NULL DEFAULT 0.0,
+			status TEXT NOT NULL DEFAULT 'draft', -- draft, sent, accepted, rejected, converted
+			items_json TEXT NOT NULL DEFAULT '[]',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(org_id, quote_number)
+		);
+
+		INSERT OR IGNORE INTO company_profiles (org_id, company_name, currency, timezone, tax_rate, address, phone, website, onboarding_completed)
+		SELECT id, 'AO Sphere Enterprise', 'USD', 'America/New_York', 0.10, '100 Innovation Way, Suite 400', '+1 (555) 019-2834', 'https://aosphere.local', 1
+		FROM organizations WHERE id = 'org_default';
+		`,
+	},
 }
 
 // RunMigrations applies all pending migrations in sequential order

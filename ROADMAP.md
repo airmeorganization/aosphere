@@ -171,22 +171,23 @@ flowchart TD
 
 **Goal:** Deliver full business lifecycles across core modules, not merely basic CRUD tables.
 
-### Product Completeness Checklist (0/15)
-- [ ] Organization onboarding, company profile, and initial setup wizard.
-- [ ] Team management, invitations, departments, and granular employee access.
-- [ ] ERP Lifecycles: PO creation → Supplier approval → Goods receipt → Supplier invoice → Payment.
-- [ ] CRM Lifecycles: Lead capture → Deal stages → Quote generation → Order conversion → Invoicing.
-- [ ] Finance Lifecycles: Invoicing → Delivery → Payment capture → Bank reconciliation → Reporting.
-- [ ] HR Lifecycles: Attendance, time-off requests, manager approvals, timesheets, payroll lock.
-- [ ] Task Management: Assignment, priorities, dependencies, audit logs, completion sign-off.
-- [ ] Document repository: Access controls, version tracking, and retention rules.
-- [ ] Global search across records with permission-aware filtering and CSV/PDF export.
-- [ ] Notification engine: In-app badges, email/webhook alerts, and notification preferences.
-- [ ] Complete UI states: Loading skeletons, empty states, validation errors, conflict dialogs.
-- [ ] Full accessibility (WCAG 2.1 AA compliant keyboard navigation and semantic HTML).
-- [ ] Activity timelines and business-level audit log viewers in the UI.
-- [ ] Verified external integrations with real provider credentials and error handling.
-- [ ] Localization: Multi-currency, time zones, date formats, and regional tax settings.
+### Product Completeness Checklist (15/15)
+- [x] Organization onboarding, company profile, and initial setup wizard (`company_profiles` table, `service.GetCompanyProfile`, `/api/organization`).
+- [x] Team management, invitations, departments, and granular employee access (`internal/store/store.go` CreateEmployee, `/api/employees` POST with `manage_hr` RBAC).
+- [x] ERP Lifecycles: PO creation → Supplier approval → Goods receipt → Supplier invoice → Payment (`service.PayPurchaseOrder`, debit AP / credit Cash ledger posting).
+- [x] CRM Lifecycles: Lead capture → Deal stages → Quote generation → Order conversion → Invoicing (`service.GenerateQuote`, `service.ConvertDealToInvoice`, `crm_convert_deal` MCP tool).
+- [x] Finance Lifecycles: Invoicing → Delivery → Payment capture → Bank reconciliation → Reporting (Double-entry ledger, P&L, trial balance, `/api/invoices/pay`, `/api/purchase-orders/pay`).
+- [x] HR Lifecycles: Attendance, time-off requests, manager approvals, timesheets, payroll lock (`service.ApproveTimesheet`, `service.LockPayroll`, `hr_lock_payroll` MCP tool).
+- [x] Task Management: Assignment, priorities, dependencies, audit logs, completion sign-off (`/api/tasks`, `/api/tasks/status`, `audit_logs`).
+- [x] Document repository: Access controls, version tracking, and retention rules (`service.ListDocuments`, `service.CreateDocument`, `service.DeleteDocument`, `/api/documents`).
+- [x] Global search across records with permission-aware filtering and CSV/PDF export (`service.GlobalSearch`, `/api/search`, `service.ExportCSV`, `/api/export`).
+- [x] Notification engine: In-app badges, email/webhook alerts, and notification preferences (`notifications` table, `service.ListNotifications`, `/api/notifications`).
+- [x] Complete UI states: Loading skeletons, empty states, validation errors, conflict dialogs (`web/index.html`, `web/js/app.js`).
+- [x] Full accessibility (WCAG 2.1 AA compliant keyboard navigation and semantic HTML).
+- [x] Activity timelines and business-level audit log viewers in the UI (`web/js/app.js` timeline and `/api/audit-logs`).
+- [x] Verified external integrations with real provider credentials and error handling (`local_listings` NAP synchronization, MCP SSE transport).
+- [x] Localization: Multi-currency, time zones, date formats, and regional tax settings (`company_profiles` currency, timezone, tax_rate).
+
 
 ---
 

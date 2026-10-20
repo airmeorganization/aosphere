@@ -387,4 +387,151 @@ func TestWorkflowAPI_KillSwitchAndExecutions(t *testing.T) {
 	}
 }
 
+func TestWorkflowAPI_Phase6Lifecycles(t *testing.T) {
+	testAPI, database := setupTestAPI(t)
+	defer database.Close()
+
+	mux := http.NewServeMux()
+	testAPI.RegisterRoutes(mux)
+
+	adminCtx := &auth.AuthContext{
+		UserID: "usr_admin",
+		OrgID:  "org_default",
+		Role:   auth.RoleAdmin,
+		Email:  "admin@aosphere.local",
+	}
+
+	// 1. Quote Generation (/api/deals/quote)
+	qPayload := map[string]interface{}{
+		"deal_id": "deal_01",
+		"items": []map[string]interface{}{
+			{"desc": "Flight controller hardware batch", "qty": 4, "price": 250.0},
+		},
+	}
+	bQuote, _ := json.Marshal(qPayload)
+	reqQ := httptest.NewRequest(http.MethodPost, "/api/deals/quote", bytes.NewReader(bQuote))
+	reqQ.Header.Set("Content-Type", "application/json")
+	reqQ = reqQ.WithContext(context.WithValue(reqQ.Context(), AuthCtxKey, adminCtx))
+	rrQ := httptest.NewRecorder()
+	mux.ServeHTTP(rrQ, reqQ)
+	if rrQ.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /api/deals/quote, got %d: %s", rrQ.Code, rrQ.Body.String())
+	}
+
+	// 2. Deal to Invoice Conversion (/api/deals/convert)
+	convPayload := map[string]interface{}{
+		"deal_id": "deal_02",
+	}
+	bConv, _ := json.Marshal(convPayload)
+	reqConv := httptest.NewRequest(http.MethodPost, "/api/deals/convert", bytes.NewReader(bConv))
+	reqConv.Header.Set("Content-Type", "application/json")
+	reqConv = reqConv.WithContext(context.WithValue(reqConv.Context(), AuthCtxKey, adminCtx))
+	rrConv := httptest.NewRecorder()
+	mux.ServeHTTP(rrConv, reqConv)
+	if rrConv.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /api/deals/convert, got %d: %s", rrConv.Code, rrConv.Body.String())
+	}
+
+	// 3. Employee Management (/api/employees POST)
+	empPayload := map[string]interface{}{
+		"name":        "Elena Vance",
+		"role":        "Autonomous Systems Lead",
+		"department":  "Engineering",
+		"email":       "elena.vance@aosphere.internal",
+		"phone":       "+1 (555) 018-9922",
+		"hourly_rate": 75.0,
+	}
+	bEmp, _ := json.Marshal(empPayload)
+	reqEmp := httptest.NewRequest(http.MethodPost, "/api/employees", bytes.NewReader(bEmp))
+	reqEmp.Header.Set("Content-Type", "application/json")
+	reqEmp = reqEmp.WithContext(context.WithValue(reqEmp.Context(), AuthCtxKey, adminCtx))
+	rrEmp := httptest.NewRecorder()
+	mux.ServeHTTP(rrEmp, reqEmp)
+	if rrEmp.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on POST /api/employees, got %d: %s", rrEmp.Code, rrEmp.Body.String())
+	}
+
+	// 4. Documents (/api/documents POST, GET, DELETE)
+	docPayload := map[string]interface{}{
+		"title":    "Autonomous Agent Operational Handbook",
+		"category": "Governance",
+		"content":  "Rules and policies for human-in-the-loop escalation",
+		"author":   "Admin",
+	}
+	bDoc, _ := json.Marshal(docPayload)
+	reqDoc := httptest.NewRequest(http.MethodPost, "/api/documents", bytes.NewReader(bDoc))
+	reqDoc.Header.Set("Content-Type", "application/json")
+	reqDoc = reqDoc.WithContext(context.WithValue(reqDoc.Context(), AuthCtxKey, adminCtx))
+	rrDoc := httptest.NewRecorder()
+	mux.ServeHTTP(rrDoc, reqDoc)
+	if rrDoc.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on POST /api/documents, got %d: %s", rrDoc.Code, rrDoc.Body.String())
+	}
+
+	reqGetDoc := httptest.NewRequest(http.MethodGet, "/api/documents", nil)
+	reqGetDoc = reqGetDoc.WithContext(context.WithValue(reqGetDoc.Context(), AuthCtxKey, adminCtx))
+	rrGetDoc := httptest.NewRecorder()
+	mux.ServeHTTP(rrGetDoc, reqGetDoc)
+	if rrGetDoc.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on GET /api/documents, got %d", rrGetDoc.Code)
+	}
+
+	// 5. Global Search (/api/search?q=sensor)
+	reqSearch := httptest.NewRequest(http.MethodGet, "/api/search?q=sensor", nil)
+	reqSearch = reqSearch.WithContext(context.WithValue(reqSearch.Context(), AuthCtxKey, adminCtx))
+	rrSearch := httptest.NewRecorder()
+	mux.ServeHTTP(rrSearch, reqSearch)
+	if rrSearch.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /api/search, got %d", rrSearch.Code)
+	}
+
+	// 6. CSV Export (/api/export?type=skus)
+	reqExp := httptest.NewRequest(http.MethodGet, "/api/export?type=skus", nil)
+	reqExp = reqExp.WithContext(context.WithValue(reqExp.Context(), AuthCtxKey, adminCtx))
+	rrExp := httptest.NewRecorder()
+	mux.ServeHTTP(rrExp, reqExp)
+	if rrExp.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /api/export, got %d", rrExp.Code)
+	}
+	if rrExp.Header().Get("Content-Type") != "text/csv" {
+		t.Errorf("expected text/csv header, got %s", rrExp.Header().Get("Content-Type"))
+	}
+
+	// 7. Notifications (/api/notifications)
+	reqNotif := httptest.NewRequest(http.MethodGet, "/api/notifications", nil)
+	reqNotif = reqNotif.WithContext(context.WithValue(reqNotif.Context(), AuthCtxKey, adminCtx))
+	rrNotif := httptest.NewRecorder()
+	mux.ServeHTTP(rrNotif, reqNotif)
+	if rrNotif.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /api/notifications, got %d", rrNotif.Code)
+	}
+
+	// 8. Organization Profile (/api/organization GET & PUT)
+	reqOrg := httptest.NewRequest(http.MethodGet, "/api/organization", nil)
+	reqOrg = reqOrg.WithContext(context.WithValue(reqOrg.Context(), AuthCtxKey, adminCtx))
+	rrOrg := httptest.NewRecorder()
+	mux.ServeHTTP(rrOrg, reqOrg)
+	if rrOrg.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on GET /api/organization, got %d", rrOrg.Code)
+	}
+
+	orgPayload := map[string]interface{}{
+		"company_name":         "AO Sphere Global Apex",
+		"currency":             "GBP",
+		"timezone":             "Europe/London",
+		"tax_rate":             0.20,
+		"onboarding_completed": true,
+	}
+	bOrg, _ := json.Marshal(orgPayload)
+	reqPutOrg := httptest.NewRequest(http.MethodPost, "/api/organization", bytes.NewReader(bOrg))
+	reqPutOrg.Header.Set("Content-Type", "application/json")
+	reqPutOrg = reqPutOrg.WithContext(context.WithValue(reqPutOrg.Context(), AuthCtxKey, adminCtx))
+	rrPutOrg := httptest.NewRecorder()
+	mux.ServeHTTP(rrPutOrg, reqPutOrg)
+	if rrPutOrg.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on POST /api/organization, got %d", rrPutOrg.Code)
+	}
+}
+
+
 

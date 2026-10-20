@@ -394,6 +394,11 @@ func SeedStarterData(db *sql.DB) error {
 		return fmt.Errorf("failed to seed organization: %w", err)
 	}
 
+	// Seed Company Profile
+	_, _ = db.Exec(`INSERT OR IGNORE INTO company_profiles (org_id, company_name, currency, timezone, tax_rate, address, phone, website, onboarding_completed)
+		VALUES ('org_default', 'AO Sphere Enterprise', 'USD', 'America/New_York', 0.10, '100 Innovation Way, Suite 400', '+1 (555) 019-2834', 'https://aosphere.local', 1)`)
+
+
 	// 2. Seed Admin User (Password: "Admin1234!")
 	adminHash, err := auth.HashPassword("Admin1234!")
 	if err != nil {

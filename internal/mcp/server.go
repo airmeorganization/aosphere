@@ -745,6 +745,64 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 				res.BackupPath, res.SizeBytes, res.IntegrityOK)
 		}
 
+	case "crm_convert_deal":
+		dealID, _ := params.Arguments["deal_id"].(string)
+		idempKey, _ := params.Arguments["idempotency_key"].(string)
+		var authContext *auth.AuthContext
+		if sessCtx != nil {
+			authContext = sessCtx.AuthCtx
+		}
+		inv, err := m.service.ConvertDealToInvoice(toolCtx, orgID, dealID, authContext, idempKey)
+		if err != nil {
+			textResult = fmt.Sprintf("Error converting deal to invoice: %v", err)
+			isErr = true
+		} else {
+			textResult = fmt.Sprintf("Deal %s successfully converted to Invoice %s ($%.2f). Deal marked as 'won'.",
+				dealID, inv.InvoiceNumber, inv.TotalAmount)
+		}
+
+	case "erp_pay_purchase_order":
+		poID, _ := params.Arguments["po_id"].(string)
+		idempKey, _ := params.Arguments["idempotency_key"].(string)
+		var authContext *auth.AuthContext
+		if sessCtx != nil {
+			authContext = sessCtx.AuthCtx
+		}
+		po, err := m.service.PayPurchaseOrder(toolCtx, orgID, poID, authContext, idempKey)
+		if err != nil {
+			textResult = fmt.Sprintf("Error paying purchase order: %v", err)
+			isErr = true
+		} else {
+			textResult = fmt.Sprintf("Purchase Order %s (%s) marked 'paid'. Double-entry ledger transaction posted (Debit: AP, Credit: Cash).",
+				po.PONumber, po.ID)
+		}
+
+	case "hr_lock_payroll":
+		period, _ := params.Arguments["period"].(string)
+		var authContext *auth.AuthContext
+		if sessCtx != nil {
+			authContext = sessCtx.AuthCtx
+		}
+		res, err := m.service.LockPayroll(toolCtx, orgID, period, authContext)
+		if err != nil {
+			textResult = fmt.Sprintf("Error locking payroll: %v", err)
+			isErr = true
+		} else {
+			textResult = fmt.Sprintf("Payroll locked for period %s: %d timesheets disbursed, $%.2f gross total. Operating Expense recorded and posted to ledger (Entry: %s).",
+				res.Period, res.TimesheetsPaid, res.TotalGrossDollars, res.JournalEntryID)
+		}
+
+	case "docs_search":
+		query, _ := params.Arguments["query"].(string)
+		results, err := m.service.GlobalSearch(toolCtx, orgID, query)
+		if err != nil {
+			textResult = fmt.Sprintf("Error searching docs: %v", err)
+			isErr = true
+		} else {
+			bytes, _ := json.MarshalIndent(results, "", "  ")
+			textResult = string(bytes)
+		}
+
 	default:
 		return &JSONRPCResponse{
 			JSONRPC: "2.0",

@@ -268,3 +268,27 @@ type FinancialSummary struct {
 	PaidCount    int     `json:"paid_count"`
 	PendingCount int     `json:"pending_count"`
 }
+
+type Document struct {
+	ID        string `json:"id"`
+	OrgID     string `json:"org_id"`
+	Title     string `json:"title"`
+	Category  string `json:"category"`
+	Content   string `json:"content"`
+	Author    string `json:"author"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+type Timesheet struct {
+	ID            string    `json:"id"`
+	OrgID         string    `json:"org_id"`
+	EmployeeID    string    `json:"employee_id"`
+	EmployeeName  string    `json:"employee_name,omitempty"`
+	WorkDate      string    `json:"work_date"`
+	HoursWorked   float64   `json:"hours_worked"`
+	OvertimeHours float64   `json:"overtime_hours"`
+	Status        string    `json:"status"` // logged, approved, paid
+	HourlyRate    float64   `json:"hourly_rate"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+

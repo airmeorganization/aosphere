@@ -538,6 +538,59 @@ func (s *Store) GetEmployees() ([]db.Employee, error) {
 	return list, nil
 }
 
+func (s *Store) CreateEmployee(orgID, name, role, department, email, phone string, hourlyRate float64) (*db.Employee, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	id := "emp_" + uuid.New().String()[:8]
+	now := time.Now()
+	_, err := s.db.Exec(`INSERT INTO employees (id, org_id, name, role, department, hourly_rate, email, phone, status, hired_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)`,
+		id, orgID, name, role, department, hourlyRate, email, phone, now.Format("2006-01-02"))
+	if err != nil {
+		return nil, err
+	}
+	return &db.Employee{
+		ID:         id,
+		OrgID:      orgID,
+		Name:       name,
+		Role:       role,
+		Department: department,
+		HourlyRate: hourlyRate,
+		Status:     "active",
+		Email:      email,
+		Phone:      phone,
+		HiredAt:    now.Format("2006-01-02"),
+		CreatedAt:  now,
+	}, nil
+}
+
+func (s *Store) GetTimesheetsForOrg(orgID string) ([]db.Timesheet, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	rows, err := s.db.Query(`SELECT t.id, t.org_id, t.employee_id, COALESCE(e.name, '') as employee_name,
+		t.work_date, t.hours_worked, t.overtime_hours, t.status, t.hourly_rate, t.created_at
+		FROM timesheets t LEFT JOIN employees e ON t.employee_id = e.id
+		WHERE t.org_id = ?
+		ORDER BY t.work_date DESC, t.created_at DESC`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []db.Timesheet
+	for rows.Next() {
+		var t db.Timesheet
+		if err := rows.Scan(&t.ID, &t.OrgID, &t.EmployeeID, &t.EmployeeName, &t.WorkDate, &t.HoursWorked, &t.OvertimeHours, &t.Status, &t.HourlyRate, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, t)
+	}
+	return list, nil
+}
+
+
 func (s *Store) GetShifts() ([]db.Shift, error) {
 	rows, err := s.db.Query(`SELECT sh.id, sh.employee_id, COALESCE(e.name, '') as employee_name,
 		sh.shift_date, sh.start_time, sh.end_time, sh.station, sh.status, sh.created_at

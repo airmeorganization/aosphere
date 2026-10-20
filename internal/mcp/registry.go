@@ -206,6 +206,59 @@ var Registry = map[string]ToolDefinition{
 			},
 		},
 	},
+	"crm_convert_deal": {
+		Name:               "crm_convert_deal",
+		Category:           CategoryHighImpactMutation,
+		Description:        "Converts an accepted sales deal into an official customer invoice with line items and financial tracking.",
+		RequiredPermission: auth.PermManageFinance,
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"deal_id":         map[string]interface{}{"type": "string"},
+				"idempotency_key": map[string]interface{}{"type": "string", "description": "Unique request key for safe retries"},
+			},
+			"required": []string{"deal_id"},
+		},
+	},
+	"erp_pay_purchase_order": {
+		Name:               "erp_pay_purchase_order",
+		Category:           CategoryHighImpactMutation,
+		Description:        "Records vendor payment for a received Purchase Order and posts balancing entries to Accounts Payable and Cash ledger accounts.",
+		RequiredPermission: auth.PermManageFinance,
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"po_id":           map[string]interface{}{"type": "string"},
+				"idempotency_key": map[string]interface{}{"type": "string", "description": "Unique request key for safe retries"},
+			},
+			"required": []string{"po_id"},
+		},
+	},
+	"hr_lock_payroll": {
+		Name:               "hr_lock_payroll",
+		Category:           CategoryHighImpactMutation,
+		Description:        "Locks all approved timesheets for a billing period, records internal payroll expense, and posts disbursements to General Ledger.",
+		RequiredPermission: auth.PermManageHR,
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"period": map[string]interface{}{"type": "string", "description": "Period in YYYY-MM format (e.g. 2026-10)"},
+			},
+		},
+	},
+	"docs_search": {
+		Name:               "docs_search",
+		Category:           CategoryReadOnly,
+		Description:        "Searches documents and internal knowledge repository by keywords.",
+		RequiredPermission: auth.PermRead,
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"query": map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"query"},
+		},
+	},
 }
 
 // ValidateToolInput validates that the arguments map satisfies required fields and basic schema rules

@@ -1418,9 +1418,16 @@ const app = {
       { name: 'crm_manage_deal', desc: 'Update deal stage or log client notes.' },
       { name: 'fin_get_summary', desc: 'Get real-time Profit & Loss (P&L), unpaid client receivables, and financial health.' },
       { name: 'fin_create_invoice', desc: 'Generate a compliant client invoice with line items, tax, and optional recurring schedule.' },
+      { name: 'fin_trial_balance', desc: 'Inspect the General Ledger trial balance, showing debits, credits, and balance verification across all accounts.' },
+      { name: 'crm_convert_deal', desc: 'Converts an accepted sales deal into an official customer invoice with line items and financial tracking.' },
+      { name: 'erp_pay_purchase_order', desc: 'Records vendor payment for a received Purchase Order and posts balancing entries to Accounts Payable and Cash ledger accounts.' },
+      { name: 'hr_lock_payroll', desc: 'Locks all approved timesheets for a billing period, records internal payroll expense, and posts disbursements to General Ledger.' },
+      { name: 'docs_search', desc: 'Searches documents and internal knowledge repository by keywords.' },
       { name: 'presence_sync_nap', desc: 'Synchronize official business Name, Address, Phone (NAP) across search engines and directories.' },
       { name: 'reputation_draft_reply', desc: 'Analyze review sentiment and draft an empathetic response for human review.' },
-      { name: 'approvals_list_pending', desc: 'View actions waiting for human authorization in the Approval Inbox.' }
+      { name: 'approvals_list_pending', desc: 'View actions waiting for human authorization in the Approval Inbox.' },
+      { name: 'sys_reconcile', desc: 'Run business workflow reconciliation scan to detect orphan approvals and anomalies.' },
+      { name: 'sys_backup', desc: 'Trigger an atomic online SQLite snapshot backup and run integrity check verification.' }
     ];
 
     this.data.tools = tools;
@@ -1452,12 +1459,19 @@ const app = {
       erp_check_stock: { below_threshold_only: true },
       erp_adjust_stock: { sku_id: 'sku_01', delta: -5, reason: 'Demo consumption' },
       erp_create_purchase_order: { supplier_id: 'sup_01', items: [{ sku_code: 'SKU-CORE-100', quantity: 20, unit_cost: 45.0 }] },
+      erp_pay_purchase_order: { po_id: 'po_01' },
       crm_manage_deal: { deal_id: 'deal_01', stage: 'won' },
+      crm_convert_deal: { deal_id: 'deal_01' },
       fin_get_summary: {},
       fin_create_invoice: { customer_id: 'cust_01', items: [{ desc: 'Hardware Support', qty: 1, price: 1200 }], due_date: '2026-11-20' },
+      fin_trial_balance: {},
+      hr_lock_payroll: { period: '2026-10' },
+      docs_search: { query: 'sensor' },
       presence_sync_nap: { business_name: 'AOSphere Technologies Ltd', address: '742 Innovation Blvd, Suite 400', phone: '+1 (512) 555-0199', website: 'https://aosphere.example.com' },
       reputation_draft_reply: { review_id: 'rev_03', reply_text: 'Thank you for your feedback! We have resolved the shipping delay.' },
-      approvals_list_pending: {}
+      approvals_list_pending: {},
+      sys_reconcile: {},
+      sys_backup: { prefix: 'manual_ui' }
     };
 
     argsBox.value = JSON.stringify(presets[toolName] || {}, null, 2);

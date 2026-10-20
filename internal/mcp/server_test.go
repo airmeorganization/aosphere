@@ -420,3 +420,67 @@ func TestMCPServer_TrialBalanceAndBackup(t *testing.T) {
 	}
 }
 
+func TestMCPServer_Phase6LifecycleTools(t *testing.T) {
+	server, _, _, cleanup := setupTestMCPServer(t)
+	defer cleanup()
+
+	adminCtx := &SessionContext{
+		ID:      "sess_admin_lifecycle",
+		AgentID: "agent_admin",
+		AuthCtx: &auth.AuthContext{
+			UserID:   "usr_admin",
+			OrgID:    "org_default",
+			Email:    "admin@aosphere.local",
+			Name:     "admin_bot",
+			Role:     auth.RoleOwner,
+			IsAPIKey: true,
+		},
+	}
+
+	// 1. Tool docs_search
+	reqDocs := &JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "tools/call",
+		Params:  json.RawMessage(`{"name": "docs_search", "arguments": {"query": "sensor"}}`),
+	}
+	respDocs := server.ProcessRequestWithContext(reqDocs, adminCtx)
+	if respDocs.Error != nil {
+		t.Fatalf("expected docs_search success, got: %v", respDocs.Error)
+	}
+	resDocsMap, _ := respDocs.Result.(map[string]interface{})
+	if isErr, _ := resDocsMap["isError"].(bool); isErr {
+		t.Fatalf("docs_search returned error: %+v", resDocsMap)
+	}
+
+	// 2. Tool crm_convert_deal
+	reqConvert := &JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      2,
+		Method:  "tools/call",
+		Params:  json.RawMessage(`{"name": "crm_convert_deal", "arguments": {"deal_id": "deal_03"}}`),
+	}
+	respConvert := server.ProcessRequestWithContext(reqConvert, adminCtx)
+	if respConvert.Error != nil {
+		t.Fatalf("expected crm_convert_deal success, got: %v", respConvert.Error)
+	}
+	resConvMap, _ := respConvert.Result.(map[string]interface{})
+	if isErr, _ := resConvMap["isError"].(bool); isErr {
+		t.Fatalf("crm_convert_deal returned error: %+v", resConvMap)
+	}
+
+	// 3. Tool erp_pay_purchase_order with non-existent PO returns isError
+	reqPay := &JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      3,
+		Method:  "tools/call",
+		Params:  json.RawMessage(`{"name": "erp_pay_purchase_order", "arguments": {"po_id": "po_fake_999"}}`),
+	}
+	respPay := server.ProcessRequestWithContext(reqPay, adminCtx)
+	resPayMap, _ := respPay.Result.(map[string]interface{})
+	if isErr, _ := resPayMap["isError"].(bool); !isErr {
+		t.Errorf("expected isError=true for non-existent PO payment")
+	}
+}
+
+

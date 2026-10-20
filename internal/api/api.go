@@ -303,6 +303,44 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 		writeJSON(w, po)
 	})
 
+	mux.HandleFunc("/api/purchase-orders/pay", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		authCtx := GetAuthContext(r.Context())
+		if authCtx != nil && !authCtx.Can(auth.PermManageFinance) {
+			w.WriteHeader(http.StatusForbidden)
+			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission manage_finance required"})
+			return
+		}
+		var req struct {
+			POID           string `json:"po_id"`
+			IdempotencyKey string `json:"idempotency_key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		idempKey := r.Header.Get("Idempotency-Key")
+		if idempKey == "" {
+			idempKey = req.IdempotencyKey
+		}
+		orgID := getOrgID(r)
+		po, err := a.service.PayPurchaseOrder(r.Context(), orgID, req.POID, authCtx, idempKey)
+		if err != nil {
+			if errors.Is(err, service.ErrPONotReceived) {
+				w.WriteHeader(http.StatusConflict)
+				writeJSON(w, map[string]string{"error": "invalid_transition", "message": err.Error()})
+				return
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		a.Broadcast("po_paid", fmt.Sprintf("{\"po_number\":\"%s\"}", po.PONumber))
+		writeJSON(w, po)
+	})
+
 	// CRM
 	mux.HandleFunc("/api/customers", func(w http.ResponseWriter, r *http.Request) {
 		custs, err := a.store.GetCustomers()
@@ -362,6 +400,63 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 		}
 		a.Broadcast("deal_stage_changed", fmt.Sprintf("{\"deal_id\":\"%s\",\"stage\":\"%s\"}", req.DealID, req.Stage))
 		writeJSON(w, map[string]string{"status": "ok"})
+	})
+
+	mux.HandleFunc("/api/deals/quote", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		authCtx := GetAuthContext(r.Context())
+		var req struct {
+			DealID string                `json:"deal_id"`
+			Items  []service.InvoiceItem `json:"items"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		orgID := getOrgID(r)
+		quote, err := a.service.GenerateQuote(r.Context(), orgID, req.DealID, req.Items, authCtx)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		a.Broadcast("quote_generated", fmt.Sprintf("{\"quote_number\":\"%s\",\"deal_id\":\"%s\"}", quote.QuoteNumber, req.DealID))
+		writeJSON(w, quote)
+	})
+
+	mux.HandleFunc("/api/deals/convert", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		authCtx := GetAuthContext(r.Context())
+		if authCtx != nil && !authCtx.Can(auth.PermManageFinance) {
+			w.WriteHeader(http.StatusForbidden)
+			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission manage_finance required"})
+			return
+		}
+		var req struct {
+			DealID         string `json:"deal_id"`
+			IdempotencyKey string `json:"idempotency_key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		idempKey := r.Header.Get("Idempotency-Key")
+		if idempKey == "" {
+			idempKey = req.IdempotencyKey
+		}
+		orgID := getOrgID(r)
+		inv, err := a.service.ConvertDealToInvoice(r.Context(), orgID, req.DealID, authCtx, idempKey)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		a.Broadcast("deal_converted", fmt.Sprintf("{\"deal_id\":\"%s\",\"invoice_number\":\"%s\"}", req.DealID, inv.InvoiceNumber))
+		writeJSON(w, inv)
 	})
 
 	// FINANCIAL
@@ -493,12 +588,106 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 
 	// HRMS & PRODUCTIVITY
 	mux.HandleFunc("/api/employees", func(w http.ResponseWriter, r *http.Request) {
+		orgID := getOrgID(r)
+		if r.Method == "POST" {
+			authCtx := GetAuthContext(r.Context())
+			if authCtx != nil && !authCtx.Can(auth.PermManageHR) {
+				w.WriteHeader(http.StatusForbidden)
+				writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission manage_hr required"})
+				return
+			}
+			var req struct {
+				Name       string  `json:"name"`
+				Role       string  `json:"role"`
+				Department string  `json:"department"`
+				Email      string  `json:"email"`
+				Phone      string  `json:"phone"`
+				HourlyRate float64 `json:"hourly_rate"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			emp, err := a.store.CreateEmployee(orgID, req.Name, req.Role, req.Department, req.Email, req.Phone, req.HourlyRate)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			a.Broadcast("employee_added", fmt.Sprintf("{\"id\":\"%s\",\"name\":\"%s\"}", emp.ID, emp.Name))
+			writeJSON(w, emp)
+			return
+		}
 		emps, err := a.store.GetEmployees()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, emps)
+	})
+
+	mux.HandleFunc("/api/timesheets", func(w http.ResponseWriter, r *http.Request) {
+		orgID := getOrgID(r)
+		ts, err := a.store.GetTimesheetsForOrg(orgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, ts)
+	})
+
+	mux.HandleFunc("/api/timesheets/approve", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		authCtx := GetAuthContext(r.Context())
+		if authCtx != nil && !authCtx.Can(auth.PermManageHR) {
+			w.WriteHeader(http.StatusForbidden)
+			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission manage_hr required"})
+			return
+		}
+		var req struct {
+			TimesheetID string `json:"timesheet_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		orgID := getOrgID(r)
+		if err := a.service.ApproveTimesheet(r.Context(), orgID, req.TimesheetID, authCtx); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		a.Broadcast("timesheet_approved", fmt.Sprintf("{\"timesheet_id\":\"%s\"}", req.TimesheetID))
+		writeJSON(w, map[string]string{"status": "ok"})
+	})
+
+	mux.HandleFunc("/api/payroll/lock", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		authCtx := GetAuthContext(r.Context())
+		if authCtx != nil && !authCtx.Can(auth.PermManageHR) {
+			w.WriteHeader(http.StatusForbidden)
+			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission manage_hr required"})
+			return
+		}
+		var req struct {
+			Period string `json:"period"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		orgID := getOrgID(r)
+		res, err := a.service.LockPayroll(r.Context(), orgID, req.Period, authCtx)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		a.Broadcast("payroll_locked", fmt.Sprintf("{\"period\":\"%s\",\"total_gross\":%.2f}", res.Period, res.TotalGrossDollars))
+		writeJSON(w, res)
 	})
 
 	mux.HandleFunc("/api/shifts", func(w http.ResponseWriter, r *http.Request) {
@@ -773,5 +962,145 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			return
 		}
 		writeJSON(w, execs)
+	})
+
+	// Document Repository
+	mux.HandleFunc("/api/documents", func(w http.ResponseWriter, r *http.Request) {
+		orgID := getOrgID(r)
+		switch r.Method {
+		case "GET":
+			docs, err := a.service.ListDocuments(r.Context(), orgID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, docs)
+		case "POST":
+			var req struct {
+				Title    string `json:"title"`
+				Category string `json:"category"`
+				Content  string `json:"content"`
+				Author   string `json:"author"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if req.Author == "" {
+				req.Author = "Admin"
+			}
+			doc, err := a.service.CreateDocument(r.Context(), orgID, req.Title, req.Category, req.Content, req.Author)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			a.Broadcast("document_created", fmt.Sprintf("{\"id\":\"%s\",\"title\":\"%s\"}", doc.ID, doc.Title))
+			writeJSON(w, doc)
+		case "DELETE":
+			docID := r.URL.Query().Get("id")
+			if docID == "" {
+				http.Error(w, "missing document id", http.StatusBadRequest)
+				return
+			}
+			if err := a.service.DeleteDocument(r.Context(), orgID, docID); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			a.Broadcast("document_deleted", fmt.Sprintf("{\"id\":\"%s\"}", docID))
+			writeJSON(w, map[string]string{"status": "ok"})
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	// Global Unified Search
+	mux.HandleFunc("/api/search", func(w http.ResponseWriter, r *http.Request) {
+		orgID := getOrgID(r)
+		query := r.URL.Query().Get("q")
+		results, err := a.service.GlobalSearch(r.Context(), orgID, query)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, results)
+	})
+
+	// CSV Export
+	mux.HandleFunc("/api/export", func(w http.ResponseWriter, r *http.Request) {
+		orgID := getOrgID(r)
+		entityType := r.URL.Query().Get("type")
+		data, err := a.service.ExportCSV(r.Context(), orgID, entityType)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/csv")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s_export.csv", entityType))
+		w.WriteHeader(http.StatusOK)
+		w.Write(data)
+	})
+
+	// In-App Notifications
+	mux.HandleFunc("/api/notifications", func(w http.ResponseWriter, r *http.Request) {
+		orgID := getOrgID(r)
+		unreadOnly := r.URL.Query().Get("unread") == "true"
+		notifs, err := a.service.ListNotifications(r.Context(), orgID, unreadOnly)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, notifs)
+	})
+
+	mux.HandleFunc("/api/notifications/read", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		orgID := getOrgID(r)
+		var req struct {
+			ID string `json:"id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := a.service.MarkNotificationRead(r.Context(), orgID, req.ID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]string{"status": "ok"})
+	})
+
+	// Organization Profile & Settings
+	mux.HandleFunc("/api/organization", func(w http.ResponseWriter, r *http.Request) {
+		orgID := getOrgID(r)
+		if r.Method == "POST" || r.Method == "PUT" {
+			authCtx := GetAuthContext(r.Context())
+			if authCtx != nil && !authCtx.Can(auth.PermAdmin) {
+				w.WriteHeader(http.StatusForbidden)
+				writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission admin required"})
+				return
+			}
+			var p service.CompanyProfile
+			if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			p.OrgID = orgID
+			if err := a.service.UpdateCompanyProfile(r.Context(), p); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			a.Broadcast("organization_updated", fmt.Sprintf("{\"org_id\":\"%s\",\"name\":\"%s\"}", orgID, p.CompanyName))
+			writeJSON(w, map[string]string{"status": "ok"})
+			return
+		}
+		profile, err := a.service.GetCompanyProfile(r.Context(), orgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, profile)
 	})
 }
