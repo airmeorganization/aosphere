@@ -355,9 +355,14 @@ func seedStarterData(db *sql.DB) error {
 		('rev_03', 'Google', 'Alex Tremblay', 2, 'Delivery was held up at regional logistics depot for 3 days without tracking status updates. Hardware is solid though.', 'urgent', 'Alex, we sincerely apologize for the depot courier delay. Our logistics agent has flagged this with the carrier, and we have credited your account with priority shipping on your next batch.', 'drafted_by_agent')
 	`)
 
+	// Seed a real pending PO and link its human approval to that exact record.
+	db.Exec(`INSERT INTO purchase_orders (id, po_number, supplier_id, status, total_amount, items_json, created_by_type, actor_id, notes) VALUES
+		('po_01', 'PO-2026-001', 'sup_01', 'pending_approval', 2250.00, '[{"sku_code":"SKU-CORE-100","sku_name":"Quantum Micro-Controller V2","quantity":50,"unit_cost":45.0}]', 'agent', 'agt_inventory_watchdog', 'Seeded low-stock reorder awaiting human approval.')
+	`)
+
 	// Seed Pending HITL Approval (Agent generated low stock reorder!)
 	db.Exec(`INSERT INTO approvals (id, action_type, title, description, payload_json, status, requested_by_type, requested_by_id) VALUES
-		('appr_01', 'create_po', 'Automated Purchase Order for SKU-CORE-100', 'Stock fell to 6 units (Min threshold: 15). Agent generated PO for 50 units ($2,250.00) from Apex Components Ltd.', '{"sku_code":"SKU-CORE-100","supplier_id":"sup_01","quantity":50,"unit_cost":45.0,"total":2250.0}', 'pending', 'agent', 'agt_inventory_watchdog')
+		('appr_01', 'create_po', 'Automated Purchase Order for SKU-CORE-100', 'Stock fell to 6 units (Min threshold: 15). Agent generated PO for 50 units ($2,250.00) from Apex Components Ltd.', '{"purchase_order_id":"po_01","po_number":"PO-2026-001","supplier_id":"sup_01","total_amount":2250.0,"items":[{"sku_code":"SKU-CORE-100","sku_name":"Quantum Micro-Controller V2","quantity":50,"unit_cost":45.0}]}', 'pending', 'agent', 'agt_inventory_watchdog')
 	`)
 
 	// Seed initial audit log
