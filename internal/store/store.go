@@ -238,7 +238,7 @@ func (s *Store) UpdateStock(skuID string, delta int, reason, actorType, actorID 
 		})
 
 		poID := "po_" + uuid.New().String()[:8]
-		poNumber := fmt.Sprintf("PO-%d", time.Now().Unix())
+		poNumber := fmt.Sprintf("PO-%s", uuid.New().String()[:8])
 		autoReorderTriggered = true
 		autoReorderPONumber = poNumber
 		autoReorderItems = string(itemsJSON)
@@ -539,7 +539,7 @@ func (s *Store) GetInvoices() ([]db.Invoice, error) {
 
 func (s *Store) CreateInvoice(customerID string, itemsJSON string, subtotal, tax float64, dueDate, recurring, actorType, actorID string) (*db.Invoice, error) {
 	id := "inv_" + uuid.New().String()[:8]
-	invNum := fmt.Sprintf("INV-%d", time.Now().Unix())
+	invNum := fmt.Sprintf("INV-%s", uuid.New().String()[:8])
 	total := subtotal + tax
 	now := time.Now().Format("2006-01-02")
 
