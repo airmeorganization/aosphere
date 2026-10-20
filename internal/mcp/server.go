@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 
 
@@ -150,16 +151,25 @@ func (m *MCPServer) HandlePostMessage(w http.ResponseWriter, r *http.Request) {
 
 	respBytes, _ := json.Marshal(resp)
 
-	// If session has active SSE channel, send through channel and reply 202
+	// Enqueue under the session read lock. Cleanup needs the write lock
+	// before closing the channel, so a concurrent disconnect cannot cause a
+	// send-on-closed-channel panic. Never block on a full/abandoned session.
 	if sessionID != "" {
 		m.mu.RLock()
 		ch, ok := m.sessions[sessionID]
-		m.mu.RUnlock()
 		if ok {
-			ch <- respBytes
-			w.WriteHeader(http.StatusAccepted)
-			return
+			select {
+			case ch <- respBytes:
+				m.mu.RUnlock()
+				w.WriteHeader(http.StatusAccepted)
+				return
+			default:
+				m.mu.RUnlock()
+				http.Error(w, "MCP session queue is full", http.StatusServiceUnavailable)
+				return
+			}
 		}
+		m.mu.RUnlock()
 	}
 
 	// Direct HTTP response fallback
@@ -532,6 +542,7 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, agentID string) *JSONRPC
 					"text": textResult,
 				},
 			},
+			"isError": strings.HasPrefix(textResult, "Error"),
 		},
 	}
 }
