@@ -79,19 +79,85 @@ func (s *Store) GetApprovals(status string) ([]db.Approval, error) {
 }
 
 func (s *Store) DecideApproval(id, decision, decidedBy string) error {
-	now := time.Now()
-	res, err := s.db.Exec(`UPDATE approvals SET status = ?, decided_by = ?, decided_at = ? WHERE id = ?`,
-		decision, decidedBy, now, id)
+	if decision != "approved" && decision != "rejected" {
+		return fmt.Errorf("invalid approval decision %q: expected approved or rejected", decision)
+	}
+	if id == "" || decidedBy == "" {
+		return fmt.Errorf("approval id and decision-maker are required")
+	}
+
+	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	rows, _ := res.RowsAffected()
-	if rows == 0 {
+	defer tx.Rollback()
+
+	var actionType, payloadJSON, currentStatus string
+	err = tx.QueryRow(`SELECT action_type, payload_json, status FROM approvals WHERE id = ?`, id).
+		Scan(&actionType, &payloadJSON, &currentStatus)
+	if err == sql.ErrNoRows {
 		return fmt.Errorf("approval %s not found", id)
 	}
+	if err != nil {
+		return err
+	}
+	if currentStatus != "pending" {
+		return fmt.Errorf("approval %s is already %s", id, currentStatus)
+	}
 
-	_ = s.LogAudit("human", decidedBy, "DECIDE_APPROVAL", "approvals", id, fmt.Sprintf("Decision: %s", decision), "{}")
-	return nil
+	// Approvals for purchase orders carry the exact PO ID in the payload. The
+	// decision and the protected PO state change are committed atomically.
+	if actionType == "create_po" {
+		var payload struct {
+			PurchaseOrderID string `json:"purchase_order_id"`
+		}
+		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+			return fmt.Errorf("invalid purchase-order approval payload: %w", err)
+		}
+		if payload.PurchaseOrderID != "" {
+			poStatus := "cancelled"
+			if decision == "approved" {
+				poStatus = "ordered"
+			}
+			res, err := tx.Exec(`UPDATE purchase_orders SET status = ? WHERE id = ? AND status = 'pending_approval'`,
+				poStatus, payload.PurchaseOrderID)
+			if err != nil {
+				return err
+			}
+			changed, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if changed != 1 {
+				return fmt.Errorf("purchase order %s is missing or no longer pending approval", payload.PurchaseOrderID)
+			}
+		}
+	}
+
+	now := time.Now()
+	res, err := tx.Exec(`UPDATE approvals SET status = ?, decided_by = ?, decided_at = ?
+		WHERE id = ? AND status = 'pending'`, decision, decidedBy, now, id)
+	if err != nil {
+		return err
+	}
+	changed, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return fmt.Errorf("approval %s has already been decided", id)
+	}
+
+	auditID := "aud_" + uuid.New().String()[:8]
+	_, err = tx.Exec(`INSERT INTO audit_logs
+		(id, actor_type, actor_id, action, entity_type, entity_id, reasoning, metadata_json)
+		VALUES (?, 'human', ?, 'DECIDE_APPROVAL', 'approvals', ?, ?, ?)`,
+		auditID, decidedBy, id, fmt.Sprintf("Decision: %s", decision),
+		fmt.Sprintf(`{"decision":%q,"action_type":%q}`, decision, actionType))
+	if err != nil {
+		return fmt.Errorf("record approval audit event: %w", err)
+	}
+	return tx.Commit()
 }
 
 // ----------------- ERP & SUPPLY CHAIN -----------------
@@ -170,20 +236,36 @@ func (s *Store) UpdateStock(skuID string, delta int, reason, actorType, actorID 
 		// Safety threshold: If PO > $1,000, route to HITL approval. Otherwise auto-draft.
 		if totalAmount > 1000.0 {
 			apprID := "appr_" + uuid.New().String()[:8]
-			tx.Exec(`INSERT INTO approvals (id, action_type, title, description, payload_json, status, requested_by_type, requested_by_id)
+			payloadJSON, err := json.Marshal(map[string]interface{}{
+				"purchase_order_id": poID,
+				"po_number":         poNumber,
+				"supplier_id":       supplierID,
+				"total_amount":      totalAmount,
+				"items":             json.RawMessage(itemsJSON),
+			})
+			if err != nil {
+				return nil, fmt.Errorf("build reorder approval payload: %w", err)
+			}
+			if _, err := tx.Exec(`INSERT INTO approvals (id, action_type, title, description, payload_json, status, requested_by_type, requested_by_id)
 				VALUES (?, 'create_po', ?, ?, ?, 'pending', 'agent', ?)`,
 				apprID,
 				fmt.Sprintf("Auto PO for %s (Low Stock: %d)", code, newStock),
 				fmt.Sprintf("Stock dropped to %d (Min: %d). Need %d units at $%.2f ($%.2f total).", newStock, minThresh, reorderQty, unitCost, totalAmount),
-				string(itemsJSON), actorID)
+				string(payloadJSON), actorID); err != nil {
+				return nil, fmt.Errorf("create reorder approval: %w", err)
+			}
 
-			tx.Exec(`INSERT INTO purchase_orders (id, po_number, supplier_id, status, total_amount, items_json, created_by_type, actor_id, notes)
+			if _, err := tx.Exec(`INSERT INTO purchase_orders (id, po_number, supplier_id, status, total_amount, items_json, created_by_type, actor_id, notes)
 				VALUES (?, ?, ?, 'pending_approval', ?, ?, ?, ?, 'Triggered by low stock workflow. Pending human safety sign-off.')`,
-				poID, poNumber, supplierID, totalAmount, string(itemsJSON), actorType, actorID)
+				poID, poNumber, supplierID, totalAmount, string(itemsJSON), actorType, actorID); err != nil {
+				return nil, fmt.Errorf("create reorder purchase order: %w", err)
+			}
 		} else {
-			tx.Exec(`INSERT INTO purchase_orders (id, po_number, supplier_id, status, total_amount, items_json, created_by_type, actor_id, notes)
+			if _, err := tx.Exec(`INSERT INTO purchase_orders (id, po_number, supplier_id, status, total_amount, items_json, created_by_type, actor_id, notes)
 				VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, 'Auto-generated under $1000 threshold.')`,
-				poID, poNumber, supplierID, totalAmount, string(itemsJSON), actorType, actorID)
+				poID, poNumber, supplierID, totalAmount, string(itemsJSON), actorType, actorID); err != nil {
+				return nil, fmt.Errorf("create draft reorder purchase order: %w", err)
+			}
 		}
 	}
 
@@ -249,22 +331,87 @@ func (s *Store) GetPurchaseOrders() ([]db.PurchaseOrder, error) {
 }
 
 func (s *Store) CreatePurchaseOrder(supplierID string, itemsJSON string, total float64, actorType, actorID, notes string) (*db.PurchaseOrder, error) {
+	if supplierID == "" || actorID == "" {
+		return nil, fmt.Errorf("supplier id and actor id are required")
+	}
+	var items []struct {
+		SKUCode  string  `json:"sku_code"`
+		Quantity int     `json:"quantity"`
+		UnitCost float64 `json:"unit_cost"`
+	}
+	if err := json.Unmarshal([]byte(itemsJSON), &items); err != nil {
+		return nil, fmt.Errorf("invalid purchase-order items JSON: %w", err)
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf("purchase order must contain at least one item")
+	}
+	calculatedTotal := 0.0
+	for i, item := range items {
+		if item.Quantity <= 0 || item.UnitCost < 0 {
+			return nil, fmt.Errorf("item %d must have a positive quantity and non-negative unit cost", i+1)
+		}
+		calculatedTotal += float64(item.Quantity) * item.UnitCost
+	}
+	// Never use a caller-supplied total as the value on which the safety policy depends.
+	// A mismatch is rejected so the caller can correct stale or malformed inputs.
+	if total < 0 || (calculatedTotal-total > 0.01) || (total-calculatedTotal > 0.01) {
+		return nil, fmt.Errorf("purchase-order total mismatch: server calculated %.2f but request supplied %.2f", calculatedTotal, total)
+	}
+	total = calculatedTotal
+
 	id := "po_" + uuid.New().String()[:8]
-	poNum := fmt.Sprintf("PO-%d", time.Now().Unix())
+	poNum := fmt.Sprintf("PO-%s", uuid.New().String()[:8])
 	status := "ordered"
-	if total > 1000.0 && actorType == "agent" {
+	if total > 1000.0 {
 		status = "pending_approval"
 	}
 
-	_, err := s.db.Exec(`INSERT INTO purchase_orders (id, po_number, supplier_id, status, total_amount, items_json, created_by_type, actor_id, notes)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, poNum, supplierID, status, total, itemsJSON, actorType, actorID, notes)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
 	}
+	defer tx.Rollback()
 
-	_ = s.LogAudit(actorType, actorID, "CREATE_PURCHASE_ORDER", "purchase_orders", id,
-		fmt.Sprintf("Created PO %s total $%.2f (status: %s)", poNum, total, status), itemsJSON)
+	if _, err := tx.Exec(`INSERT INTO purchase_orders
+		(id, po_number, supplier_id, status, total_amount, items_json, created_by_type, actor_id, notes)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, poNum, supplierID, status, total, itemsJSON, actorType, actorID, notes); err != nil {
+		return nil, err
+	}
+
+	if status == "pending_approval" {
+		apprID := "appr_" + uuid.New().String()[:8]
+		payload, err := json.Marshal(map[string]interface{}{
+			"purchase_order_id": id,
+			"po_number":         poNum,
+			"supplier_id":       supplierID,
+			"total_amount":      total,
+			"items":             json.RawMessage(itemsJSON),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("build purchase-order approval payload: %w", err)
+		}
+		if _, err := tx.Exec(`INSERT INTO approvals
+			(id, action_type, title, description, payload_json, status, requested_by_type, requested_by_id)
+			VALUES (?, 'create_po', ?, ?, ?, 'pending', ?, ?)`,
+			apprID, fmt.Sprintf("Purchase order %s requires approval", poNum),
+			fmt.Sprintf("Purchase order total is %.2f, above the 1000.00 approval threshold.", total),
+			string(payload), actorType, actorID); err != nil {
+			return nil, fmt.Errorf("create purchase-order approval: %w", err)
+		}
+	}
+
+	auditID := "aud_" + uuid.New().String()[:8]
+	if _, err := tx.Exec(`INSERT INTO audit_logs
+		(id, actor_type, actor_id, action, entity_type, entity_id, reasoning, metadata_json)
+		VALUES (?, ?, ?, 'CREATE_PURCHASE_ORDER', 'purchase_orders', ?, ?, ?)`,
+		auditID, actorType, actorID, id,
+		fmt.Sprintf("Created PO %s total $%.2f (status: %s)", poNum, total, status), itemsJSON); err != nil {
+		return nil, fmt.Errorf("record purchase-order audit event: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 
 	return &db.PurchaseOrder{
 		ID:            id,
