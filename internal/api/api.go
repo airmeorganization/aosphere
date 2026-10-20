@@ -12,13 +12,15 @@ import (
 
 type API struct {
 	store      *store.Store
+	env        string
 	clients    map[chan string]bool
 	clientsMu  sync.RWMutex
 }
 
-func NewAPI(s *store.Store) *API {
+func NewAPI(s *store.Store, env string) *API {
 	return &API{
 		store:   s,
+		env:     env,
 		clients: make(map[chan string]bool),
 	}
 }
@@ -83,6 +85,12 @@ func writeJSON(w http.ResponseWriter, data interface{}) {
 }
 
 func (a *API) RegisterRoutes(mux *http.ServeMux) {
+	// Health & Diagnostics Endpoints
+	mux.HandleFunc("/healthz", a.HandleHealthz)
+	mux.HandleFunc("/readyz", a.HandleReadyz)
+	mux.HandleFunc("/api/version", a.HandleInfo)
+	mux.HandleFunc("/api/v1/info", a.HandleInfo)
+
 	// SSE Live Feed
 	mux.HandleFunc("/api/events", a.HandleSSE)
 

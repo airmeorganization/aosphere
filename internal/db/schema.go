@@ -11,8 +11,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// InitDB initializes SQLite with WAL mode and creates all tables.
-func InitDB(dbPath string) (*sql.DB, error) {
+// InitDB initializes SQLite with WAL mode, creates tables, and optionally seeds starter data.
+func InitDB(dbPath string, seedData bool) (*sql.DB, error) {
 	dir := filepath.Dir(dbPath)
 	if dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0755); err != nil {
@@ -34,11 +34,18 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to create tables: %w", err)
 	}
 
-	if err := seedStarterData(db); err != nil {
-		log.Printf("Seed starter data check: %v", err)
+	if seedData {
+		if err := SeedStarterData(db); err != nil {
+			log.Printf("Seed starter data check: %v", err)
+		}
 	}
 
 	return db, nil
+}
+
+// Ping verifies that SQLite is responsive
+func Ping(db *sql.DB) error {
+	return db.Ping()
 }
 
 func createTables(db *sql.DB) error {
@@ -265,7 +272,7 @@ func createTables(db *sql.DB) error {
 	return err
 }
 
-func seedStarterData(db *sql.DB) error {
+func SeedStarterData(db *sql.DB) error {
 	var count int
 	if err := db.QueryRow("SELECT COUNT(*) FROM skus").Scan(&count); err != nil {
 		return err

@@ -3,10 +3,9 @@ package main
 import (
 	"context"
 	"embed"
-	"flag"
 	"fmt"
 	"io/fs"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"aosphere/internal/api"
+	"aosphere/internal/config"
 	"aosphere/internal/db"
 	"aosphere/internal/mcp"
 	"aosphere/internal/store"
@@ -24,34 +24,59 @@ import (
 var embeddedWebFS embed.FS
 
 func main() {
-	port := flag.Int("port", 8080, "HTTP server port")
-	dbPath := flag.String("db", filepath.Join("data", "aosphere.db"), "Path to SQLite database file")
-	mcpStdio := flag.Bool("mcp-stdio", false, "Run as an MCP server over stdio for AI agent desktop hosts")
-	flag.Parse()
-
-	// 1. Initialize SQLite Database (WAL mode, pure Go)
-	database, err := db.InitDB(*dbPath)
+	// 1. Load application configuration
+	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("Fatal: Database initialization failed: %v", err)
+		fmt.Fprintf(os.Stderr, "Fatal: Configuration error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 2. Setup structured logging
+	var logHandler slog.Handler
+	logLevel := slog.LevelInfo
+	switch cfg.LogLevel {
+	case "debug":
+		logLevel = slog.LevelDebug
+	case "warn":
+		logLevel = slog.LevelWarn
+	case "error":
+		logLevel = slog.LevelError
+	}
+	opts := &slog.HandlerOptions{Level: logLevel}
+
+	if cfg.Env == config.EnvProduction {
+		logHandler = slog.NewJSONHandler(os.Stdout, opts)
+	} else {
+		logHandler = slog.NewTextHandler(os.Stdout, opts)
+	}
+	logger := slog.New(logHandler)
+	slog.SetDefault(logger)
+
+	// 3. Initialize SQLite Database (WAL mode, pure Go)
+	database, err := db.InitDB(cfg.DBPath, cfg.SeedData)
+	if err != nil {
+		logger.Error("Database initialization failed", slog.Any("error", err), slog.String("db_path", cfg.DBPath))
+		os.Exit(1)
 	}
 	defer database.Close()
 
 	appStore := store.NewStore(database)
 	mcpServer := mcp.NewMCPServer(appStore)
 
-	// 2. Handle MCP Stdio Mode (for Claude Desktop, Antigravity, Cursor)
-	if *mcpStdio {
+	// 4. Handle MCP Stdio Mode (for Claude Desktop, Antigravity, Cursor)
+	if cfg.MCPStdio {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		if err := mcpServer.HandleStdio(ctx); err != nil {
-			log.Fatalf("MCP stdio error: %v", err)
+			logger.Error("MCP stdio error", slog.Any("error", err))
+			os.Exit(1)
 		}
 		return
 	}
 
-	// 3. Setup HTTP & API Router
+	// 5. Setup HTTP Router & API Handlers
 	mux := http.NewServeMux()
-	appAPI := api.NewAPI(appStore)
+	appAPI := api.NewAPI(appStore, string(cfg.Env))
 	appAPI.RegisterRoutes(mux)
 
 	// MCP SSE & Message Endpoints for AI Agents
@@ -61,17 +86,25 @@ func main() {
 	// Embedded Web UI
 	webSubFS, err := fs.Sub(embeddedWebFS, "web")
 	if err != nil {
-		log.Fatalf("Fatal: Failed to load embedded web assets: %v", err)
+		logger.Error("Failed to load embedded web assets", slog.Any("error", err))
+		os.Exit(1)
 	}
 	fileServer := http.FileServer(http.FS(webSubFS))
 	mux.Handle("/", fileServer)
 
-	serverAddr := fmt.Sprintf(":%d", *port)
+	// Apply Middlewares: RequestID -> CORS -> Logging -> Panic Recovery
+	var handler http.Handler = mux
+	handler = api.RecoveryMiddleware(logger)(handler)
+	handler = api.LoggingMiddleware(logger)(handler)
+	handler = api.CORSMiddleware(handler)
+	handler = api.RequestIDMiddleware(handler)
+
+	serverAddr := fmt.Sprintf(":%d", cfg.Port)
 	server := &http.Server{
 		Addr:         serverAddr,
-		Handler:      mux,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 60 * time.Second,
+		Handler:      handler,
+		ReadTimeout:  cfg.ReadTimeout,
+		WriteTimeout: cfg.WriteTimeout,
 	}
 
 	// Graceful shutdown handling
@@ -82,24 +115,28 @@ func main() {
 		fmt.Println("==================================================================")
 		fmt.Println("  AOSphere — Agent-Native Business Operating System (Go Monolith) ")
 		fmt.Println("==================================================================")
-		fmt.Printf("  • Web Interface:    http://localhost:%d\n", *port)
-		fmt.Printf("  • REST API:         http://localhost:%d/api\n", *port)
-		fmt.Printf("  • MCP SSE Endpoint: http://localhost:%d/mcp/sse\n", *port)
-		fmt.Printf("  • Database Engine:  %s (SQLite WAL)\n", *dbPath)
+		fmt.Printf("  • Environment:      %s\n", cfg.Env)
+		fmt.Printf("  • Web Interface:    http://localhost:%d\n", cfg.Port)
+		fmt.Printf("  • REST API:         http://localhost:%d/api\n", cfg.Port)
+		fmt.Printf("  • Health Probes:    http://localhost:%d/healthz , /readyz\n", cfg.Port)
+		fmt.Printf("  • MCP SSE Endpoint: http://localhost:%d/mcp/sse\n", cfg.Port)
+		fmt.Printf("  • Database Engine:  %s (SQLite WAL)\n", cfg.DBPath)
+		fmt.Printf("  • Seed Demo Data:   %t\n", cfg.SeedData)
 		fmt.Printf("  • Stdio Agent Mode: ./%s -mcp-stdio\n", filepath.Base(os.Args[0]))
 		fmt.Println("==================================================================")
 
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Server listen failed: %v", err)
+			logger.Error("Server listen failed", slog.Any("error", err))
+			os.Exit(1)
 		}
 	}()
 
 	<-stop
-	fmt.Println("\nShutting down AOSphere...")
+	logger.Info("Shutting down AOSphere...")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("Server shutdown error: %v", err)
+		logger.Error("Server shutdown error", slog.Any("error", err))
 	}
-	fmt.Println("AOSphere exited cleanly.")
+	logger.Info("AOSphere exited cleanly.")
 }

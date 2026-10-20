@@ -18,6 +18,11 @@ func NewStore(database *sql.DB) *Store {
 	return &Store{db: database}
 }
 
+// Ping verifies database connectivity
+func (s *Store) Ping() error {
+	return s.db.Ping()
+}
+
 // ----------------- AUDIT & APPROVALS -----------------
 
 func (s *Store) LogAudit(actorType, actorID, action, entityType, entityID, reasoning, meta string) error {
@@ -33,7 +38,7 @@ func (s *Store) GetAuditLogs(limit int) ([]db.AuditLog, error) {
 		limit = 50
 	}
 	rows, err := s.db.Query(`SELECT id, actor_type, actor_id, action, entity_type, entity_id, reasoning, metadata_json, created_at
-		FROM audit_logs ORDER BY created_at DESC LIMIT ?`, limit)
+		FROM audit_logs ORDER BY created_at DESC, rowid DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
