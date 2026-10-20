@@ -2,12 +2,14 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
 	"time"
 
 	"aosphere/internal/auth"
+	"aosphere/internal/service"
 	"aosphere/internal/store"
 )
 
@@ -20,14 +22,19 @@ func getOrgID(r *http.Request) string {
 
 type API struct {
 	store      *store.Store
+	service    *service.WorkflowService
 	env        string
 	clients    map[chan string]bool
 	clientsMu  sync.RWMutex
 }
 
-func NewAPI(s *store.Store, env string) *API {
+func NewAPI(s *store.Store, svc *service.WorkflowService, env string) *API {
+	if svc == nil {
+		svc = service.NewWorkflowService(s)
+	}
 	return &API{
 		store:   s,
+		service: svc,
 		env:     env,
 		clients: make(map[chan string]bool),
 	}
@@ -133,25 +140,33 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			return
 		}
 		var req struct {
-			SKUID  string `json:"sku_id"`
-			Delta  int    `json:"delta"`
-			Reason string `json:"reason"`
+			SKUID           string `json:"sku_id"`
+			Delta           int    `json:"delta"`
+			Reason          string `json:"reason"`
+			ExpectedVersion int    `json:"expected_version"`
+			IdempotencyKey  string `json:"idempotency_key"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		orgID := getOrgID(r)
-		actorType := "human"
-		actorID := "web_user"
-		if authCtx != nil {
-			if authCtx.IsAPIKey {
-				actorType = "agent"
-			}
-			actorID = authCtx.UserID
+		idempKey := r.Header.Get("Idempotency-Key")
+		if idempKey == "" {
+			idempKey = req.IdempotencyKey
 		}
-		updated, err := a.store.UpdateStockForOrg(orgID, req.SKUID, req.Delta, req.Reason, actorType, actorID)
+		orgID := getOrgID(r)
+		updated, err := a.service.AdjustStock(r.Context(), orgID, req.SKUID, req.Delta, req.Reason, authCtx, req.ExpectedVersion, idempKey)
 		if err != nil {
+			if errors.Is(err, service.ErrStaleVersion) {
+				w.WriteHeader(http.StatusConflict)
+				writeJSON(w, map[string]string{"error": "conflict", "message": err.Error()})
+				return
+			}
+			if errors.Is(err, service.ErrInsufficientStock) {
+				w.WriteHeader(http.StatusBadRequest)
+				writeJSON(w, map[string]string{"error": "insufficient_stock", "message": err.Error()})
+				return
+			}
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -170,32 +185,95 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("/api/purchase-orders", func(w http.ResponseWriter, r *http.Request) {
+		orgID := getOrgID(r)
 		if r.Method == "POST" {
+			authCtx := GetAuthContext(r.Context())
+			if authCtx != nil && !authCtx.Can(auth.PermManageOrders) {
+				w.WriteHeader(http.StatusForbidden)
+				writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission manage_orders required"})
+				return
+			}
 			var req struct {
-				SupplierID string `json:"supplier_id"`
-				ItemsJSON  string `json:"items_json"`
-				Total      float64 `json:"total"`
-				Notes      string  `json:"notes"`
+				SupplierID     string           `json:"supplier_id"`
+				Items          []service.POItem `json:"items"`
+				ItemsJSON      string           `json:"items_json"`
+				Total          float64          `json:"total"`
+				Notes          string           `json:"notes"`
+				IdempotencyKey string           `json:"idempotency_key"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			po, err := a.store.CreatePurchaseOrder(req.SupplierID, req.ItemsJSON, req.Total, "human", "web_user", req.Notes)
+			if len(req.Items) == 0 && req.ItemsJSON != "" {
+				_ = json.Unmarshal([]byte(req.ItemsJSON), &req.Items)
+			}
+			idempKey := r.Header.Get("Idempotency-Key")
+			if idempKey == "" {
+				idempKey = req.IdempotencyKey
+			}
+			poReq := service.CreatePORequest{
+				SupplierID: req.SupplierID,
+				Items:      req.Items,
+				Notes:      req.Notes,
+			}
+			res, err := a.service.CreatePurchaseOrder(r.Context(), orgID, poReq, authCtx, idempKey)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			a.Broadcast("po_created", fmt.Sprintf("{\"po_number\":\"%s\"}", po.PONumber))
-			writeJSON(w, po)
+			a.Broadcast("po_created", fmt.Sprintf("{\"po_number\":\"%s\"}", res.PurchaseOrder.PONumber))
+			if res.RequiresApproval {
+				a.Broadcast("approval_required", fmt.Sprintf("{\"approval_id\":\"%s\"}", res.Approval.ID))
+			}
+			w.WriteHeader(http.StatusCreated)
+			writeJSON(w, res.PurchaseOrder)
 			return
 		}
-		pos, err := a.store.GetPurchaseOrders()
+		pos, err := a.store.GetPurchaseOrdersForOrg(orgID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, pos)
+	})
+
+	mux.HandleFunc("/api/purchase-orders/receive", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		authCtx := GetAuthContext(r.Context())
+		if authCtx != nil && !authCtx.Can(auth.PermManageOrders) {
+			w.WriteHeader(http.StatusForbidden)
+			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission manage_orders required"})
+			return
+		}
+		var req struct {
+			POID           string `json:"po_id"`
+			IdempotencyKey string `json:"idempotency_key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		idempKey := r.Header.Get("Idempotency-Key")
+		if idempKey == "" {
+			idempKey = req.IdempotencyKey
+		}
+		orgID := getOrgID(r)
+		po, err := a.service.ReceivePurchaseOrder(r.Context(), orgID, req.POID, authCtx, idempKey)
+		if err != nil {
+			if errors.Is(err, service.ErrInvalidStateTransition) {
+				w.WriteHeader(http.StatusConflict)
+				writeJSON(w, map[string]string{"error": "invalid_transition", "message": err.Error()})
+				return
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		a.Broadcast("po_received", fmt.Sprintf("{\"po_number\":\"%s\"}", po.PONumber))
+		writeJSON(w, po)
 	})
 
 	// CRM
@@ -261,34 +339,95 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 
 	// FINANCIAL
 	mux.HandleFunc("/api/invoices", func(w http.ResponseWriter, r *http.Request) {
+		orgID := getOrgID(r)
 		if r.Method == "POST" {
+			authCtx := GetAuthContext(r.Context())
+			if authCtx != nil && !authCtx.Can(auth.PermManageFinance) {
+				w.WriteHeader(http.StatusForbidden)
+				writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission manage_finance required"})
+				return
+			}
 			var req struct {
-				CustomerID string  `json:"customer_id"`
-				ItemsJSON  string  `json:"items_json"`
-				Subtotal   float64 `json:"subtotal"`
-				Tax        float64 `json:"tax"`
-				DueDate    string  `json:"due_date"`
-				Recurring  string  `json:"recurring"`
+				CustomerID     string                `json:"customer_id"`
+				Items          []service.InvoiceItem `json:"items"`
+				ItemsJSON      string                `json:"items_json"`
+				Subtotal       float64               `json:"subtotal"`
+				Tax            float64               `json:"tax"`
+				DueDate        string                `json:"due_date"`
+				Recurring      string                `json:"recurring"`
+				IdempotencyKey string                `json:"idempotency_key"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			inv, err := a.store.CreateInvoice(req.CustomerID, req.ItemsJSON, req.Subtotal, req.Tax, req.DueDate, req.Recurring, "human", "web_user")
+			if len(req.Items) == 0 && req.ItemsJSON != "" {
+				_ = json.Unmarshal([]byte(req.ItemsJSON), &req.Items)
+			}
+			idempKey := r.Header.Get("Idempotency-Key")
+			if idempKey == "" {
+				idempKey = req.IdempotencyKey
+			}
+			invReq := service.CreateInvoiceRequest{
+				CustomerID: req.CustomerID,
+				Items:      req.Items,
+				DueDate:    req.DueDate,
+				Recurring:  req.Recurring,
+			}
+			inv, err := a.service.CreateInvoice(r.Context(), orgID, invReq, authCtx, idempKey)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 			a.Broadcast("invoice_created", fmt.Sprintf("{\"invoice_number\":\"%s\"}", inv.InvoiceNumber))
+			w.WriteHeader(http.StatusCreated)
 			writeJSON(w, inv)
 			return
 		}
-		invs, err := a.store.GetInvoices()
+		invs, err := a.store.GetInvoicesForOrg(orgID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, invs)
+	})
+
+	mux.HandleFunc("/api/invoices/pay", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		authCtx := GetAuthContext(r.Context())
+		if authCtx != nil && !authCtx.Can(auth.PermManageFinance) {
+			w.WriteHeader(http.StatusForbidden)
+			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission manage_finance required"})
+			return
+		}
+		var req struct {
+			InvoiceID      string `json:"invoice_id"`
+			IdempotencyKey string `json:"idempotency_key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		idempKey := r.Header.Get("Idempotency-Key")
+		if idempKey == "" {
+			idempKey = req.IdempotencyKey
+		}
+		orgID := getOrgID(r)
+		inv, err := a.service.PayInvoice(r.Context(), orgID, req.InvoiceID, authCtx, idempKey)
+		if err != nil {
+			if errors.Is(err, service.ErrInvalidStateTransition) {
+				w.WriteHeader(http.StatusConflict)
+				writeJSON(w, map[string]string{"error": "invalid_transition", "message": err.Error()})
+				return
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		a.Broadcast("invoice_paid", fmt.Sprintf("{\"invoice_number\":\"%s\"}", inv.InvoiceNumber))
+		writeJSON(w, inv)
 	})
 
 	mux.HandleFunc("/api/financial-summary", func(w http.ResponseWriter, r *http.Request) {
@@ -470,24 +609,37 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission approve_orders required"})
 			return
 		}
-		decider := "admin"
-		if authCtx != nil {
-			decider = authCtx.Name
-		}
 		var req struct {
-			ApprovalID string `json:"approval_id"`
-			Decision   string `json:"decision"` // approved, rejected
+			ApprovalID     string `json:"approval_id"`
+			Decision       string `json:"decision"` // approved, rejected
+			IdempotencyKey string `json:"idempotency_key"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := a.store.DecideApproval(req.ApprovalID, req.Decision, decider); err != nil {
+		idempKey := r.Header.Get("Idempotency-Key")
+		if idempKey == "" {
+			idempKey = req.IdempotencyKey
+		}
+		orgID := getOrgID(r)
+		appr, err := a.service.DecideApproval(r.Context(), orgID, req.ApprovalID, req.Decision, authCtx, idempKey)
+		if err != nil {
+			if errors.Is(err, service.ErrUnauthorizedAction) {
+				w.WriteHeader(http.StatusForbidden)
+				writeJSON(w, map[string]string{"error": "unauthorized", "message": err.Error()})
+				return
+			}
+			if errors.Is(err, service.ErrApprovalAlreadyDecided) {
+				w.WriteHeader(http.StatusConflict)
+				writeJSON(w, map[string]string{"error": "conflict", "message": err.Error()})
+				return
+			}
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		a.Broadcast("approval_decided", fmt.Sprintf("{\"id\":\"%s\",\"decision\":\"%s\"}", req.ApprovalID, req.Decision))
-		writeJSON(w, map[string]string{"status": "ok"})
+		a.Broadcast("approval_decided", fmt.Sprintf("{\"id\":\"%s\",\"decision\":\"%s\",\"execution\":\"%s\"}", req.ApprovalID, req.Decision, appr.ExecutionStatus))
+		writeJSON(w, map[string]interface{}{"status": "ok", "approval": appr})
 	})
 
 	mux.HandleFunc("/api/audit-logs", func(w http.ResponseWriter, r *http.Request) {
@@ -498,5 +650,16 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			return
 		}
 		writeJSON(w, logs)
+	})
+
+	// Business Integrity & Reconciliation Scan
+	mux.HandleFunc("/api/reconciliation", func(w http.ResponseWriter, r *http.Request) {
+		orgID := getOrgID(r)
+		report, err := a.service.ReconcileDiscrepancies(r.Context(), orgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, report)
 	})
 }

@@ -17,6 +17,7 @@ import (
 	"aosphere/internal/config"
 	"aosphere/internal/db"
 	"aosphere/internal/mcp"
+	"aosphere/internal/service"
 	"aosphere/internal/store"
 )
 
@@ -61,7 +62,8 @@ func main() {
 	defer database.Close()
 
 	appStore := store.NewStore(database)
-	mcpServer := mcp.NewMCPServer(appStore)
+	workflowSvc := service.NewWorkflowService(appStore)
+	mcpServer := mcp.NewMCPServer(appStore, workflowSvc)
 
 	// 4. Handle MCP Stdio Mode (for Claude Desktop, Antigravity, Cursor)
 	if cfg.MCPStdio {
@@ -76,7 +78,7 @@ func main() {
 
 	// 5. Setup HTTP Router & API Handlers
 	mux := http.NewServeMux()
-	appAPI := api.NewAPI(appStore, string(cfg.Env))
+	appAPI := api.NewAPI(appStore, workflowSvc, string(cfg.Env))
 	appAPI.RegisterRoutes(mux)
 
 	// MCP SSE & Message Endpoints for AI Agents

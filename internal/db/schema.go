@@ -123,6 +123,7 @@ func createTables(db *sql.DB) error {
 		unit_cost REAL NOT NULL DEFAULT 0.0,
 		selling_price REAL NOT NULL DEFAULT 0.0,
 		supplier_id TEXT REFERENCES suppliers(id),
+		version INTEGER NOT NULL DEFAULT 1,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		UNIQUE(org_id, code)
 	);
@@ -138,6 +139,7 @@ func createTables(db *sql.DB) error {
 		created_by_type TEXT NOT NULL DEFAULT 'human', -- human, agent
 		actor_id TEXT NOT NULL DEFAULT 'system',
 		notes TEXT,
+		version INTEGER NOT NULL DEFAULT 1,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		UNIQUE(org_id, po_number)
 	);
@@ -206,6 +208,7 @@ func createTables(db *sql.DB) error {
 		total_amount REAL NOT NULL DEFAULT 0.0,
 		recurring_frequency TEXT DEFAULT 'none', -- none, monthly, quarterly, annual
 		items_json TEXT NOT NULL DEFAULT '[]',
+		version INTEGER NOT NULL DEFAULT 1,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		UNIQUE(org_id, invoice_number)
 	);
@@ -318,12 +321,32 @@ func createTables(db *sql.DB) error {
 		title TEXT NOT NULL,
 		description TEXT NOT NULL,
 		payload_json TEXT NOT NULL DEFAULT '{}',
+		payload_hash TEXT NOT NULL DEFAULT '',
+		entity_type TEXT NOT NULL DEFAULT '',
+		entity_id TEXT NOT NULL DEFAULT '',
+		entity_version INTEGER NOT NULL DEFAULT 1,
 		status TEXT NOT NULL DEFAULT 'pending', -- pending, approved, rejected
+		execution_status TEXT NOT NULL DEFAULT 'none', -- none, executing, completed, failed
+		execution_error TEXT NOT NULL DEFAULT '',
 		requested_by_type TEXT NOT NULL DEFAULT 'agent', -- agent, human
 		requested_by_id TEXT NOT NULL DEFAULT 'agent_primary',
 		decided_by TEXT,
 		decided_at DATETIME,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	-- 7. TRANSACTIONAL IDEMPOTENCY
+	CREATE TABLE IF NOT EXISTS idempotency_keys (
+		id TEXT PRIMARY KEY,
+		org_id TEXT NOT NULL REFERENCES organizations(id),
+		key TEXT NOT NULL,
+		request_hash TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'in_progress', -- in_progress, completed, failed
+		response_code INTEGER DEFAULT 0,
+		response_body TEXT DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		expires_at DATETIME NOT NULL,
+		UNIQUE(org_id, key)
 	);
 
 	CREATE TABLE IF NOT EXISTS audit_logs (
@@ -339,11 +362,13 @@ func createTables(db *sql.DB) error {
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
-	-- Indices for Tenant Isolation and Performance
+	-- Indices for Tenant Isolation, Concurrency and Performance
 	CREATE INDEX IF NOT EXISTS idx_skus_org ON skus(org_id);
 	CREATE INDEX IF NOT EXISTS idx_po_org ON purchase_orders(org_id);
 	CREATE INDEX IF NOT EXISTS idx_invoices_org ON invoices(org_id);
 	CREATE INDEX IF NOT EXISTS idx_approvals_org ON approvals(org_id);
+	CREATE INDEX IF NOT EXISTS idx_approvals_pending ON approvals(org_id, status);
+	CREATE INDEX IF NOT EXISTS idx_idempotency_org_key ON idempotency_keys(org_id, key);
 	CREATE INDEX IF NOT EXISTS idx_audit_org ON audit_logs(org_id);
 	`
 	_, err := db.Exec(schema)

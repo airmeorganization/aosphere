@@ -3,6 +3,7 @@ package mcp
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -25,7 +26,7 @@ func setupTestMCPServer(t *testing.T) (*MCPServer, *store.Store, *sql.DB, func()
 	}
 
 	appStore := store.NewStore(database)
-	server := NewMCPServer(appStore)
+	server := NewMCPServer(appStore, nil)
 
 	cleanup := func() {
 		database.Close()
@@ -233,5 +234,103 @@ func TestMCPServer_TenantIsolation(t *testing.T) {
 
 	if !strings.Contains(textTitan, "TITAN-HEAVY") {
 		t.Errorf("Titan Corp agent should see TITAN-HEAVY, got: %s", textTitan)
+	}
+}
+
+func TestMCPServer_WorkflowIntegrityAndReconciliation(t *testing.T) {
+	server, _, database, cleanup := setupTestMCPServer(t)
+	defer cleanup()
+
+	agentCtx := &SessionContext{
+		ID:      "sess_workflow",
+		AgentID: "agent_ops",
+		AuthCtx: &auth.AuthContext{
+			UserID:   "usr_ops",
+			OrgID:    "org_default",
+			Role:     auth.RoleAdmin, // Has PermManageOrders, PermManageInventory, PermRead
+			IsAPIKey: true,
+		},
+	}
+
+	// 1. Create a PO over $1,000 via MCP tool -> Enforces HITL policy
+	callPO := &JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      2,
+		Method:  "tools/call",
+		Params: json.RawMessage(`{
+			"name": "erp_create_purchase_order",
+			"arguments": {
+				"supplier_id": "sup_01",
+				"items": [
+					{"sku_code": "SKU-CORE-100", "quantity": 40, "unit_cost": 45.0}
+				],
+				"notes": "MCP automated order"
+			}
+		}`),
+	}
+
+	respPO := server.ProcessRequestWithContext(callPO, agentCtx)
+	resPOMap, _ := respPO.Result.(map[string]interface{})
+	contentPO, _ := resPOMap["content"].([]map[string]interface{})
+	textPO := contentPO[0]["text"].(string)
+
+	// 40 * $45 = $1,800 > $1,000 safety threshold
+	if !strings.Contains(textPO, "pending_approval") || !strings.Contains(textPO, "policy threshold") {
+		t.Errorf("expected pending_approval with policy routing, got: %s", textPO)
+	}
+
+	// 2. Adjust stock with optimistic locking via MCP tool
+	var skuID string
+	var ver int
+	database.QueryRow(`SELECT id, version FROM skus WHERE code = 'SKU-CORE-100' AND org_id = 'org_default'`).Scan(&skuID, &ver)
+
+	callAdj := &JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      3,
+		Method:  "tools/call",
+		Params: json.RawMessage(fmt.Sprintf(`{
+			"name": "erp_adjust_stock",
+			"arguments": {
+				"sku_id": "%s",
+				"delta": -5,
+				"reason": "Assembly consumption",
+				"expected_version": %d
+			}
+		}`, skuID, ver)),
+	}
+
+	respAdj := server.ProcessRequestWithContext(callAdj, agentCtx)
+	resAdjMap, _ := respAdj.Result.(map[string]interface{})
+	contentAdj, _ := resAdjMap["content"].([]map[string]interface{})
+	textAdj := contentAdj[0]["text"].(string)
+
+	if !strings.Contains(textAdj, "Success") || !strings.Contains(textAdj, "Version: 2") {
+		t.Errorf("expected stock adjust success with incremented version, got: %s", textAdj)
+	}
+
+	// 3. Stale version adjustment attempt via MCP tool -> Errors
+	respStale := server.ProcessRequestWithContext(callAdj, agentCtx) // ver is now stale
+	resStaleMap, _ := respStale.Result.(map[string]interface{})
+	contentStale, _ := resStaleMap["content"].([]map[string]interface{})
+	textStale := contentStale[0]["text"].(string)
+
+	if !strings.Contains(textStale, "optimistic lock failure") {
+		t.Errorf("expected optimistic lock failure on stale version, got: %s", textStale)
+	}
+
+	// 4. Run sys_reconcile tool
+	callRec := &JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      4,
+		Method:  "tools/call",
+		Params:  json.RawMessage(`{"name": "sys_reconcile", "arguments": {}}`),
+	}
+	respRec := server.ProcessRequestWithContext(callRec, agentCtx)
+	resRecMap, _ := respRec.Result.(map[string]interface{})
+	contentRec, _ := resRecMap["content"].([]map[string]interface{})
+	textRec := contentRec[0]["text"].(string)
+
+	if !strings.Contains(textRec, "total_checked") {
+		t.Errorf("expected valid reconciliation JSON report, got: %s", textRec)
 	}
 }

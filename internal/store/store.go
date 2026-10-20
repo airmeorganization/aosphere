@@ -18,6 +18,11 @@ func NewStore(database *sql.DB) *Store {
 	return &Store{db: database}
 }
 
+// DB returns the underlying sql.DB instance for transactional workflows
+func (s *Store) DB() *sql.DB {
+	return s.db
+}
+
 // Ping verifies database connectivity
 func (s *Store) Ping() error {
 	return s.db.Ping()
@@ -77,7 +82,7 @@ func (s *Store) GetApprovalsForOrg(orgID, status string) ([]db.Approval, error) 
 	if orgID == "" {
 		orgID = "org_default"
 	}
-	query := `SELECT id, org_id, action_type, title, description, payload_json, status, requested_by_type, requested_by_id, decided_by, decided_at, created_at
+	query := `SELECT id, org_id, action_type, title, description, payload_json, payload_hash, entity_type, entity_id, entity_version, status, execution_status, execution_error, requested_by_type, requested_by_id, decided_by, decided_at, created_at
 		FROM approvals WHERE org_id = ?`
 	var rows *sql.Rows
 	var err error
@@ -96,7 +101,9 @@ func (s *Store) GetApprovalsForOrg(orgID, status string) ([]db.Approval, error) 
 	var list []db.Approval
 	for rows.Next() {
 		var a db.Approval
-		if err := rows.Scan(&a.ID, &a.OrgID, &a.ActionType, &a.Title, &a.Description, &a.PayloadJSON, &a.Status, &a.RequestedByType, &a.RequestedByID, &a.DecidedBy, &a.DecidedAt, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.OrgID, &a.ActionType, &a.Title, &a.Description, &a.PayloadJSON,
+			&a.PayloadHash, &a.EntityType, &a.EntityID, &a.EntityVersion, &a.Status, &a.ExecutionStatus, &a.ExecutionError,
+			&a.RequestedByType, &a.RequestedByID, &a.DecidedBy, &a.DecidedAt, &a.CreatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, a)
@@ -131,7 +138,7 @@ func (s *Store) GetSKUsForOrg(orgID string, belowThresholdOnly bool) ([]db.SKU, 
 		orgID = "org_default"
 	}
 	query := `SELECT s.id, s.org_id, s.code, s.name, s.category, s.stock_quantity, s.reserved_quantity, s.min_threshold,
-		s.reorder_quantity, s.unit_cost, s.selling_price, COALESCE(s.supplier_id, '') as supplier_id, COALESCE(sup.name, '') as supplier_name, s.updated_at
+		s.reorder_quantity, s.unit_cost, s.selling_price, COALESCE(s.supplier_id, '') as supplier_id, COALESCE(sup.name, '') as supplier_name, s.version, s.updated_at
 		FROM skus s LEFT JOIN suppliers sup ON s.supplier_id = sup.id WHERE s.org_id = ?`
 	if belowThresholdOnly {
 		query += " AND s.stock_quantity <= s.min_threshold"
@@ -148,7 +155,7 @@ func (s *Store) GetSKUsForOrg(orgID string, belowThresholdOnly bool) ([]db.SKU, 
 	for rows.Next() {
 		var item db.SKU
 		if err := rows.Scan(&item.ID, &item.OrgID, &item.Code, &item.Name, &item.Category, &item.StockQuantity, &item.ReservedQuantity,
-			&item.MinThreshold, &item.ReorderQuantity, &item.UnitCost, &item.SellingPrice, &item.SupplierID, &item.SupplierName, &item.UpdatedAt); err != nil {
+			&item.MinThreshold, &item.ReorderQuantity, &item.UnitCost, &item.SellingPrice, &item.SupplierID, &item.SupplierName, &item.Version, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, item)
@@ -275,10 +282,18 @@ func (s *Store) GetSuppliersForOrg(orgID string) ([]db.Supplier, error) {
 }
 
 func (s *Store) GetPurchaseOrders() ([]db.PurchaseOrder, error) {
-	rows, err := s.db.Query(`SELECT po.id, po.po_number, po.supplier_id, COALESCE(sup.name, '') as supplier_name,
-		po.status, po.total_amount, po.items_json, po.created_by_type, po.actor_id, po.notes, po.created_at
+	return s.GetPurchaseOrdersForOrg("org_default")
+}
+
+func (s *Store) GetPurchaseOrdersForOrg(orgID string) ([]db.PurchaseOrder, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	rows, err := s.db.Query(`SELECT po.id, po.org_id, po.po_number, po.supplier_id, COALESCE(sup.name, '') as supplier_name,
+		po.status, po.total_amount, po.items_json, po.created_by_type, po.actor_id, po.notes, po.version, po.created_at
 		FROM purchase_orders po LEFT JOIN suppliers sup ON po.supplier_id = sup.id
-		ORDER BY po.created_at DESC`)
+		WHERE po.org_id = ?
+		ORDER BY po.created_at DESC`, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -287,8 +302,8 @@ func (s *Store) GetPurchaseOrders() ([]db.PurchaseOrder, error) {
 	var list []db.PurchaseOrder
 	for rows.Next() {
 		var po db.PurchaseOrder
-		if err := rows.Scan(&po.ID, &po.PONumber, &po.SupplierID, &po.SupplierName, &po.Status, &po.TotalAmount,
-			&po.ItemsJSON, &po.CreatedByType, &po.ActorID, &po.Notes, &po.CreatedAt); err != nil {
+		if err := rows.Scan(&po.ID, &po.OrgID, &po.PONumber, &po.SupplierID, &po.SupplierName, &po.Status, &po.TotalAmount,
+			&po.ItemsJSON, &po.CreatedByType, &po.ActorID, &po.Notes, &po.Version, &po.CreatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, po)
@@ -406,11 +421,19 @@ func (s *Store) CreateDeal(title, customerID string, value float64, stage string
 // ----------------- FINANCIAL & INVOICING -----------------
 
 func (s *Store) GetInvoices() ([]db.Invoice, error) {
-	rows, err := s.db.Query(`SELECT inv.id, inv.invoice_number, inv.customer_id, COALESCE(c.name, '') as customer_name,
+	return s.GetInvoicesForOrg("org_default")
+}
+
+func (s *Store) GetInvoicesForOrg(orgID string) ([]db.Invoice, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	rows, err := s.db.Query(`SELECT inv.id, inv.org_id, inv.invoice_number, inv.customer_id, COALESCE(c.name, '') as customer_name,
 		inv.status, inv.issue_date, inv.due_date, inv.subtotal, inv.tax_amount, inv.total_amount,
-		inv.recurring_frequency, inv.items_json, inv.created_at
+		inv.recurring_frequency, inv.items_json, inv.version, inv.created_at
 		FROM invoices inv LEFT JOIN customers c ON inv.customer_id = c.id
-		ORDER BY inv.created_at DESC`)
+		WHERE inv.org_id = ?
+		ORDER BY inv.created_at DESC`, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -419,8 +442,8 @@ func (s *Store) GetInvoices() ([]db.Invoice, error) {
 	var list []db.Invoice
 	for rows.Next() {
 		var i db.Invoice
-		if err := rows.Scan(&i.ID, &i.InvoiceNumber, &i.CustomerID, &i.CustomerName, &i.Status, &i.IssueDate, &i.DueDate,
-			&i.Subtotal, &i.TaxAmount, &i.TotalAmount, &i.RecurringFrequency, &i.ItemsJSON, &i.CreatedAt); err != nil {
+		if err := rows.Scan(&i.ID, &i.OrgID, &i.InvoiceNumber, &i.CustomerID, &i.CustomerName, &i.Status, &i.IssueDate, &i.DueDate,
+			&i.Subtotal, &i.TaxAmount, &i.TotalAmount, &i.RecurringFrequency, &i.ItemsJSON, &i.Version, &i.CreatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, i)

@@ -62,6 +62,7 @@ type SKU struct {
 	SellingPrice     float64   `json:"selling_price"`
 	SupplierID       string    `json:"supplier_id"`
 	SupplierName     string    `json:"supplier_name,omitempty"`
+	Version          int       `json:"version"`
 	UpdatedAt        time.Time `json:"updated_at"`
 }
 
@@ -87,6 +88,7 @@ type PurchaseOrder struct {
 	CreatedByType string    `json:"created_by_type"` // human, agent
 	ActorID       string    `json:"actor_id"`
 	Notes         string    `json:"notes"`
+	Version       int       `json:"version"`
 	CreatedAt     time.Time `json:"created_at"`
 }
 
@@ -131,6 +133,7 @@ type Invoice struct {
 	TotalAmount        float64   `json:"total_amount"`
 	RecurringFrequency string    `json:"recurring_frequency"`
 	ItemsJSON          string    `json:"items_json"`
+	Version            int       `json:"version"`
 	CreatedAt          time.Time `json:"created_at"`
 }
 
@@ -218,12 +221,30 @@ type Approval struct {
 	Title           string     `json:"title"`
 	Description     string     `json:"description"`
 	PayloadJSON     string     `json:"payload_json"`
+	PayloadHash     string     `json:"payload_hash"`
+	EntityType      string     `json:"entity_type"`
+	EntityID        string     `json:"entity_id"`
+	EntityVersion   int        `json:"entity_version"`
 	Status          string     `json:"status"` // pending, approved, rejected
+	ExecutionStatus string     `json:"execution_status"` // none, executing, completed, failed
+	ExecutionError  string     `json:"execution_error,omitempty"`
 	RequestedByType string     `json:"requested_by_type"`
 	RequestedByID   string     `json:"requested_by_id"`
 	DecidedBy       *string    `json:"decided_by,omitempty"`
 	DecidedAt       *time.Time `json:"decided_at,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
+}
+
+type IdempotencyRecord struct {
+	ID           string    `json:"id"`
+	OrgID        string    `json:"org_id"`
+	Key          string    `json:"key"`
+	RequestHash  string    `json:"request_hash"`
+	Status       string    `json:"status"` // in_progress, completed, failed
+	ResponseCode int       `json:"response_code"`
+	ResponseBody string    `json:"response_body"`
+	CreatedAt    time.Time `json:"created_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
 }
 
 type AuditLog struct {

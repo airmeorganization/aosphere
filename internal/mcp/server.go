@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"aosphere/internal/auth"
+	"aosphere/internal/service"
 	"aosphere/internal/store"
 	"github.com/google/uuid"
 )
@@ -46,13 +47,18 @@ type SessionContext struct {
 
 type MCPServer struct {
 	store    *store.Store
+	service  *service.WorkflowService
 	sessions map[string]*SessionContext
 	mu       sync.RWMutex
 }
 
-func NewMCPServer(s *store.Store) *MCPServer {
+func NewMCPServer(s *store.Store, svc *service.WorkflowService) *MCPServer {
+	if svc == nil {
+		svc = service.NewWorkflowService(s)
+	}
 	return &MCPServer{
 		store:    s,
+		service:  svc,
 		sessions: make(map[string]*SessionContext),
 	}
 }
@@ -380,24 +386,26 @@ func (m *MCPServer) getToolDefinitions() []map[string]interface{} {
 		},
 		{
 			"name":        "erp_adjust_stock",
-			"description": "Adjust SKU inventory quantity. If stock drops below threshold, automatically triggers reorder workflows.",
+			"description": "Adjust SKU inventory quantity with optimistic locking. If stock drops below threshold, automatically triggers reorder workflows.",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"sku_id": map[string]interface{}{"type": "string"},
-					"delta":  map[string]interface{}{"type": "integer", "description": "Positive to add stock, negative to consume/sell"},
-					"reason": map[string]interface{}{"type": "string"},
+					"sku_id":           map[string]interface{}{"type": "string"},
+					"delta":            map[string]interface{}{"type": "integer", "description": "Positive to add stock, negative to consume/sell"},
+					"reason":           map[string]interface{}{"type": "string"},
+					"expected_version": map[string]interface{}{"type": "integer", "description": "Optional version for optimistic concurrency control"},
+					"idempotency_key":  map[string]interface{}{"type": "string", "description": "Unique request key for safe retries"},
 				},
 				"required": []string{"sku_id", "delta", "reason"},
 			},
 		},
 		{
 			"name":        "erp_create_purchase_order",
-			"description": "Create a purchase order for a supplier. Orders > $1000 automatically route to the human approval inbox.",
+			"description": "Create a purchase order for a supplier with server-side pricing and entity verification. Orders > $1,000 route to human approval.",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"supplier_id": map[string]interface{}{"type": "string"},
+					"supplier_id":     map[string]interface{}{"type": "string"},
 					"items": map[string]interface{}{
 						"type": "array",
 						"items": map[string]interface{}{
@@ -410,7 +418,8 @@ func (m *MCPServer) getToolDefinitions() []map[string]interface{} {
 							"required": []string{"sku_code", "quantity", "unit_cost"},
 						},
 					},
-					"notes": map[string]interface{}{"type": "string"},
+					"notes":           map[string]interface{}{"type": "string"},
+					"idempotency_key": map[string]interface{}{"type": "string", "description": "Unique request key for safe retries"},
 				},
 				"required": []string{"supplier_id", "items"},
 			},
@@ -453,8 +462,9 @@ func (m *MCPServer) getToolDefinitions() []map[string]interface{} {
 							"required": []string{"desc", "qty", "price"},
 						},
 					},
-					"due_date":  map[string]interface{}{"type": "string", "description": "YYYY-MM-DD"},
-					"recurring": map[string]interface{}{"type": "string", "enum": []string{"none", "monthly", "quarterly", "annual"}},
+					"due_date":        map[string]interface{}{"type": "string", "description": "YYYY-MM-DD"},
+					"recurring":       map[string]interface{}{"type": "string", "enum": []string{"none", "monthly", "quarterly", "annual"}},
+					"idempotency_key": map[string]interface{}{"type": "string", "description": "Unique request key for safe retries"},
 				},
 				"required": []string{"customer_id", "items", "due_date"},
 			},
@@ -492,6 +502,13 @@ func (m *MCPServer) getToolDefinitions() []map[string]interface{} {
 				"type": "object",
 			},
 		},
+		{
+			"name":        "sys_reconcile",
+			"description": "Run business workflow reconciliation scan to detect orphan approvals, unlinked pending POs, and inventory reservation anomalies.",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+			},
+		},
 	}
 }
 
@@ -506,6 +523,7 @@ var toolPermissions = map[string]auth.Permission{
 	"presence_sync_nap":         auth.PermManageInventory,
 	"reputation_draft_reply":    auth.PermRead,
 	"approvals_list_pending":    auth.PermApproveOrders,
+	"sys_reconcile":             auth.PermRead,
 }
 
 func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext) *JSONRPCResponse {
@@ -584,37 +602,65 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 		skuID, _ := params.Arguments["sku_id"].(string)
 		deltaFloat, _ := params.Arguments["delta"].(float64)
 		reason, _ := params.Arguments["reason"].(string)
-		item, err := m.store.UpdateStockForOrg(orgID, skuID, int(deltaFloat), reason, "agent", agentID)
+		expectedVer := 0
+		if ev, ok := params.Arguments["expected_version"].(float64); ok {
+			expectedVer = int(ev)
+		}
+		idempKey, _ := params.Arguments["idempotency_key"].(string)
+
+		var authContext *auth.AuthContext
+		if sessCtx != nil {
+			authContext = sessCtx.AuthCtx
+		}
+		item, err := m.service.AdjustStock(context.Background(), orgID, skuID, int(deltaFloat), reason, authContext, expectedVer, idempKey)
 		if err != nil {
 			textResult = fmt.Sprintf("Error updating stock: %v", err)
 			isErr = true
 		} else {
-			textResult = fmt.Sprintf("Success. SKU %s stock is now %d (Min: %d). Automated workflows evaluated.",
-				item.Code, item.StockQuantity, item.MinThreshold)
+			textResult = fmt.Sprintf("Success. SKU %s (%s) stock is now %d (Reserved: %d, Min: %d, Version: %d). Automated workflows evaluated.",
+				item.Code, item.Name, item.StockQuantity, item.ReservedQuantity, item.MinThreshold, item.Version)
 		}
 
 	case "erp_create_purchase_order":
 		supplierID, _ := params.Arguments["supplier_id"].(string)
 		notes, _ := params.Arguments["notes"].(string)
+		idempKey, _ := params.Arguments["idempotency_key"].(string)
 		itemsList, _ := params.Arguments["items"].([]interface{})
 
-		total := 0.0
+		var poItems []service.POItem
 		for _, raw := range itemsList {
-			if m, ok := raw.(map[string]interface{}); ok {
-				qty, _ := m["quantity"].(float64)
-				cost, _ := m["unit_cost"].(float64)
-				total += qty * cost
+			if itemMap, ok := raw.(map[string]interface{}); ok {
+				skuCode, _ := itemMap["sku_code"].(string)
+				qtyFloat, _ := itemMap["quantity"].(float64)
+				costFloat, _ := itemMap["unit_cost"].(float64)
+				poItems = append(poItems, service.POItem{
+					SKUCode:  skuCode,
+					Quantity: int(qtyFloat),
+					UnitCost: costFloat,
+				})
 			}
 		}
 
-		itemsBytes, _ := json.Marshal(itemsList)
-		po, err := m.store.CreatePurchaseOrder(supplierID, string(itemsBytes), total, "agent", agentID, notes)
+		var authContext *auth.AuthContext
+		if sessCtx != nil {
+			authContext = sessCtx.AuthCtx
+		}
+		res, err := m.service.CreatePurchaseOrder(context.Background(), orgID, service.CreatePORequest{
+			SupplierID: supplierID,
+			Items:      poItems,
+			Notes:      notes,
+		}, authContext, idempKey)
 		if err != nil {
 			textResult = fmt.Sprintf("Error creating PO: %v", err)
 			isErr = true
 		} else {
-			textResult = fmt.Sprintf("Purchase Order %s created. Status: %s. Total Amount: $%.2f. Safety checks passed.",
-				po.PONumber, po.Status, po.TotalAmount)
+			if res.RequiresApproval {
+				textResult = fmt.Sprintf("Purchase Order %s created in status 'pending_approval' (Total: $%.2f exceeds policy threshold of $%.2f). Queued for human approval (Approval ID: %s).",
+					res.PurchaseOrder.PONumber, res.PurchaseOrder.TotalAmount, m.service.Policy().POApprovalThreshold, res.Approval.ID)
+			} else {
+				textResult = fmt.Sprintf("Purchase Order %s placed directly. Status: %s. Total Amount: $%.2f. Safety and entity checks passed.",
+					res.PurchaseOrder.PONumber, res.PurchaseOrder.Status, res.PurchaseOrder.TotalAmount)
+			}
 		}
 
 	case "crm_manage_deal":
@@ -642,26 +688,38 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 		custID, _ := params.Arguments["customer_id"].(string)
 		dueDate, _ := params.Arguments["due_date"].(string)
 		recurring, _ := params.Arguments["recurring"].(string)
-		if recurring == "" {
-			recurring = "none"
-		}
+		idempKey, _ := params.Arguments["idempotency_key"].(string)
 		itemsList, _ := params.Arguments["items"].([]interface{})
-		subtotal := 0.0
+
+		var invItems []service.InvoiceItem
 		for _, raw := range itemsList {
-			if m, ok := raw.(map[string]interface{}); ok {
-				qty, _ := m["qty"].(float64)
-				price, _ := m["price"].(float64)
-				subtotal += qty * price
+			if itemMap, ok := raw.(map[string]interface{}); ok {
+				desc, _ := itemMap["desc"].(string)
+				qtyFloat, _ := itemMap["qty"].(float64)
+				priceFloat, _ := itemMap["price"].(float64)
+				invItems = append(invItems, service.InvoiceItem{
+					Desc:  desc,
+					Qty:   int(qtyFloat),
+					Price: priceFloat,
+				})
 			}
 		}
-		tax := subtotal * 0.08 // standard 8% tax calculation
-		itemsBytes, _ := json.Marshal(itemsList)
-		inv, err := m.store.CreateInvoice(custID, string(itemsBytes), subtotal, tax, dueDate, recurring, "agent", agentID)
+
+		var authContext *auth.AuthContext
+		if sessCtx != nil {
+			authContext = sessCtx.AuthCtx
+		}
+		inv, err := m.service.CreateInvoice(context.Background(), orgID, service.CreateInvoiceRequest{
+			CustomerID: custID,
+			Items:      invItems,
+			DueDate:    dueDate,
+			Recurring:  recurring,
+		}, authContext, idempKey)
 		if err != nil {
 			textResult = fmt.Sprintf("Error creating invoice: %v", err)
 			isErr = true
 		} else {
-			textResult = fmt.Sprintf("Invoice %s created for $%.2f (Subtotal: $%.2f, Tax: $%.2f). Due: %s.",
+			textResult = fmt.Sprintf("Invoice %s created for total $%.2f (Subtotal: $%.2f, Tax: $%.2f). Due: %s.",
 				inv.InvoiceNumber, inv.TotalAmount, inv.Subtotal, inv.TaxAmount, inv.DueDate)
 		}
 
@@ -696,6 +754,16 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 			isErr = true
 		} else {
 			bytes, _ := json.MarshalIndent(approvals, "", "  ")
+			textResult = string(bytes)
+		}
+
+	case "sys_reconcile":
+		report, err := m.service.ReconcileDiscrepancies(context.Background(), orgID)
+		if err != nil {
+			textResult = fmt.Sprintf("Error running reconciliation: %v", err)
+			isErr = true
+		} else {
+			bytes, _ := json.MarshalIndent(report, "", "  ")
 			textResult = string(bytes)
 		}
 

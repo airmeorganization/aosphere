@@ -22,7 +22,7 @@ func setupTestAPI(t *testing.T) (*API, *sql.DB) {
 	}
 
 	appStore := store.NewStore(database)
-	testAPI := NewAPI(appStore, "test")
+	testAPI := NewAPI(appStore, nil, "test")
 	return testAPI, database
 }
 
