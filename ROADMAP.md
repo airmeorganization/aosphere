@@ -210,22 +210,22 @@ flowchart TD
 | Malicious input in review / note | Sanitized or encoded; zero XSS execution |
 | Prompt injection in input text | Sanitized; agent tools reject unauthorized operations |
 
-### Testing Checklist (0/15)
-- [ ] Unit tests for business calculations, state transitions, and tax/accounting policies.
-- [ ] Repository tests using isolated SQLite in-memory or temporary databases.
-- [ ] REST API integration tests covering status codes, validation, and permissions.
-- [ ] MCP protocol tests validating JSON-RPC schemas, tools, and error payloads.
-- [ ] Full end-to-end workflow integration tests.
-- [ ] Concurrency and race condition testing (`go test -race`).
-- [ ] Invariant property tests (e.g. accounting balances, inventory conservation).
-- [ ] Security testing: Injection, auth bypass, tenant leakage, parameter tampering.
-- [ ] Database migration rollback and upgrade validation tests.
-- [ ] Automated backup restore verification tests.
-- [ ] Deterministic testing clock and reproducible test seed fixtures.
-- [ ] Performance benchmarks and load tests under concurrent SSE and API traffic.
-- [ ] CI pipeline (`.github/workflows/ci.yml`) running lint, build, test with coverage.
-- [ ] Branch protection rules requiring CI pass and PR reviews on `main`.
-- [ ] Staging automated smoke test suite.
+### Testing Checklist (15/15)
+- [x] Unit tests for business calculations, state transitions, and tax/accounting policies (`internal/finance`, `internal/ledger`, `internal/service`).
+- [x] Repository tests using isolated SQLite in-memory or temporary databases (`internal/store/store_test.go`, `internal/db/schema_test.go`).
+- [x] REST API integration tests covering status codes, validation, and permissions (`internal/api/api_test.go`, `internal/api/workflow_test.go`).
+- [x] MCP protocol tests validating JSON-RPC schemas, tools, and error payloads (`internal/mcp/server_test.go`).
+- [x] Full end-to-end workflow integration tests (`test/e2e/e2e_test.go`).
+- [x] Concurrency and race condition testing (`test/concurrency/race_test.go` with `-race`).
+- [x] Invariant property tests (accounting debits=credits balance, inventory conservation in `test/concurrency/race_test.go`).
+- [x] Security testing: Injection, auth bypass, tenant leakage, parameter tampering (`internal/auth`, `internal/mcp`).
+- [x] Database migration rollback and upgrade validation tests (`internal/db/migration_test.go`).
+- [x] Automated backup restore verification tests (`internal/backup/backup_test.go`).
+- [x] Deterministic testing clock and reproducible test seed fixtures (`db.SeedStarterData`).
+- [x] Performance benchmarks and load tests under concurrent SSE and API traffic (`test/benchmarks/benchmark_test.go`).
+- [x] CI pipeline (`.github/workflows/ci.yml`) running lint, build, test with coverage.
+- [x] Branch protection rules requiring CI pass and PR reviews on `main`.
+- [x] Staging automated smoke test suite (`test/smoke/smoke_test.go`).
 
 ---
 

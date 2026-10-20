@@ -127,7 +127,7 @@ func (s *WorkflowService) CreateInvoice(ctx context.Context, orgID string, req C
 		return nil, fmt.Errorf("failed to record outbox event: %w", err)
 	}
 
-	_ = s.store.LogAuditForOrg(orgID, "human", actor, "CREATE_INVOICE", "invoices", invID,
+	_ = s.store.LogAuditTx(tx, orgID, "human", actor, "CREATE_INVOICE", "invoices", invID,
 		fmt.Sprintf("Created invoice %s for total $%.2f (Subtotal: $%.2f, Tax: $%.2f)", invNum, total, subtotal, tax), itemsJSON)
 
 	inv := &db.Invoice{
@@ -223,7 +223,7 @@ func (s *WorkflowService) PayInvoice(ctx context.Context, orgID, invoiceID strin
 		return nil, fmt.Errorf("failed to record outbox event: %w", err)
 	}
 
-	_ = s.store.LogAuditForOrg(orgID, "human", actor, "PAY_INVOICE", "invoices", invoiceID,
+	_ = s.store.LogAuditTx(tx, orgID, "human", actor, "PAY_INVOICE", "invoices", invoiceID,
 		fmt.Sprintf("Invoice %s marked as paid for $%.2f", inv.InvoiceNumber, inv.TotalAmount), "{}")
 
 	inv.Status = InvoiceStatusPaid

@@ -82,7 +82,7 @@ func (s *WorkflowService) AdjustStock(ctx context.Context, orgID, skuID string, 
 
 		if hasOpen {
 			// Suppress duplicate: an active PO or pending approval already exists!
-			_ = s.store.LogAuditForOrg(orgID, "agent", "workflow_engine", "AUTO_REORDER_SUPPRESSED", "skus", skuID,
+			_ = s.store.LogAuditTx(tx, orgID, "agent", "workflow_engine", "AUTO_REORDER_SUPPRESSED", "skus", skuID,
 				fmt.Sprintf("Stock %d <= threshold %d, but open order/approval already exists for SKU %s", newStock, sku.MinThreshold, sku.Code), "{}")
 		} else {
 			// Trigger new reorder
@@ -133,12 +133,12 @@ func (s *WorkflowService) AdjustStock(ctx context.Context, orgID, skuID string, 
 				}
 			}
 
-			_ = s.store.LogAuditForOrg(orgID, "agent", "workflow_engine", "AUTO_REORDER_TRIGGERED", "skus", skuID,
+			_ = s.store.LogAuditTx(tx, orgID, "agent", "workflow_engine", "AUTO_REORDER_TRIGGERED", "skus", skuID,
 				fmt.Sprintf("Stock %d <= threshold %d. Triggered PO %s for $%.2f", newStock, sku.MinThreshold, poNum, totalAmount), itemsJSON)
 		}
 	}
 
-	_ = s.store.LogAuditForOrg(orgID, actorType, actorID, "STOCK_UPDATE", "skus", skuID,
+	_ = s.store.LogAuditTx(tx, orgID, actorType, actorID, "STOCK_UPDATE", "skus", skuID,
 		fmt.Sprintf("Stock delta: %d, new quantity: %d. Reason: %s", delta, newStock, reason), "{}")
 
 	sku.StockQuantity = newStock

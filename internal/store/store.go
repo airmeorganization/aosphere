@@ -45,6 +45,17 @@ func (s *Store) LogAuditForOrg(orgID, actorType, actorID, action, entityType, en
 	return err
 }
 
+func (s *Store) LogAuditTx(tx *sql.Tx, orgID, actorType, actorID, action, entityType, entityID, reasoning, meta string) error {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	id := "aud_" + uuid.New().String()[:8]
+	_, err := tx.Exec(`INSERT INTO audit_logs (id, org_id, actor_type, actor_id, action, entity_type, entity_id, reasoning, metadata_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, orgID, actorType, actorID, action, entityType, entityID, reasoning, meta)
+	return err
+}
+
 func (s *Store) GetAuditLogs(limit int) ([]db.AuditLog, error) {
 	return s.GetAuditLogsForOrg("org_default", limit)
 }

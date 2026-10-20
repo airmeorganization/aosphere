@@ -182,7 +182,7 @@ func (s *WorkflowService) CreatePurchaseOrder(ctx context.Context, orgID string,
 			CreatedAt:       now,
 		}
 
-		_ = s.store.LogAuditForOrg(orgID, actorType, actorID, "CREATE_PURCHASE_ORDER_PENDING", "purchase_orders", poID,
+		_ = s.store.LogAuditTx(tx, orgID, actorType, actorID, "CREATE_PURCHASE_ORDER_PENDING", "purchase_orders", poID,
 			fmt.Sprintf("PO %s created pending approval ($%.2f > $%.2f)", poNum, totalAmount, s.policy.POApprovalThreshold), itemsJSON)
 	} else {
 		// Directly ordered
@@ -220,7 +220,7 @@ func (s *WorkflowService) CreatePurchaseOrder(ctx context.Context, orgID string,
 			CreatedAt:     now,
 		}
 
-		_ = s.store.LogAuditForOrg(orgID, actorType, actorID, "CREATE_PURCHASE_ORDER", "purchase_orders", poID,
+		_ = s.store.LogAuditTx(tx, orgID, actorType, actorID, "CREATE_PURCHASE_ORDER", "purchase_orders", poID,
 			fmt.Sprintf("PO %s placed directly for $%.2f", poNum, totalAmount), itemsJSON)
 	}
 
@@ -317,7 +317,7 @@ func (s *WorkflowService) ReceivePurchaseOrder(ctx context.Context, orgID, poID 
 		"status":    POStatusReceived,
 	})
 
-	_ = s.store.LogAuditForOrg(orgID, "human", actor, "RECEIVE_PURCHASE_ORDER", "purchase_orders", poID,
+	_ = s.store.LogAuditTx(tx, orgID, "human", actor, "RECEIVE_PURCHASE_ORDER", "purchase_orders", poID,
 		fmt.Sprintf("PO %s received. Stock levels replenished.", po.PONumber), po.ItemsJSON)
 
 	po.Status = POStatusReceived

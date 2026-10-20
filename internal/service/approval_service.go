@@ -157,7 +157,7 @@ func (s *WorkflowService) DecideApproval(ctx context.Context, orgID, approvalID,
 	appr.DecidedBy = &decidedBy
 	appr.DecidedAt = &now
 
-	_ = s.store.LogAuditForOrg(orgID, "human", decidedBy, "DECIDE_APPROVAL", "approvals", approvalID,
+	_ = s.store.LogAuditTx(tx, orgID, "human", decidedBy, "DECIDE_APPROVAL", "approvals", approvalID,
 		fmt.Sprintf("Decision: %s (Execution: %s)", decision, executionStatus), appr.PayloadJSON)
 
 	// 7. Save Idempotency Result

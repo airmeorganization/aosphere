@@ -28,8 +28,8 @@ func InitDB(dbPath string, seedData bool) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
 	}
 
-	db.SetMaxOpenConns(4) // Concurrency-friendly in WAL mode with busy_timeout
-	db.SetMaxIdleConns(4)
+	db.SetMaxOpenConns(1) // Single writer connection prevents SQLITE_BUSY deadlock
+	db.SetMaxIdleConns(1)
 
 	if err := createTables(db); err != nil {
 		return nil, fmt.Errorf("failed to create tables: %w", err)

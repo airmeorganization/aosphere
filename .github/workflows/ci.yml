@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-and-test:
-    name: Build & Test
+    name: Build, Lint & Test Suite
     runs-on: ubuntu-latest
 
     steps:
@@ -27,8 +27,21 @@ jobs:
       - name: Run go vet
         run: go vet ./...
 
-      - name: Run automated test suite
-        run: go test -v -race ./...
+      - name: Run automated test suite with race detection & coverage
+        run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Display coverage summary
+        run: go tool cover -func=coverage.out | tail -n 1
 
       - name: Build Go binary
         run: go build -v -o bin/aosphere .
+
+      - name: Run smoke tests
+        run: go test -v ./test/smoke/...
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.out
+          retention-days: 14
