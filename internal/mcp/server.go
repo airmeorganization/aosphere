@@ -8,9 +8,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 
-
+	"aosphere/internal/auth"
 	"aosphere/internal/store"
 	"github.com/google/uuid"
 )
@@ -35,23 +36,87 @@ type RPCError struct {
 	Message string `json:"message"`
 }
 
+// SessionContext stores authenticated identity and SSE stream channel
+type SessionContext struct {
+	ID      string
+	MsgChan chan []byte
+	AuthCtx *auth.AuthContext
+	AgentID string
+}
+
 type MCPServer struct {
 	store    *store.Store
-	sessions map[string]chan []byte
+	sessions map[string]*SessionContext
 	mu       sync.RWMutex
 }
 
 func NewMCPServer(s *store.Store) *MCPServer {
 	return &MCPServer{
 		store:    s,
-		sessions: make(map[string]chan []byte),
+		sessions: make(map[string]*SessionContext),
 	}
+}
+
+// authenticateRequest extracts and validates the API key or session token
+func (m *MCPServer) authenticateRequest(r *http.Request) (*auth.AuthContext, string, error) {
+	token := auth.ExtractToken(r)
+	if token == "" {
+		return nil, "", fmt.Errorf("missing authentication token or API key")
+	}
+
+	tokenHash := auth.HashToken(token)
+
+	// 1. API key lookup
+	if strings.HasPrefix(token, "ao_sk_") {
+		key, err := m.store.GetAPIKeyByHash(tokenHash)
+		if err != nil || key == nil {
+			return nil, "", fmt.Errorf("invalid or revoked API key")
+		}
+		role, _ := auth.ParseRole(key.Role)
+		return &auth.AuthContext{
+			UserID:   key.UserID,
+			OrgID:    key.OrgID,
+			Email:    "agent@" + key.Name,
+			Name:     key.Name,
+			Role:     role,
+			IsAPIKey: true,
+		}, key.Name, nil
+	}
+
+	// 2. User session lookup
+	sess, user, err := m.store.GetSessionAndUser(tokenHash)
+	if err != nil || user == nil || sess == nil {
+		return nil, "", fmt.Errorf("invalid or expired session token")
+	}
+	role, _ := auth.ParseRole(user.Role)
+	return &auth.AuthContext{
+		UserID:   user.ID,
+		OrgID:    user.OrgID,
+		Email:    user.Email,
+		Name:     user.Name,
+		Role:     role,
+		IsAPIKey: false,
+	}, user.Email, nil
 }
 
 // HandleStdio runs MCP over stdin/stdout for desktop AI agents (Claude Desktop, Antigravity, Cursor)
 func (m *MCPServer) HandleStdio(ctx context.Context) error {
 	scanner := bufio.NewScanner(os.Stdin)
 	writer := bufio.NewWriter(os.Stdout)
+
+	cliAuthCtx := &auth.AuthContext{
+		UserID:   "usr_admin",
+		OrgID:    "org_default",
+		Email:    "cli@aosphere.local",
+		Name:     "stdio_agent",
+		Role:     auth.RoleOwner,
+		IsAPIKey: true,
+	}
+	sessCtx := &SessionContext{
+		ID:      "stdio_session",
+		AuthCtx: cliAuthCtx,
+		AgentID: "stdio_agent",
+	}
 
 	for scanner.Scan() {
 		select {
@@ -68,7 +133,7 @@ func (m *MCPServer) HandleStdio(ctx context.Context) error {
 				continue
 			}
 
-			resp := m.ProcessRequest(&req, "stdio_agent")
+			resp := m.ProcessRequestWithContext(&req, sessCtx)
 			if resp != nil {
 				out, _ := json.Marshal(resp)
 				writer.Write(out)
@@ -88,11 +153,28 @@ func (m *MCPServer) HandleSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	authCtx, agentID, err := m.authenticateRequest(r)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "unauthorized",
+			"message": fmt.Sprintf("MCP SSE authentication failed: %v. Provide valid ao_sk_... key or session token.", err),
+		})
+		return
+	}
+
 	sessionID := uuid.New().String()
 	msgChan := make(chan []byte, 32)
+	sessCtx := &SessionContext{
+		ID:      sessionID,
+		MsgChan: msgChan,
+		AuthCtx: authCtx,
+		AgentID: agentID,
+	}
 
 	m.mu.Lock()
-	m.sessions[sessionID] = msgChan
+	m.sessions[sessionID] = sessCtx
 	m.mu.Unlock()
 
 	defer func() {
@@ -101,6 +183,9 @@ func (m *MCPServer) HandleSSE(w http.ResponseWriter, r *http.Request) {
 		m.mu.Unlock()
 		close(msgChan)
 	}()
+
+	_ = m.store.LogAuditForOrg(authCtx.OrgID, "agent", agentID, "MCP_CONNECT", "sse_session", sessionID,
+		fmt.Sprintf("Client connected with role %s", authCtx.Role), "{}")
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -128,7 +213,7 @@ func (m *MCPServer) HandleSSE(w http.ResponseWriter, r *http.Request) {
 func (m *MCPServer) HandlePostMessage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
 
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusOK)
@@ -136,13 +221,39 @@ func (m *MCPServer) HandlePostMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionID := r.URL.Query().Get("sessionId")
+	var sessCtx *SessionContext
+	if sessionID != "" {
+		m.mu.RLock()
+		sessCtx = m.sessions[sessionID]
+		m.mu.RUnlock()
+	}
+
+	// If no existing session found, authenticate directly from request headers
+	if sessCtx == nil {
+		authCtx, agentID, err := m.authenticateRequest(r)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "unauthorized",
+				"message": fmt.Sprintf("MCP authentication required: %v", err),
+			})
+			return
+		}
+		sessCtx = &SessionContext{
+			ID:      "direct_" + uuid.New().String()[:8],
+			AuthCtx: authCtx,
+			AgentID: agentID,
+		}
+	}
+
 	var req JSONRPCRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	resp := m.ProcessRequest(&req, "sse_agent_"+sessionID)
+	resp := m.ProcessRequestWithContext(&req, sessCtx)
 	if resp == nil {
 		w.WriteHeader(http.StatusAccepted)
 		return
@@ -151,15 +262,10 @@ func (m *MCPServer) HandlePostMessage(w http.ResponseWriter, r *http.Request) {
 	respBytes, _ := json.Marshal(resp)
 
 	// If session has active SSE channel, send through channel and reply 202
-	if sessionID != "" {
-		m.mu.RLock()
-		ch, ok := m.sessions[sessionID]
-		m.mu.RUnlock()
-		if ok {
-			ch <- respBytes
-			w.WriteHeader(http.StatusAccepted)
-			return
-		}
+	if sessCtx.MsgChan != nil {
+		sessCtx.MsgChan <- respBytes
+		w.WriteHeader(http.StatusAccepted)
+		return
 	}
 
 	// Direct HTTP response fallback
@@ -167,12 +273,28 @@ func (m *MCPServer) HandlePostMessage(w http.ResponseWriter, r *http.Request) {
 	w.Write(respBytes)
 }
 
-// ProcessRequest executes the JSON-RPC request and returns the JSONRPCResponse
+// ProcessRequest executes the JSON-RPC request with default compatibility context
 func (m *MCPServer) ProcessRequest(req *JSONRPCRequest, agentID string) *JSONRPCResponse {
+	return m.ProcessRequestWithContext(req, &SessionContext{
+		ID:      "compat_" + agentID,
+		AgentID: agentID,
+		AuthCtx: &auth.AuthContext{
+			UserID:   "usr_admin",
+			OrgID:    "org_default",
+			Email:    agentID + "@aosphere.local",
+			Name:     agentID,
+			Role:     auth.RoleOwner,
+			IsAPIKey: true,
+		},
+	})
+}
+
+// ProcessRequestWithContext executes the JSON-RPC request enforcing RBAC and tenant scoping
+func (m *MCPServer) ProcessRequestWithContext(req *JSONRPCRequest, sessCtx *SessionContext) *JSONRPCResponse {
 	// Notifications (no ID)
 	if req.ID == nil {
 		if req.Method == "notifications/initialized" {
-			log.Printf("MCP Client initialized: %s", agentID)
+			log.Printf("MCP Client initialized: %s", sessCtx.AgentID)
 		}
 		return nil
 	}
@@ -206,7 +328,7 @@ func (m *MCPServer) ProcessRequest(req *JSONRPCRequest, agentID string) *JSONRPC
 		}
 
 	case "tools/call":
-		return m.handleToolCall(req, agentID)
+		return m.handleToolCall(req, sessCtx)
 
 	case "resources/list":
 		return &JSONRPCResponse{
@@ -218,7 +340,7 @@ func (m *MCPServer) ProcessRequest(req *JSONRPCRequest, agentID string) *JSONRPC
 		}
 
 	case "resources/read":
-		return m.handleResourceRead(req)
+		return m.handleResourceRead(req, sessCtx)
 
 	case "prompts/list":
 		return &JSONRPCResponse{
@@ -373,7 +495,20 @@ func (m *MCPServer) getToolDefinitions() []map[string]interface{} {
 	}
 }
 
-func (m *MCPServer) handleToolCall(req *JSONRPCRequest, agentID string) *JSONRPCResponse {
+// toolPermissions maps each tool to the required RBAC capability
+var toolPermissions = map[string]auth.Permission{
+	"erp_check_stock":           auth.PermRead,
+	"erp_adjust_stock":          auth.PermManageInventory,
+	"erp_create_purchase_order": auth.PermManageOrders,
+	"crm_manage_deal":           auth.PermManageOrders,
+	"fin_get_summary":           auth.PermRead,
+	"fin_create_invoice":        auth.PermManageFinance,
+	"presence_sync_nap":         auth.PermManageInventory,
+	"reputation_draft_reply":    auth.PermRead,
+	"approvals_list_pending":    auth.PermApproveOrders,
+}
+
+func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext) *JSONRPCResponse {
 	var params struct {
 		Name      string                 `json:"name"`
 		Arguments map[string]interface{} `json:"arguments"`
@@ -387,17 +522,59 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, agentID string) *JSONRPC
 		}
 	}
 
-	textResult := ""
+	// 1. RBAC Capability Validation
+	requiredPerm, hasPerm := toolPermissions[params.Name]
+	if hasPerm && (sessCtx == nil || sessCtx.AuthCtx == nil || !sessCtx.AuthCtx.Can(requiredPerm)) {
+		role := "anonymous"
+		agentID := "unknown"
+		orgID := "org_default"
+		if sessCtx != nil && sessCtx.AuthCtx != nil {
+			role = string(sessCtx.AuthCtx.Role)
+			agentID = sessCtx.AgentID
+			orgID = sessCtx.AuthCtx.OrgID
+		}
 
+		_ = m.store.LogAuditForOrg(orgID, "agent", agentID, "MCP_TOOL_FORBIDDEN", "tools", params.Name,
+			fmt.Sprintf("Forbidden: role %q lacks permission %q", role, requiredPerm), "{}")
+
+		return &JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result: map[string]interface{}{
+				"content": []map[string]interface{}{
+					{
+						"type": "text",
+						"text": fmt.Sprintf("Error: Permission denied. Role %q lacks required permission %q to execute %q.",
+							role, requiredPerm, params.Name),
+					},
+				},
+				"isError": true,
+			},
+		}
+	}
+
+	// Determine Tenant Org ID & Agent identity
+	orgID := "org_default"
+	agentID := "mcp_client"
+	if sessCtx != nil && sessCtx.AuthCtx != nil {
+		orgID = sessCtx.AuthCtx.OrgID
+		agentID = sessCtx.AgentID
+	}
+
+	textResult := ""
+	isErr := false
+
+	// 2. Execute Tool with Tenant Scoping
 	switch params.Name {
 	case "erp_check_stock":
 		belowOnly := false
 		if v, ok := params.Arguments["below_threshold_only"].(bool); ok {
 			belowOnly = v
 		}
-		skus, err := m.store.GetSKUs(belowOnly)
+		skus, err := m.store.GetSKUsForOrg(orgID, belowOnly)
 		if err != nil {
 			textResult = fmt.Sprintf("Error fetching SKUs: %v", err)
+			isErr = true
 		} else {
 			bytes, _ := json.MarshalIndent(skus, "", "  ")
 			textResult = string(bytes)
@@ -407,9 +584,10 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, agentID string) *JSONRPC
 		skuID, _ := params.Arguments["sku_id"].(string)
 		deltaFloat, _ := params.Arguments["delta"].(float64)
 		reason, _ := params.Arguments["reason"].(string)
-		item, err := m.store.UpdateStock(skuID, int(deltaFloat), reason, "agent", agentID)
+		item, err := m.store.UpdateStockForOrg(orgID, skuID, int(deltaFloat), reason, "agent", agentID)
 		if err != nil {
 			textResult = fmt.Sprintf("Error updating stock: %v", err)
+			isErr = true
 		} else {
 			textResult = fmt.Sprintf("Success. SKU %s stock is now %d (Min: %d). Automated workflows evaluated.",
 				item.Code, item.StockQuantity, item.MinThreshold)
@@ -433,6 +611,7 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, agentID string) *JSONRPC
 		po, err := m.store.CreatePurchaseOrder(supplierID, string(itemsBytes), total, "agent", agentID, notes)
 		if err != nil {
 			textResult = fmt.Sprintf("Error creating PO: %v", err)
+			isErr = true
 		} else {
 			textResult = fmt.Sprintf("Purchase Order %s created. Status: %s. Total Amount: $%.2f. Safety checks passed.",
 				po.PONumber, po.Status, po.TotalAmount)
@@ -444,6 +623,7 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, agentID string) *JSONRPC
 		err := m.store.UpdateDealStage(dealID, stage, "agent", agentID)
 		if err != nil {
 			textResult = fmt.Sprintf("Error updating deal: %v", err)
+			isErr = true
 		} else {
 			textResult = fmt.Sprintf("Deal %s moved to stage '%s'", dealID, stage)
 		}
@@ -452,6 +632,7 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, agentID string) *JSONRPC
 		summary, err := m.store.GetFinancialSummary()
 		if err != nil {
 			textResult = fmt.Sprintf("Error getting financial summary: %v", err)
+			isErr = true
 		} else {
 			bytes, _ := json.MarshalIndent(summary, "", "  ")
 			textResult = string(bytes)
@@ -478,6 +659,7 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, agentID string) *JSONRPC
 		inv, err := m.store.CreateInvoice(custID, string(itemsBytes), subtotal, tax, dueDate, recurring, "agent", agentID)
 		if err != nil {
 			textResult = fmt.Sprintf("Error creating invoice: %v", err)
+			isErr = true
 		} else {
 			textResult = fmt.Sprintf("Invoice %s created for $%.2f (Subtotal: $%.2f, Tax: $%.2f). Due: %s.",
 				inv.InvoiceNumber, inv.TotalAmount, inv.Subtotal, inv.TaxAmount, inv.DueDate)
@@ -491,6 +673,7 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, agentID string) *JSONRPC
 		err := m.store.SyncNAP(bName, addr, phone, web, "agent", agentID)
 		if err != nil {
 			textResult = fmt.Sprintf("Error syncing NAP: %v", err)
+			isErr = true
 		} else {
 			textResult = "Successfully synchronized NAP data across Google, Yelp, Apple Maps, and Bing."
 		}
@@ -501,14 +684,16 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, agentID string) *JSONRPC
 		err := m.store.ReplyReview(revID, reply, "drafted_by_agent", "agent", agentID)
 		if err != nil {
 			textResult = fmt.Sprintf("Error drafting reply: %v", err)
+			isErr = true
 		} else {
 			textResult = fmt.Sprintf("Draft reply saved for review %s. Ready for human authorization.", revID)
 		}
 
 	case "approvals_list_pending":
-		approvals, err := m.store.GetApprovals("pending")
+		approvals, err := m.store.GetApprovalsForOrg(orgID, "pending")
 		if err != nil {
 			textResult = fmt.Sprintf("Error getting pending approvals: %v", err)
+			isErr = true
 		} else {
 			bytes, _ := json.MarshalIndent(approvals, "", "  ")
 			textResult = string(bytes)
@@ -522,6 +707,31 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, agentID string) *JSONRPC
 		}
 	}
 
+	// 3. Audit Log Tool Invocation
+	auditStatus := "success"
+	if isErr {
+		auditStatus = "error"
+	}
+	argsBytes, _ := json.Marshal(params.Arguments)
+	argsStr := string(argsBytes)
+	if len(argsStr) > 120 {
+		argsStr = argsStr[:120] + "..."
+	}
+	resStr := textResult
+	if len(resStr) > 120 {
+		resStr = resStr[:120] + "..."
+	}
+	_ = m.store.LogAuditForOrg(
+		orgID,
+		"agent",
+		agentID,
+		"MCP_TOOL_CALL",
+		"tools",
+		params.Name,
+		fmt.Sprintf("args=%s res=%s", argsStr, resStr),
+		fmt.Sprintf(`{"status":"%s"}`, auditStatus),
+	)
+
 	return &JSONRPCResponse{
 		JSONRPC: "2.0",
 		ID:      req.ID,
@@ -532,6 +742,7 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, agentID string) *JSONRPC
 					"text": textResult,
 				},
 			},
+			"isError": isErr,
 		},
 	}
 }
@@ -565,18 +776,23 @@ func (m *MCPServer) getResourceDefinitions() []map[string]interface{} {
 	}
 }
 
-func (m *MCPServer) handleResourceRead(req *JSONRPCRequest) *JSONRPCResponse {
+func (m *MCPServer) handleResourceRead(req *JSONRPCRequest, sessCtx *SessionContext) *JSONRPCResponse {
 	var params struct {
 		URI string `json:"uri"`
 	}
 	_ = json.Unmarshal(req.Params, &params)
+
+	orgID := "org_default"
+	if sessCtx != nil && sessCtx.AuthCtx != nil {
+		orgID = sessCtx.AuthCtx.OrgID
+	}
 
 	var data interface{}
 	var err error
 
 	switch params.URI {
 	case "res://erp/inventory":
-		data, err = m.store.GetSKUs(false)
+		data, err = m.store.GetSKUsForOrg(orgID, false)
 	case "res://crm/pipeline":
 		data, err = m.store.GetDeals()
 	case "res://financial/summary":

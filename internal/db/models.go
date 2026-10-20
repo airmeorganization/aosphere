@@ -2,8 +2,55 @@ package db
 
 import "time"
 
+// ----------------- AUTH & TENANCY MODELS -----------------
+
+type Organization struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Slug      string    `json:"slug"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type User struct {
+	ID           string    `json:"id"`
+	OrgID        string    `json:"org_id"`
+	Email        string    `json:"email"`
+	PasswordHash string    `json:"-"`
+	Name         string    `json:"name"`
+	Role         string    `json:"role"` // owner, admin, finance, operations, hr, employee, readonly
+	IsActive     bool      `json:"is_active"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+type Session struct {
+	ID             string    `json:"id"`
+	UserID         string    `json:"user_id"`
+	OrgID          string    `json:"org_id"`
+	TokenHash      string    `json:"-"`
+	ExpiresAt      time.Time `json:"expires_at"`
+	CreatedAt      time.Time `json:"created_at"`
+	LastActivityAt time.Time `json:"last_activity_at"`
+}
+
+type APIKey struct {
+	ID           string     `json:"id"`
+	OrgID        string     `json:"org_id"`
+	UserID       string     `json:"user_id,omitempty"`
+	Name         string     `json:"name"`
+	KeyHash      string     `json:"-"`
+	Role         string     `json:"role"`
+	AllowedTools string     `json:"allowed_tools"`
+	IsActive     bool       `json:"is_active"`
+	CreatedAt    time.Time  `json:"created_at"`
+	LastUsedAt   *time.Time `json:"last_used_at,omitempty"`
+}
+
+// ----------------- BUSINESS ENTITY MODELS -----------------
+
 type SKU struct {
 	ID               string    `json:"id"`
+	OrgID            string    `json:"org_id"`
 	Code             string    `json:"code"`
 	Name             string    `json:"name"`
 	Category         string    `json:"category"`
@@ -20,6 +67,7 @@ type SKU struct {
 
 type Supplier struct {
 	ID           string  `json:"id"`
+	OrgID        string  `json:"org_id"`
 	Name         string  `json:"name"`
 	ContactEmail string  `json:"contact_email"`
 	Phone        string  `json:"phone"`
@@ -29,6 +77,7 @@ type Supplier struct {
 
 type PurchaseOrder struct {
 	ID            string    `json:"id"`
+	OrgID         string    `json:"org_id"`
 	PONumber      string    `json:"po_number"`
 	SupplierID    string    `json:"supplier_id"`
 	SupplierName  string    `json:"supplier_name,omitempty"`
@@ -43,6 +92,7 @@ type PurchaseOrder struct {
 
 type Customer struct {
 	ID            string    `json:"id"`
+	OrgID         string    `json:"org_id"`
 	Name          string    `json:"name"`
 	Company       string    `json:"company"`
 	Email         string    `json:"email"`
@@ -55,6 +105,7 @@ type Customer struct {
 
 type Deal struct {
 	ID                string    `json:"id"`
+	OrgID             string    `json:"org_id"`
 	Title             string    `json:"title"`
 	CustomerID        string    `json:"customer_id"`
 	CustomerName      string    `json:"customer_name,omitempty"`
@@ -68,6 +119,7 @@ type Deal struct {
 
 type Invoice struct {
 	ID                 string    `json:"id"`
+	OrgID              string    `json:"org_id"`
 	InvoiceNumber      string    `json:"invoice_number"`
 	CustomerID         string    `json:"customer_id"`
 	CustomerName       string    `json:"customer_name,omitempty"`
@@ -84,6 +136,7 @@ type Invoice struct {
 
 type Expense struct {
 	ID          string    `json:"id"`
+	OrgID       string    `json:"org_id"`
 	Category    string    `json:"category"`
 	Amount      float64   `json:"amount"`
 	Vendor      string    `json:"vendor"`
@@ -94,6 +147,7 @@ type Expense struct {
 
 type Employee struct {
 	ID         string    `json:"id"`
+	OrgID      string    `json:"org_id"`
 	Name       string    `json:"name"`
 	Role       string    `json:"role"`
 	Department string    `json:"department"`
@@ -107,6 +161,7 @@ type Employee struct {
 
 type Shift struct {
 	ID           string    `json:"id"`
+	OrgID        string    `json:"org_id"`
 	EmployeeID   string    `json:"employee_id"`
 	EmployeeName string    `json:"employee_name,omitempty"`
 	ShiftDate    string    `json:"shift_date"`
@@ -119,6 +174,7 @@ type Shift struct {
 
 type Task struct {
 	ID           string    `json:"id"`
+	OrgID        string    `json:"org_id"`
 	Title        string    `json:"title"`
 	Description  string    `json:"description"`
 	ProjectName  string    `json:"project_name"`
@@ -132,6 +188,7 @@ type Task struct {
 
 type LocalListing struct {
 	ID              string    `json:"id"`
+	OrgID           string    `json:"org_id"`
 	Directory       string    `json:"directory"`
 	NAPBusinessName string    `json:"nap_business_name"`
 	NAPAddress      string    `json:"nap_address"`
@@ -143,6 +200,7 @@ type LocalListing struct {
 
 type Review struct {
 	ID          string    `json:"id"`
+	OrgID       string    `json:"org_id"`
 	Platform    string    `json:"platform"`
 	AuthorName  string    `json:"author_name"`
 	Rating      int       `json:"rating"`
@@ -155,6 +213,7 @@ type Review struct {
 
 type Approval struct {
 	ID              string     `json:"id"`
+	OrgID           string     `json:"org_id"`
 	ActionType      string     `json:"action_type"`
 	Title           string     `json:"title"`
 	Description     string     `json:"description"`
@@ -169,6 +228,7 @@ type Approval struct {
 
 type AuditLog struct {
 	ID           string    `json:"id"`
+	OrgID        string    `json:"org_id"`
 	ActorType    string    `json:"actor_type"`
 	ActorID      string    `json:"actor_id"`
 	Action       string    `json:"action"`

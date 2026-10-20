@@ -92,10 +92,11 @@ func main() {
 	fileServer := http.FileServer(http.FS(webSubFS))
 	mux.Handle("/", fileServer)
 
-	// Apply Middlewares: RequestID -> CORS -> Logging -> Panic Recovery
+	// Apply Middlewares: RequestID -> CORS -> Authenticate -> Logging -> Panic Recovery
 	var handler http.Handler = mux
 	handler = api.RecoveryMiddleware(logger)(handler)
 	handler = api.LoggingMiddleware(logger)(handler)
+	handler = api.AuthenticateMiddleware(appStore)(handler)
 	handler = api.CORSMiddleware(handler)
 	handler = api.RequestIDMiddleware(handler)
 

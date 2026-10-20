@@ -26,19 +26,33 @@ func (s *Store) Ping() error {
 // ----------------- AUDIT & APPROVALS -----------------
 
 func (s *Store) LogAudit(actorType, actorID, action, entityType, entityID, reasoning, meta string) error {
+	return s.LogAuditForOrg("org_default", actorType, actorID, action, entityType, entityID, reasoning, meta)
+}
+
+func (s *Store) LogAuditForOrg(orgID, actorType, actorID, action, entityType, entityID, reasoning, meta string) error {
+	if orgID == "" {
+		orgID = "org_default"
+	}
 	id := "aud_" + uuid.New().String()[:8]
-	_, err := s.db.Exec(`INSERT INTO audit_logs (id, actor_type, actor_id, action, entity_type, entity_id, reasoning, metadata_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, actorType, actorID, action, entityType, entityID, reasoning, meta)
+	_, err := s.db.Exec(`INSERT INTO audit_logs (id, org_id, actor_type, actor_id, action, entity_type, entity_id, reasoning, metadata_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, orgID, actorType, actorID, action, entityType, entityID, reasoning, meta)
 	return err
 }
 
 func (s *Store) GetAuditLogs(limit int) ([]db.AuditLog, error) {
+	return s.GetAuditLogsForOrg("org_default", limit)
+}
+
+func (s *Store) GetAuditLogsForOrg(orgID string, limit int) ([]db.AuditLog, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.db.Query(`SELECT id, actor_type, actor_id, action, entity_type, entity_id, reasoning, metadata_json, created_at
-		FROM audit_logs ORDER BY created_at DESC, rowid DESC LIMIT ?`, limit)
+	rows, err := s.db.Query(`SELECT id, org_id, actor_type, actor_id, action, entity_type, entity_id, reasoning, metadata_json, created_at
+		FROM audit_logs WHERE org_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`, orgID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +61,7 @@ func (s *Store) GetAuditLogs(limit int) ([]db.AuditLog, error) {
 	var logs []db.AuditLog
 	for rows.Next() {
 		var l db.AuditLog
-		if err := rows.Scan(&l.ID, &l.ActorType, &l.ActorID, &l.Action, &l.EntityType, &l.EntityID, &l.Reasoning, &l.MetadataJSON, &l.CreatedAt); err != nil {
+		if err := rows.Scan(&l.ID, &l.OrgID, &l.ActorType, &l.ActorID, &l.Action, &l.EntityType, &l.EntityID, &l.Reasoning, &l.MetadataJSON, &l.CreatedAt); err != nil {
 			return nil, err
 		}
 		logs = append(logs, l)
@@ -56,16 +70,23 @@ func (s *Store) GetAuditLogs(limit int) ([]db.AuditLog, error) {
 }
 
 func (s *Store) GetApprovals(status string) ([]db.Approval, error) {
-	query := `SELECT id, action_type, title, description, payload_json, status, requested_by_type, requested_by_id, decided_by, decided_at, created_at
-		FROM approvals`
+	return s.GetApprovalsForOrg("org_default", status)
+}
+
+func (s *Store) GetApprovalsForOrg(orgID, status string) ([]db.Approval, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	query := `SELECT id, org_id, action_type, title, description, payload_json, status, requested_by_type, requested_by_id, decided_by, decided_at, created_at
+		FROM approvals WHERE org_id = ?`
 	var rows *sql.Rows
 	var err error
 	if status != "" {
-		query += " WHERE status = ? ORDER BY created_at DESC"
-		rows, err = s.db.Query(query, status)
+		query += " AND status = ? ORDER BY created_at DESC"
+		rows, err = s.db.Query(query, orgID, status)
 	} else {
 		query += " ORDER BY created_at DESC"
-		rows, err = s.db.Query(query)
+		rows, err = s.db.Query(query, orgID)
 	}
 	if err != nil {
 		return nil, err
@@ -75,7 +96,7 @@ func (s *Store) GetApprovals(status string) ([]db.Approval, error) {
 	var list []db.Approval
 	for rows.Next() {
 		var a db.Approval
-		if err := rows.Scan(&a.ID, &a.ActionType, &a.Title, &a.Description, &a.PayloadJSON, &a.Status, &a.RequestedByType, &a.RequestedByID, &a.DecidedBy, &a.DecidedAt, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.OrgID, &a.ActionType, &a.Title, &a.Description, &a.PayloadJSON, &a.Status, &a.RequestedByType, &a.RequestedByID, &a.DecidedBy, &a.DecidedAt, &a.CreatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, a)
@@ -102,15 +123,22 @@ func (s *Store) DecideApproval(id, decision, decidedBy string) error {
 // ----------------- ERP & SUPPLY CHAIN -----------------
 
 func (s *Store) GetSKUs(belowThresholdOnly bool) ([]db.SKU, error) {
-	query := `SELECT s.id, s.code, s.name, s.category, s.stock_quantity, s.reserved_quantity, s.min_threshold,
-		s.reorder_quantity, s.unit_cost, s.selling_price, s.supplier_id, COALESCE(sup.name, '') as supplier_name, s.updated_at
-		FROM skus s LEFT JOIN suppliers sup ON s.supplier_id = sup.id`
+	return s.GetSKUsForOrg("org_default", belowThresholdOnly)
+}
+
+func (s *Store) GetSKUsForOrg(orgID string, belowThresholdOnly bool) ([]db.SKU, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	query := `SELECT s.id, s.org_id, s.code, s.name, s.category, s.stock_quantity, s.reserved_quantity, s.min_threshold,
+		s.reorder_quantity, s.unit_cost, s.selling_price, COALESCE(s.supplier_id, '') as supplier_id, COALESCE(sup.name, '') as supplier_name, s.updated_at
+		FROM skus s LEFT JOIN suppliers sup ON s.supplier_id = sup.id WHERE s.org_id = ?`
 	if belowThresholdOnly {
-		query += " WHERE s.stock_quantity <= s.min_threshold"
+		query += " AND s.stock_quantity <= s.min_threshold"
 	}
 	query += " ORDER BY s.code ASC"
 
-	rows, err := s.db.Query(query)
+	rows, err := s.db.Query(query, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +147,7 @@ func (s *Store) GetSKUs(belowThresholdOnly bool) ([]db.SKU, error) {
 	var list []db.SKU
 	for rows.Next() {
 		var item db.SKU
-		if err := rows.Scan(&item.ID, &item.Code, &item.Name, &item.Category, &item.StockQuantity, &item.ReservedQuantity,
+		if err := rows.Scan(&item.ID, &item.OrgID, &item.Code, &item.Name, &item.Category, &item.StockQuantity, &item.ReservedQuantity,
 			&item.MinThreshold, &item.ReorderQuantity, &item.UnitCost, &item.SellingPrice, &item.SupplierID, &item.SupplierName, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -129,6 +157,13 @@ func (s *Store) GetSKUs(belowThresholdOnly bool) ([]db.SKU, error) {
 }
 
 func (s *Store) UpdateStock(skuID string, delta int, reason, actorType, actorID string) (*db.SKU, error) {
+	return s.UpdateStockForOrg("org_default", skuID, delta, reason, actorType, actorID)
+}
+
+func (s *Store) UpdateStockForOrg(orgID, skuID string, delta int, reason, actorType, actorID string) (*db.SKU, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
@@ -140,9 +175,9 @@ func (s *Store) UpdateStock(skuID string, delta int, reason, actorType, actorID 
 	var unitCost float64
 
 	err = tx.QueryRow(`SELECT code, name, stock_quantity, min_threshold, reorder_quantity, unit_cost, supplier_id
-		FROM skus WHERE id = ?`, skuID).Scan(&code, &name, &currentStock, &minThresh, &reorderQty, &unitCost, &supplierID)
+		FROM skus WHERE id = ? AND org_id = ?`, skuID, orgID).Scan(&code, &name, &currentStock, &minThresh, &reorderQty, &unitCost, &supplierID)
 	if err != nil {
-		return nil, fmt.Errorf("sku %s not found: %w", skuID, err)
+		return nil, fmt.Errorf("sku %s not found in org %s: %w", skuID, orgID, err)
 	}
 
 	newStock := currentStock + delta
@@ -151,7 +186,7 @@ func (s *Store) UpdateStock(skuID string, delta int, reason, actorType, actorID 
 	}
 
 	now := time.Now()
-	_, err = tx.Exec(`UPDATE skus SET stock_quantity = ?, updated_at = ? WHERE id = ?`, newStock, now, skuID)
+	_, err = tx.Exec(`UPDATE skus SET stock_quantity = ?, updated_at = ? WHERE id = ? AND org_id = ?`, newStock, now, skuID, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -175,20 +210,20 @@ func (s *Store) UpdateStock(skuID string, delta int, reason, actorType, actorID 
 		// Safety threshold: If PO > $1,000, route to HITL approval. Otherwise auto-draft.
 		if totalAmount > 1000.0 {
 			apprID := "appr_" + uuid.New().String()[:8]
-			tx.Exec(`INSERT INTO approvals (id, action_type, title, description, payload_json, status, requested_by_type, requested_by_id)
-				VALUES (?, 'create_po', ?, ?, ?, 'pending', 'agent', ?)`,
-				apprID,
+			tx.Exec(`INSERT INTO approvals (id, org_id, action_type, title, description, payload_json, status, requested_by_type, requested_by_id)
+				VALUES (?, ?, 'create_po', ?, ?, ?, 'pending', 'agent', ?)`,
+				apprID, orgID,
 				fmt.Sprintf("Auto PO for %s (Low Stock: %d)", code, newStock),
 				fmt.Sprintf("Stock dropped to %d (Min: %d). Need %d units at $%.2f ($%.2f total).", newStock, minThresh, reorderQty, unitCost, totalAmount),
 				string(itemsJSON), actorID)
 
-			tx.Exec(`INSERT INTO purchase_orders (id, po_number, supplier_id, status, total_amount, items_json, created_by_type, actor_id, notes)
-				VALUES (?, ?, ?, 'pending_approval', ?, ?, ?, ?, 'Triggered by low stock workflow. Pending human safety sign-off.')`,
-				poID, poNumber, supplierID, totalAmount, string(itemsJSON), actorType, actorID)
+			tx.Exec(`INSERT INTO purchase_orders (id, org_id, po_number, supplier_id, status, total_amount, items_json, created_by_type, actor_id, notes)
+				VALUES (?, ?, ?, ?, 'pending_approval', ?, ?, ?, ?, 'Triggered by low stock workflow. Pending human safety sign-off.')`,
+				poID, orgID, poNumber, supplierID, totalAmount, string(itemsJSON), actorType, actorID)
 		} else {
-			tx.Exec(`INSERT INTO purchase_orders (id, po_number, supplier_id, status, total_amount, items_json, created_by_type, actor_id, notes)
-				VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, 'Auto-generated under $1000 threshold.')`,
-				poID, poNumber, supplierID, totalAmount, string(itemsJSON), actorType, actorID)
+			tx.Exec(`INSERT INTO purchase_orders (id, org_id, po_number, supplier_id, status, total_amount, items_json, created_by_type, actor_id, notes)
+				VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, ?, 'Auto-generated under $1000 threshold.')`,
+				poID, orgID, poNumber, supplierID, totalAmount, string(itemsJSON), actorType, actorID)
 		}
 	}
 
@@ -197,15 +232,16 @@ func (s *Store) UpdateStock(skuID string, delta int, reason, actorType, actorID 
 	}
 
 	if autoReorderTriggered {
-		_ = s.LogAudit("agent", "workflow_engine", "AUTO_REORDER_TRIGGERED", "skus", skuID,
+		_ = s.LogAuditForOrg(orgID, "agent", "workflow_engine", "AUTO_REORDER_TRIGGERED", "skus", skuID,
 			fmt.Sprintf("Stock %d <= threshold %d. Triggered PO %s", newStock, minThresh, autoReorderPONumber), autoReorderItems)
 	}
 
-	_ = s.LogAudit(actorType, actorID, "STOCK_UPDATE", "skus", skuID,
+	_ = s.LogAuditForOrg(orgID, actorType, actorID, "STOCK_UPDATE", "skus", skuID,
 		fmt.Sprintf("Stock adjusted by %d (New: %d). Reason: %s", delta, newStock, reason), "{}")
 
 	return &db.SKU{
 		ID:            skuID,
+		OrgID:         orgID,
 		Code:          code,
 		Name:          name,
 		StockQuantity: newStock,
@@ -214,7 +250,14 @@ func (s *Store) UpdateStock(skuID string, delta int, reason, actorType, actorID 
 }
 
 func (s *Store) GetSuppliers() ([]db.Supplier, error) {
-	rows, err := s.db.Query(`SELECT id, name, contact_email, phone, lead_time_days, rating FROM suppliers ORDER BY name ASC`)
+	return s.GetSuppliersForOrg("org_default")
+}
+
+func (s *Store) GetSuppliersForOrg(orgID string) ([]db.Supplier, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	rows, err := s.db.Query(`SELECT id, org_id, name, contact_email, phone, lead_time_days, rating FROM suppliers WHERE org_id = ? ORDER BY name ASC`, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +266,7 @@ func (s *Store) GetSuppliers() ([]db.Supplier, error) {
 	var list []db.Supplier
 	for rows.Next() {
 		var sup db.Supplier
-		if err := rows.Scan(&sup.ID, &sup.Name, &sup.ContactEmail, &sup.Phone, &sup.LeadTimeDays, &sup.Rating); err != nil {
+		if err := rows.Scan(&sup.ID, &sup.OrgID, &sup.Name, &sup.ContactEmail, &sup.Phone, &sup.LeadTimeDays, &sup.Rating); err != nil {
 			return nil, err
 		}
 		list = append(list, sup)

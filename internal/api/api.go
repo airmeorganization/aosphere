@@ -7,8 +7,16 @@ import (
 	"sync"
 	"time"
 
+	"aosphere/internal/auth"
 	"aosphere/internal/store"
 )
+
+func getOrgID(r *http.Request) string {
+	if authCtx := GetAuthContext(r.Context()); authCtx != nil && authCtx.OrgID != "" {
+		return authCtx.OrgID
+	}
+	return "org_default"
+}
 
 type API struct {
 	store      *store.Store
@@ -91,13 +99,21 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/version", a.HandleInfo)
 	mux.HandleFunc("/api/v1/info", a.HandleInfo)
 
+	// Authentication & Identity
+	mux.HandleFunc("/api/auth/register", a.HandleRegister)
+	mux.HandleFunc("/api/auth/login", a.HandleLogin)
+	mux.HandleFunc("/api/auth/logout", a.HandleLogout)
+	mux.HandleFunc("/api/auth/me", a.HandleMe)
+	mux.HandleFunc("/api/auth/api-keys", a.HandleAPIKeys)
+
 	// SSE Live Feed
 	mux.HandleFunc("/api/events", a.HandleSSE)
 
 	// ERP
 	mux.HandleFunc("/api/skus", func(w http.ResponseWriter, r *http.Request) {
+		orgID := getOrgID(r)
 		below := r.URL.Query().Get("below_threshold") == "true"
-		items, err := a.store.GetSKUs(below)
+		items, err := a.store.GetSKUsForOrg(orgID, below)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -110,6 +126,12 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		authCtx := GetAuthContext(r.Context())
+		if authCtx != nil && !authCtx.Can(auth.PermManageInventory) {
+			w.WriteHeader(http.StatusForbidden)
+			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission manage_inventory required"})
+			return
+		}
 		var req struct {
 			SKUID  string `json:"sku_id"`
 			Delta  int    `json:"delta"`
@@ -119,7 +141,16 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		updated, err := a.store.UpdateStock(req.SKUID, req.Delta, req.Reason, "human", "web_user")
+		orgID := getOrgID(r)
+		actorType := "human"
+		actorID := "web_user"
+		if authCtx != nil {
+			if authCtx.IsAPIKey {
+				actorType = "agent"
+			}
+			actorID = authCtx.UserID
+		}
+		updated, err := a.store.UpdateStockForOrg(orgID, req.SKUID, req.Delta, req.Reason, actorType, actorID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -129,7 +160,8 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("/api/suppliers", func(w http.ResponseWriter, r *http.Request) {
-		sups, err := a.store.GetSuppliers()
+		orgID := getOrgID(r)
+		sups, err := a.store.GetSuppliersForOrg(orgID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -417,8 +449,9 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 
 	// APPROVALS & AUDIT
 	mux.HandleFunc("/api/approvals", func(w http.ResponseWriter, r *http.Request) {
+		orgID := getOrgID(r)
 		status := r.URL.Query().Get("status")
-		apprs, err := a.store.GetApprovals(status)
+		apprs, err := a.store.GetApprovalsForOrg(orgID, status)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -431,6 +464,16 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		authCtx := GetAuthContext(r.Context())
+		if authCtx != nil && !authCtx.Can(auth.PermApproveOrders) {
+			w.WriteHeader(http.StatusForbidden)
+			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission approve_orders required"})
+			return
+		}
+		decider := "admin"
+		if authCtx != nil {
+			decider = authCtx.Name
+		}
 		var req struct {
 			ApprovalID string `json:"approval_id"`
 			Decision   string `json:"decision"` // approved, rejected
@@ -439,7 +482,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := a.store.DecideApproval(req.ApprovalID, req.Decision, "admin"); err != nil {
+		if err := a.store.DecideApproval(req.ApprovalID, req.Decision, decider); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -448,7 +491,8 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("/api/audit-logs", func(w http.ResponseWriter, r *http.Request) {
-		logs, err := a.store.GetAuditLogs(50)
+		orgID := getOrgID(r)
+		logs, err := a.store.GetAuditLogsForOrg(orgID, 50)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
