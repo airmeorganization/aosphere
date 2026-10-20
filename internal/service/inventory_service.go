@@ -8,6 +8,7 @@ import (
 
 	"aosphere/internal/auth"
 	"aosphere/internal/db"
+	"aosphere/internal/finance"
 	"github.com/google/uuid"
 )
 
@@ -92,7 +93,10 @@ func (s *WorkflowService) AdjustStock(ctx context.Context, orgID, skuID string, 
 			itemsJSON := string(itemsJSONBytes)
 
 			poID := "po_" + uuid.New().String()[:8]
-			poNum := fmt.Sprintf("PO-%d", time.Now().Unix())
+			poNum, err := finance.GenerateSequenceNumber(ctx, tx, orgID, "PO")
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate sequential PO number for auto-reorder: %w", err)
+			}
 
 			var supID interface{} = sku.SupplierID
 			if sku.SupplierID == "" {

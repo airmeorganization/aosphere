@@ -334,3 +334,89 @@ func TestMCPServer_WorkflowIntegrityAndReconciliation(t *testing.T) {
 		t.Errorf("expected valid reconciliation JSON report, got: %s", textRec)
 	}
 }
+
+func TestMCPServer_TrialBalanceAndBackup(t *testing.T) {
+	server, _, _, cleanup := setupTestMCPServer(t)
+	defer cleanup()
+
+	agentCtx := &SessionContext{
+		ID:      "sess_ops",
+		AgentID: "ops_agent",
+		AuthCtx: &auth.AuthContext{
+			UserID:   "usr_ops",
+			OrgID:    "org_default",
+			Role:     auth.RoleOperations,
+			IsAPIKey: true,
+		},
+	}
+
+	adminCtx := &SessionContext{
+		ID:      "sess_admin",
+		AgentID: "admin_agent",
+		AuthCtx: &auth.AuthContext{
+			UserID:   "usr_admin",
+			OrgID:    "org_default",
+			Role:     auth.RoleAdmin,
+			IsAPIKey: true,
+		},
+	}
+
+	// 1. Call fin_trial_balance via MCP tool (Operations role has PermRead)
+	callTB := &JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "tools/call",
+		Params:  json.RawMessage(`{"name": "fin_trial_balance", "arguments": {}}`),
+	}
+	respTB := server.ProcessRequestWithContext(callTB, agentCtx)
+	resTBMap, _ := respTB.Result.(map[string]interface{})
+	contentTB, _ := resTBMap["content"].([]map[string]interface{})
+	textTB := contentTB[0]["text"].(string)
+
+	if !strings.Contains(textTB, `"is_balanced": true`) {
+		t.Errorf("expected trial balance to be balanced, got: %s", textTB)
+	}
+
+	// 2. Call sys_backup with non-admin operations agent -> Forbidden
+	callBackup := &JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      2,
+		Method:  "tools/call",
+		Params:  json.RawMessage(`{"name": "sys_backup", "arguments": {}}`),
+	}
+	respBackupForbidden := server.ProcessRequestWithContext(callBackup, agentCtx)
+	resForbiddenMap, _ := respBackupForbidden.Result.(map[string]interface{})
+	contentForbidden, _ := resForbiddenMap["content"].([]map[string]interface{})
+	textForbidden := contentForbidden[0]["text"].(string)
+
+	if !strings.Contains(textForbidden, "Permission denied") {
+		t.Errorf("expected Permission denied for operations agent calling sys_backup, got: %s", textForbidden)
+	}
+
+	// 3. Call sys_backup with Admin agent -> Succeeds
+	respBackupAdmin := server.ProcessRequestWithContext(callBackup, adminCtx)
+	resAdminMap, _ := respBackupAdmin.Result.(map[string]interface{})
+	contentAdmin, _ := resAdminMap["content"].([]map[string]interface{})
+	textAdmin := contentAdmin[0]["text"].(string)
+
+	if !strings.Contains(textAdmin, "Snapshot backup created successfully") {
+		t.Errorf("expected backup success for admin agent, got: %s", textAdmin)
+	}
+
+	// 4. Read resource res://ledger/trial-balance
+	readRes := &JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      3,
+		Method:  "resources/read",
+		Params:  json.RawMessage(`{"uri": "res://ledger/trial-balance"}`),
+	}
+	respRes := server.ProcessRequestWithContext(readRes, agentCtx)
+	resMap, _ := respRes.Result.(map[string]interface{})
+	contentsList, _ := resMap["contents"].([]map[string]interface{})
+	resText := contentsList[0]["text"].(string)
+
+	if !strings.Contains(resText, `"is_balanced":true`) && !strings.Contains(resText, `"is_balanced": true`) {
+		t.Errorf("expected resource read to contain is_balanced, got: %s", resText)
+	}
+}
+

@@ -8,6 +8,7 @@ import (
 
 	"aosphere/internal/auth"
 	"aosphere/internal/db"
+	"aosphere/internal/finance"
 	"github.com/google/uuid"
 )
 
@@ -109,7 +110,10 @@ func (s *WorkflowService) CreatePurchaseOrder(ctx context.Context, orgID string,
 	requiresApproval := s.policy.RequiresApprovalForPO(totalAmount, isAgent)
 
 	poID := "po_" + uuid.New().String()[:8]
-	poNum := fmt.Sprintf("PO-%d", time.Now().Unix())
+	poNum, err := finance.GenerateSequenceNumber(ctx, tx, orgID, "PO")
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate sequential PO number: %w", err)
+	}
 	now := time.Now()
 
 	actorType := "human"
@@ -299,6 +303,20 @@ func (s *WorkflowService) ReceivePurchaseOrder(ctx context.Context, orgID, poID 
 	if authCtx != nil {
 		actor = authCtx.Name
 	}
+
+	// Double-entry General Ledger: Post Goods Receipt (Debit Inventory Asset, Credit AP)
+	totalCents := finance.DollarsToCents(po.TotalAmount)
+	if _, err := s.ledger.PostPOReceipt(ctx, tx, orgID, poID, po.PONumber, totalCents, actor); err != nil {
+		return nil, fmt.Errorf("failed to post purchase order receipt to general ledger: %w", err)
+	}
+
+	// Transactional Outbox Event
+	_ = RecordOutboxEvent(ctx, tx, orgID, "po_received", map[string]interface{}{
+		"po_id":     poID,
+		"po_number": po.PONumber,
+		"status":    POStatusReceived,
+	})
+
 	_ = s.store.LogAuditForOrg(orgID, "human", actor, "RECEIVE_PURCHASE_ORDER", "purchase_orders", poID,
 		fmt.Sprintf("PO %s received. Stock levels replenished.", po.PONumber), po.ItemsJSON)
 

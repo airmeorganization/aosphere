@@ -8,6 +8,7 @@ import (
 
 	"aosphere/internal/auth"
 	"aosphere/internal/db"
+	"aosphere/internal/finance"
 	"github.com/google/uuid"
 )
 
@@ -59,8 +60,8 @@ func (s *WorkflowService) CreateInvoice(ctx context.Context, orgID string, req C
 		return nil, err
 	}
 
-	// 3. Compute Server-Side Line Items, Tax, and Subtotal
-	subtotal := 0.0
+	// 3. Compute Server-Side Line Items, Tax, and Subtotal in Minor Units (Cents)
+	var subtotalCents int64
 	for _, it := range req.Items {
 		if it.Qty <= 0 {
 			return nil, fmt.Errorf("invalid quantity %d for item %q", it.Qty, it.Desc)
@@ -68,11 +69,16 @@ func (s *WorkflowService) CreateInvoice(ctx context.Context, orgID string, req C
 		if it.Price < 0.0 {
 			return nil, fmt.Errorf("negative price %.2f not permitted for item %q", it.Price, it.Desc)
 		}
-		subtotal += float64(it.Qty) * it.Price
+		itemPriceCents := finance.DollarsToCents(it.Price)
+		subtotalCents += int64(it.Qty) * itemPriceCents
 	}
 
-	tax := subtotal * 0.08 // standard 8% tax calculation
-	total := subtotal + tax
+	taxCents := finance.CalculateTax(subtotalCents, finance.DefaultTaxRateBasisPoints)
+	totalCents := subtotalCents + taxCents
+
+	subtotal := finance.CentsToDollars(subtotalCents)
+	tax := finance.CentsToDollars(taxCents)
+	total := finance.CentsToDollars(totalCents)
 
 	recurring := req.Recurring
 	if recurring == "" {
@@ -84,7 +90,10 @@ func (s *WorkflowService) CreateInvoice(ctx context.Context, orgID string, req C
 	}
 
 	invID := "inv_" + uuid.New().String()[:8]
-	invNum := fmt.Sprintf("INV-%d", time.Now().Unix())
+	invNum, err := finance.GenerateSequenceNumber(ctx, tx, orgID, "INV")
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate sequential invoice number: %w", err)
+	}
 	now := time.Now()
 	issueDate := now.Format("2006-01-02")
 
@@ -102,6 +111,22 @@ func (s *WorkflowService) CreateInvoice(ctx context.Context, orgID string, req C
 	if authCtx != nil {
 		actor = authCtx.Name
 	}
+
+	// 4. Double-Entry General Ledger: Post Invoice Issued (Debit AR, Credit Sales Revenue & Tax)
+	if _, err := s.ledger.PostInvoiceIssued(ctx, tx, orgID, invID, invNum, subtotalCents, taxCents, totalCents, actor); err != nil {
+		return nil, fmt.Errorf("failed to post invoice to general ledger: %w", err)
+	}
+
+	// 5. Transactional Outbox Event
+	if err := RecordOutboxEvent(ctx, tx, orgID, "invoice_created", map[string]interface{}{
+		"invoice_id":     invID,
+		"invoice_number": invNum,
+		"customer_id":    req.CustomerID,
+		"total_amount":   total,
+	}); err != nil {
+		return nil, fmt.Errorf("failed to record outbox event: %w", err)
+	}
+
 	_ = s.store.LogAuditForOrg(orgID, "human", actor, "CREATE_INVOICE", "invoices", invID,
 		fmt.Sprintf("Created invoice %s for total $%.2f (Subtotal: $%.2f, Tax: $%.2f)", invNum, total, subtotal, tax), itemsJSON)
 
@@ -182,6 +207,22 @@ func (s *WorkflowService) PayInvoice(ctx context.Context, orgID, invoiceID strin
 	if authCtx != nil {
 		actor = authCtx.Name
 	}
+
+	// Double-Entry General Ledger: Post Invoice Paid (Debit Cash, Credit AR)
+	totalCents := finance.DollarsToCents(inv.TotalAmount)
+	if _, err := s.ledger.PostInvoicePaid(ctx, tx, orgID, invoiceID, inv.InvoiceNumber, totalCents, actor); err != nil {
+		return nil, fmt.Errorf("failed to post invoice payment to general ledger: %w", err)
+	}
+
+	// Transactional Outbox Event
+	if err := RecordOutboxEvent(ctx, tx, orgID, "invoice_paid", map[string]interface{}{
+		"invoice_id":     invoiceID,
+		"invoice_number": inv.InvoiceNumber,
+		"total_amount":   inv.TotalAmount,
+	}); err != nil {
+		return nil, fmt.Errorf("failed to record outbox event: %w", err)
+	}
+
 	_ = s.store.LogAuditForOrg(orgID, "human", actor, "PAY_INVOICE", "invoices", invoiceID,
 		fmt.Sprintf("Invoice %s marked as paid for $%.2f", inv.InvoiceNumber, inv.TotalAmount), "{}")
 

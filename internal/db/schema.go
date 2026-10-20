@@ -35,6 +35,10 @@ func InitDB(dbPath string, seedData bool) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to create tables: %w", err)
 	}
 
+	if err := RunMigrations(db); err != nil {
+		return nil, fmt.Errorf("failed to run database migrations: %w", err)
+	}
+
 	if seedData {
 		if err := SeedStarterData(db); err != nil {
 			log.Printf("Seed starter data check: %v", err)
@@ -538,6 +542,21 @@ func SeedStarterData(db *sql.DB) error {
 		('aud_01', 'agent', 'agt_inventory_watchdog', 'TRIGGER_LOW_STOCK_REORDER', 'skus', 'sku_01', 'Stock level (6) breached minimum safety threshold (15). PO created and routed to human approval queue due to amount > $1,000 safety rule.', '{"amount":2250.00,"rule_triggered":"SAFETY_THRESHOLD_1000"}')
 	`); err != nil {
 		return fmt.Errorf("failed to seed audit logs: %w", err)
+	}
+
+	// Seed Standard Chart of Accounts
+	if _, err := db.Exec(`INSERT OR IGNORE INTO accounts (id, org_id, code, name, type, normal_balance) VALUES
+		('acc_1000', 'org_default', '1000', 'Operating Cash / Bank', 'asset', 'debit'),
+		('acc_1100', 'org_default', '1100', 'Accounts Receivable', 'asset', 'debit'),
+		('acc_1200', 'org_default', '1200', 'Inventory Asset', 'asset', 'debit'),
+		('acc_2000', 'org_default', '2000', 'Accounts Payable', 'liability', 'credit'),
+		('acc_2100', 'org_default', '2100', 'Sales Tax Payable', 'liability', 'credit'),
+		('acc_3000', 'org_default', '3000', 'Retained Earnings', 'equity', 'credit'),
+		('acc_4000', 'org_default', '4000', 'Sales Revenue', 'revenue', 'credit'),
+		('acc_5000', 'org_default', '5000', 'Cost of Goods Sold', 'expense', 'debit'),
+		('acc_5100', 'org_default', '5100', 'Operating Expenses', 'expense', 'debit')
+	`); err != nil {
+		return fmt.Errorf("failed to seed chart of accounts: %w", err)
 	}
 
 	return nil

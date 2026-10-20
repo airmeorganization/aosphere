@@ -206,3 +206,115 @@ func TestWorkflowAPI_OptimisticLockingAndReconciliation(t *testing.T) {
 	}
 	t.Logf("Reconciliation complete. Total checks: %d, Discrepancies: %d", report.TotalChecked, len(report.Discrepancies))
 }
+
+func TestWorkflowAPI_TrialBalanceAndBackup(t *testing.T) {
+	testAPI, database := setupTestAPI(t)
+	defer database.Close()
+
+	mux := http.NewServeMux()
+	testAPI.RegisterRoutes(mux)
+
+	adminCtx := &auth.AuthContext{
+		UserID: "usr_admin",
+		OrgID:  "org_default",
+		Role:   auth.RoleAdmin,
+		Email:  "admin@aosphere.local",
+	}
+
+	// 1. Create and pay an invoice to generate ledger entries
+	invPayload := map[string]interface{}{
+		"customer_id": "cust_01",
+		"items": []map[string]interface{}{
+			{
+				"desc":  "Technical Services",
+				"qty":   2,
+				"price": 500.0,
+			},
+		},
+		"due_date": "2026-11-01",
+	}
+	bInv, _ := json.Marshal(invPayload)
+	reqInv := httptest.NewRequest(http.MethodPost, "/api/invoices", bytes.NewReader(bInv))
+	reqInv.Header.Set("Content-Type", "application/json")
+	reqInv = reqInv.WithContext(context.WithValue(reqInv.Context(), AuthCtxKey, adminCtx))
+	rrInv := httptest.NewRecorder()
+	mux.ServeHTTP(rrInv, reqInv)
+
+	if rrInv.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created for invoice, got %d: %s", rrInv.Code, rrInv.Body.String())
+	}
+
+	var createdInv db.Invoice
+	_ = json.NewDecoder(rrInv.Body).Decode(&createdInv)
+
+	payPayload := map[string]interface{}{
+		"invoice_id": createdInv.ID,
+	}
+	bPay, _ := json.Marshal(payPayload)
+	reqPay := httptest.NewRequest(http.MethodPost, "/api/invoices/pay", bytes.NewReader(bPay))
+	reqPay.Header.Set("Content-Type", "application/json")
+	reqPay = reqPay.WithContext(context.WithValue(reqPay.Context(), AuthCtxKey, adminCtx))
+	rrPay := httptest.NewRecorder()
+	mux.ServeHTTP(rrPay, reqPay)
+
+	if rrPay.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for invoice payment, got %d: %s", rrPay.Code, rrPay.Body.String())
+	}
+
+	// 2. Query /api/ledger/trial-balance
+	reqTB := httptest.NewRequest(http.MethodGet, "/api/ledger/trial-balance", nil)
+	reqTB = reqTB.WithContext(context.WithValue(reqTB.Context(), AuthCtxKey, adminCtx))
+	rrTB := httptest.NewRecorder()
+	mux.ServeHTTP(rrTB, reqTB)
+
+	if rrTB.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for trial-balance, got %d: %s", rrTB.Code, rrTB.Body.String())
+	}
+
+	var tbResp struct {
+		OrgID             string `json:"org_id"`
+		TotalDebitsCents  int64  `json:"total_debits_cents"`
+		TotalCreditsCents int64  `json:"total_credits_cents"`
+		IsBalanced        bool   `json:"is_balanced"`
+	}
+	if err := json.NewDecoder(rrTB.Body).Decode(&tbResp); err != nil {
+		t.Fatalf("failed to decode trial-balance response: %v", err)
+	}
+
+	if !tbResp.IsBalanced {
+		t.Errorf("expected trial balance to be balanced, got false")
+	}
+	if tbResp.TotalDebitsCents != tbResp.TotalCreditsCents {
+		t.Errorf("expected debits (%d) == credits (%d)", tbResp.TotalDebitsCents, tbResp.TotalCreditsCents)
+	}
+	if tbResp.TotalDebitsCents == 0 {
+		t.Errorf("expected total debits > 0 after invoice and payment posting")
+	}
+
+	// 3. Trigger /api/backup/run
+	reqBackup := httptest.NewRequest(http.MethodPost, "/api/backup/run", nil)
+	reqBackup = reqBackup.WithContext(context.WithValue(reqBackup.Context(), AuthCtxKey, adminCtx))
+	rrBackup := httptest.NewRecorder()
+	mux.ServeHTTP(rrBackup, reqBackup)
+
+	if rrBackup.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for backup run, got %d: %s", rrBackup.Code, rrBackup.Body.String())
+	}
+
+	var backupResp struct {
+		BackupPath  string `json:"backup_path"`
+		SizeBytes   int64  `json:"size_bytes"`
+		IntegrityOK bool   `json:"integrity_ok"`
+	}
+	if err := json.NewDecoder(rrBackup.Body).Decode(&backupResp); err != nil {
+		t.Fatalf("failed to decode backup response: %v", err)
+	}
+
+	if !backupResp.IntegrityOK {
+		t.Errorf("expected backup integrity check to pass, got false")
+	}
+	if backupResp.SizeBytes <= 0 {
+		t.Errorf("expected backup size > 0, got %d", backupResp.SizeBytes)
+	}
+}
+

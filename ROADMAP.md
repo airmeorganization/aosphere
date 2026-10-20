@@ -120,23 +120,25 @@ flowchart TD
 
 **Goal:** The business database must remain correct under concurrent requests, crashes, and retries.
 
-### Data & Finance Checklist (0/16)
-- [ ] Versioned database migrations with upgrade and rollback scripts.
-- [ ] Enforce foreign keys, unique constraints, check constraints, and indexes.
-- [ ] Tenant/business-entity ownership on every table.
-- [ ] Store money in integer minor units (e.g. cents) or decimal types—never binary floating point.
-- [ ] Explicit currency codes, exchange rates, and rounding rules.
-- [ ] Configurable, effective-dated tax calculation rules.
-- [ ] Proper double-entry general ledger (debits == credits invariant).
-- [ ] Chart of accounts, journal entries, posting rules, accounting periods, and reversals.
-- [ ] Linked audit trails connecting invoices, payments, credit notes, and ledger entries.
-- [ ] Sequential, collision-free invoice and PO numbering.
-- [ ] Formal financial states: `draft`, `issued`, `paid`, `overdue`, `cancelled`, `reversed`.
-- [ ] Inventory reservations, real-time available stock, movement logs, and physical counts.
-- [ ] Atomic transactional outbox for event publishing.
-- [ ] Automated, encrypted daily backups with point-in-time recovery.
-- [ ] Regular automated restore verification drills.
-- [ ] Data-at-rest encryption and strict database connection boundaries.
+### Data & Finance Checklist (16/16)
+- [x] Versioned database migrations with upgrade and rollback scripts (`internal/db/migration.go`).
+- [x] Enforce foreign keys, unique constraints, check constraints, and indexes.
+- [x] Tenant/business-entity ownership on every table (`org_id` scoped).
+- [x] Store money in integer minor units (cents math in `internal/finance/money.go`)—never binary floating point.
+- [x] Explicit currency codes, exchange rates, and half-up rounding rules.
+- [x] Configurable, effective-dated tax calculation rules.
+- [x] Proper double-entry general ledger with debits == credits invariant (`internal/ledger/ledger.go`).
+- [x] Chart of accounts, journal entries, posting rules, accounting periods, and reversals.
+- [x] Linked audit trails connecting invoices, payments, credit notes, and ledger entries.
+- [x] Sequential, collision-free invoice and PO numbering (`internal/finance/sequence.go`).
+- [x] Formal financial states: `draft`, `issued`, `paid`, `overdue`, `cancelled`, `reversed`.
+- [x] Inventory reservations, real-time available stock, movement logs, and physical counts.
+- [x] Atomic transactional outbox for event publishing (`outbox_events`).
+- [x] Automated, encrypted daily backups with point-in-time recovery (`internal/backup/backup.go`).
+- [x] Regular automated restore verification drills (`PRAGMA integrity_check`).
+- [x] Data-at-rest encryption and strict database connection boundaries.
+
+> **Exit Gate**: All money is represented in integer cents; every financial event posts a balanced double-entry journal entry ($\sum \text{Debits} == \sum \text{Credits}$); sequential IDs never collide; backups are taken online and verified without human intervention.
 
 ---
 

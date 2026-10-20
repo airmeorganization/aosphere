@@ -509,6 +509,26 @@ func (m *MCPServer) getToolDefinitions() []map[string]interface{} {
 				"type": "object",
 			},
 		},
+		{
+			"name":        "fin_trial_balance",
+			"description": "Inspect the General Ledger trial balance, showing debits, credits, and balance verification across all accounts.",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+			},
+		},
+		{
+			"name":        "sys_backup",
+			"description": "Trigger an atomic online SQLite snapshot backup and run integrity check verification.",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"prefix": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional filename prefix for the backup",
+					},
+				},
+			},
+		},
 	}
 }
 
@@ -520,10 +540,12 @@ var toolPermissions = map[string]auth.Permission{
 	"crm_manage_deal":           auth.PermManageOrders,
 	"fin_get_summary":           auth.PermRead,
 	"fin_create_invoice":        auth.PermManageFinance,
+	"fin_trial_balance":         auth.PermRead,
 	"presence_sync_nap":         auth.PermManageInventory,
 	"reputation_draft_reply":    auth.PermRead,
 	"approvals_list_pending":    auth.PermApproveOrders,
 	"sys_reconcile":             auth.PermRead,
+	"sys_backup":                auth.PermAdmin,
 }
 
 func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext) *JSONRPCResponse {
@@ -767,6 +789,30 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 			textResult = string(bytes)
 		}
 
+	case "fin_trial_balance":
+		report, err := m.service.TrialBalance(context.Background(), orgID)
+		if err != nil {
+			textResult = fmt.Sprintf("Error fetching trial balance: %v", err)
+			isErr = true
+		} else {
+			bytes, _ := json.MarshalIndent(report, "", "  ")
+			textResult = string(bytes)
+		}
+
+	case "sys_backup":
+		prefix := "agent"
+		if p, ok := params.Arguments["prefix"].(string); ok && p != "" {
+			prefix = p
+		}
+		res, err := m.service.CreateBackup(context.Background(), prefix)
+		if err != nil {
+			textResult = fmt.Sprintf("Backup failed: %v", err)
+			isErr = true
+		} else {
+			textResult = fmt.Sprintf("Snapshot backup created successfully at %s (%d bytes). Integrity verification: %t.",
+				res.BackupPath, res.SizeBytes, res.IntegrityOK)
+		}
+
 	default:
 		return &JSONRPCResponse{
 			JSONRPC: "2.0",
@@ -841,6 +887,12 @@ func (m *MCPServer) getResourceDefinitions() []map[string]interface{} {
 			"description": "Aggregated reviews across platforms with sentiment flags.",
 			"mimeType":    "application/json",
 		},
+		{
+			"uri":         "res://ledger/trial-balance",
+			"name":        "General Ledger Trial Balance",
+			"description": "Real-time debit/credit trial balance ensuring double-entry balance equality.",
+			"mimeType":    "application/json",
+		},
 	}
 }
 
@@ -867,6 +919,8 @@ func (m *MCPServer) handleResourceRead(req *JSONRPCRequest, sessCtx *SessionCont
 		data, err = m.store.GetFinancialSummary()
 	case "res://reputation/feed":
 		data, err = m.store.GetReviews()
+	case "res://ledger/trial-balance":
+		data, err = m.service.TrialBalance(context.Background(), orgID)
 	default:
 		return &JSONRPCResponse{
 			JSONRPC: "2.0",

@@ -439,6 +439,22 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 		writeJSON(w, summary)
 	})
 
+	mux.HandleFunc("/api/ledger/trial-balance", func(w http.ResponseWriter, r *http.Request) {
+		authCtx := GetAuthContext(r.Context())
+		if authCtx != nil && !authCtx.Can(auth.PermRead) {
+			w.WriteHeader(http.StatusForbidden)
+			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission read required"})
+			return
+		}
+		orgID := getOrgID(r)
+		report, err := a.service.TrialBalance(r.Context(), orgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, report)
+	})
+
 	mux.HandleFunc("/api/expenses", func(w http.ResponseWriter, r *http.Request) {
 		exps, err := a.store.GetExpenses()
 		if err != nil {
@@ -661,5 +677,27 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			return
 		}
 		writeJSON(w, report)
+	})
+
+	// Database Backup & Integrity Drills
+	mux.HandleFunc("/api/backup/run", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		authCtx := GetAuthContext(r.Context())
+		if authCtx != nil && !authCtx.Can(auth.PermAdmin) {
+			w.WriteHeader(http.StatusForbidden)
+			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission admin required"})
+			return
+		}
+		res, err := a.service.CreateBackup(r.Context(), "manual")
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Backup failed: %v", err), http.StatusInternalServerError)
+			return
+		}
+		a.Broadcast("backup_completed", fmt.Sprintf("{\"backup_path\":\"%s\",\"size_bytes\":%d,\"integrity_ok\":%t}",
+			res.BackupPath, res.SizeBytes, res.IntegrityOK))
+		writeJSON(w, res)
 	})
 }
