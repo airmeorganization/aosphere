@@ -92,9 +92,9 @@ func (s *Store) DecideApproval(id, decision, decidedBy string) error {
 	}
 	defer tx.Rollback()
 
-	var actionType, payloadJSON, currentStatus string
-	err = tx.QueryRow(`SELECT action_type, payload_json, status FROM approvals WHERE id = ?`, id).
-		Scan(&actionType, &payloadJSON, &currentStatus)
+	var actionType, payloadJSON, currentStatus, requestedByID string
+	err = tx.QueryRow(`SELECT action_type, payload_json, status, requested_by_id FROM approvals WHERE id = ?`, id).
+		Scan(&actionType, &payloadJSON, &currentStatus, &requestedByID)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("approval %s not found", id)
 	}
@@ -113,6 +113,16 @@ func (s *Store) DecideApproval(id, decision, decidedBy string) error {
 		}
 		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 			return fmt.Errorf("invalid purchase-order approval payload: %w", err)
+		}
+		if payload.PurchaseOrderID == "" && decision == "approved" {
+			// Compatibility for approvals created before payloads carried a PO ID:
+			// link by the exact item JSON and creator. Never authorize an unlinked PO.
+			err := tx.QueryRow(`SELECT id FROM purchase_orders
+				WHERE status = 'pending_approval' AND items_json = ? AND actor_id = ?
+				ORDER BY created_at DESC LIMIT 1`, payloadJSON, requestedByID).Scan(&payload.PurchaseOrderID)
+			if err != nil {
+				return fmt.Errorf("approval %s has no safely identifiable purchase order; cannot authorize", id)
+			}
 		}
 		if payload.PurchaseOrderID != "" {
 			poStatus := "cancelled"
