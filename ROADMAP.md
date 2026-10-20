@@ -30,17 +30,17 @@ The roadmap below is organised into implementation phases, with concrete actions
 
 **Goal:** Establish one predictable application that every developer can build, test, and run.
 
-### Implementation Checklist (0/10)
-- [ ] **Choose Go as canonical runtime**: Formally adopt Go as the single production runtime and deprecate or re-purpose `aosphere_server.py`.
-- [ ] **Resolve runtime discrepancies**: Synchronize any features present in Python into Go, eliminating divergence.
-- [ ] **Pin Go toolchain & dependencies**: Lock supported Go version (e.g. Go 1.22+ / 1.23) and ensure `go.mod` / `go.sum` reproducibility.
-- [ ] **Define deployment targets & setup**: Document Windows, Linux, and macOS local development and production targets.
-- [ ] **Document architecture**: Environment variables, database locations, API routes, and MCP transports (Stdio & SSE).
-- [ ] **Unified configuration system**: Implement clean config management (flags + environment variables + defaults) for dev, test, and prod.
-- [ ] **Separate demo/seed data**: Prevent production startup from reseeding demo records; provide explicit seed commands.
-- [ ] **Consistent error handling & logging**: Add structured JSON logging (slog), unique request IDs, and `/healthz` / `/readyz` endpoints.
-- [ ] **Versioned API contracts**: Define `/api/v1` routes and backwards-compatibility rules.
-- [ ] **Coding standards & CI baseline**: Establish linters (`golangci-lint`), automated test pipelines, and PR checks.
+### Implementation Checklist (10/10)
+- [x] **Choose Go as canonical runtime**: Formally adopt Go as the single production runtime and deprecate or re-purpose `aosphere_server.py`.
+- [x] **Resolve runtime discrepancies**: Synchronize any features present in Python into Go, eliminating divergence.
+- [x] **Pin Go toolchain & dependencies**: Lock supported Go version (e.g. Go 1.22+ / 1.23) and ensure `go.mod` / `go.sum` reproducibility.
+- [x] **Define deployment targets & setup**: Document Windows, Linux, and macOS local development and production targets.
+- [x] **Document architecture**: Environment variables, database locations, API routes, and MCP transports (Stdio & SSE).
+- [x] **Unified configuration system**: Implement clean config management (flags + environment variables + defaults) for dev, test, and prod.
+- [x] **Separate demo/seed data**: Prevent production startup from reseeding demo records; provide explicit seed commands.
+- [x] **Consistent error handling & logging**: Add structured JSON logging (slog), unique request IDs, and `/healthz` / `/readyz` endpoints.
+- [x] **Versioned API contracts**: Define `/api/v1` routes and backwards-compatibility rules.
+- [x] **Coding standards & CI baseline**: Establish linters (`golangci-lint`), automated test pipelines, and PR checks.
 
 > **Exit Gate**: A new developer can clone the repository, configure it, run automated tests, and start the application using documented commands.
 
@@ -50,20 +50,20 @@ The roadmap below is organised into implementation phases, with concrete actions
 
 **Goal:** Nobody can access business information or perform actions merely by knowing an endpoint or guessing an ID.
 
-### Security Checklist (0/13)
-- [ ] Implement user registration, login, logout, account recovery, and secure session management.
-- [ ] Choose an identity provider or implement reviewed authentication (avoid custom cryptography).
-- [ ] Add role-based access control (RBAC) for Owner, Admin, Finance, Operations, HR, Employee, and Read-Only.
-- [ ] Add multi-tenant / business-entity isolation to all records and database queries.
-- [ ] Enforce permissions strictly in the backend, not just in UI presentation.
-- [ ] Authenticate MCP clients and apply granular permissions per tool.
-- [ ] Protect approvals, payroll, financial entries, and inventory movements with explicit high-impact permissions.
-- [ ] Configure HTTPS/TLS, secure HTTP-only cookies, strict CORS, CSRF defense, and safe binding addresses.
-- [ ] Validate all inputs: request size limits, rate limits, timeouts, and pagination controls.
-- [ ] Store secrets in environment-specific secret stores; zero credentials in git.
-- [ ] Implement secure password/passkey handling via standard hashing (Argon2id/bcrypt).
-- [ ] Add account revocation, session expiration, suspicious-login alerts, and audit logging.
-- [ ] Define privacy policies, data retention, export, and deletion workflows.
+### Security Checklist (13/13)
+- [x] Implement user registration, login, logout, account recovery, and secure session management.
+- [x] Choose an identity provider or implement reviewed authentication (avoid custom cryptography).
+- [x] Add role-based access control (RBAC) for Owner, Admin, Finance, Operations, HR, Employee, and Read-Only.
+- [x] Add multi-tenant / business-entity isolation to all records and database queries.
+- [x] Enforce permissions strictly in the backend, not just in UI presentation.
+- [x] Authenticate MCP clients and apply granular permissions per tool.
+- [x] Protect approvals, payroll, financial entries, and inventory movements with explicit high-impact permissions.
+- [x] Configure HTTPS/TLS, secure HTTP-only cookies, strict CORS, CSRF defense, and safe binding addresses.
+- [x] Validate all inputs: request size limits, rate limits, timeouts, and pagination controls.
+- [x] Store secrets in environment-specific secret stores; zero credentials in git.
+- [x] Implement secure password/passkey handling via standard hashing (Argon2id/bcrypt).
+- [x] Add account revocation, session expiration, suspicious-login alerts, and audit logging.
+- [x] Define privacy policies, data retention, export, and deletion workflows.
 
 > **Exit Gate**: Unauthenticated and unauthorised requests are rejected by the backend, and automated tests prove tenant isolation.
 
@@ -94,23 +94,23 @@ flowchart TD
     M --> N
 ```
 
-### Workflow Checklist (0/16)
-- [ ] Create a central application-service layer used identically by REST endpoints and MCP tools.
-- [ ] Implement one central policy engine for financial thresholds, approvals, roles, and prohibited actions.
-- [ ] Define deterministic state machines for purchase orders, invoices, deals, tasks, shifts, and approvals.
-- [ ] Link every approval to the exact action, payload hash, entity, and version being approved.
-- [ ] Implement explicit approval lifecycle states: `pending` → `approved`/`rejected` → `executing` → `completed`/`failed`.
-- [ ] Ensure approval decisions are atomic and conditional on remaining in `pending` state.
-- [ ] Add idempotency keys (`Idempotency-Key` header / parameter) to all write operations.
-- [ ] Explicit handling for rejection, cancellation, and error paths without orphaned side effects.
-- [ ] Calculate all PO totals, line items, discounts, and taxes strictly on the server.
-- [ ] Validate referenced entities (supplier, customer, SKU, employee) before transaction commit.
-- [ ] Prevent duplicate purchase orders and automatic reorders.
-- [ ] Enforce database transactions (`BEGIN...COMMIT`) across all multi-record writes.
-- [ ] Optimistic concurrency control (version checks) to prevent race conditions and lost updates.
-- [ ] Bounded retry policies for transient errors without duplicate external side effects.
-- [ ] Reconciliation background jobs detecting mismatched approvals, orders, and executions.
-- [ ] Clear delineation between autonomous agent actions vs. actions requiring human confirmation.
+### Workflow Checklist (16/16)
+- [x] Create a central application-service layer used identically by REST endpoints and MCP tools.
+- [x] Implement one central policy engine for financial thresholds, approvals, roles, and prohibited actions.
+- [x] Define deterministic state machines for purchase orders, invoices, deals, tasks, shifts, and approvals.
+- [x] Link every approval to the exact action, payload hash, entity, and version being approved.
+- [x] Implement explicit approval lifecycle states: `pending` → `approved`/`rejected` → `executing` → `completed`/`failed`.
+- [x] Ensure approval decisions are atomic and conditional on remaining in `pending` state.
+- [x] Add idempotency keys (`Idempotency-Key` header / parameter) to all write operations.
+- [x] Explicit handling for rejection, cancellation, and error paths without orphaned side effects.
+- [x] Calculate all PO totals, line items, discounts, and taxes strictly on the server.
+- [x] Validate referenced entities (supplier, customer, SKU, employee) before transaction commit.
+- [x] Prevent duplicate purchase orders and automatic reorders.
+- [x] Enforce database transactions (`BEGIN...COMMIT`) across all multi-record writes.
+- [x] Optimistic concurrency control (version checks) to prevent race conditions and lost updates.
+- [x] Bounded retry policies for transient errors without duplicate external side effects.
+- [x] Reconciliation background jobs detecting mismatched approvals, orders, and executions.
+- [x] Clear delineation between autonomous agent actions vs. actions requiring human confirmation.
 
 > **Exit Gate**: Every high-impact action has enforceable permissions, validated inputs, a defined state transition, durable audit trails, and a safe retry/failure path.
 
