@@ -226,3 +226,38 @@ Not verified in this review:
 ## 11. Bottom line
 
 AOSphere already has a useful vertical slice: a single dashboard, transactional data layer in parts of inventory handling, domain modules, MCP tools, live refresh events, and an approval/audit concept. The next milestone should not be more modules. It should be making every mutation trustworthy: authenticated actor identity, enforced policy, atomic approval execution, consistent server-side calculations, safe rendering, and regression tests. Once those guarantees are in place, the same core can scale into a stronger agent-operated BOS without losing control of money, records, or external actions.
+
+
+## 12. Follow-up patch in `fix/governance-approval-workflow`
+
+This companion branch implements an initial slice of the governance fixes above:
+
+- A purchase order over 1,000 is marked `pending_approval` regardless of whether the REST/MCP caller labels itself human or agent.
+- Purchase-order line items are parsed server-side; quantities/costs are validated, and the supplied total must match the server-calculated total within one cent.
+- The purchase order, its linked approval payload, and its creation audit record are written transactionally.
+- Approval decisions accept only `approved` or `rejected`, and only pending approvals can be decided. The linked pending PO is moved to `ordered` or `cancelled` within the same transaction as the approval state change and decision audit record.
+- Older automatic-reorder approvals are linked to the matching pending PO when possible; an unlinked approval cannot be approved based on guesswork.
+- The seeded example now contains a real pending PO linked to the seeded approval.
+- The UI checks HTTP responses before claiming a PO/approval operation succeeded.
+- MCP tool errors are flagged with `isError`, and session queue sends are bounded and coordinated with channel cleanup.
+- Regression tests cover approval/PO transitions, repeat decisions, mismatched totals, invalid quantities/costs, and invalid item JSON.
+
+### Approval lifecycle
+
+```mermaid
+flowchart TD
+    A[Create purchase order] --> B[Parse and validate line items]
+    B --> C{Client total matches server total?}
+    C -- No --> X[Reject request; no write]
+    C -- Yes --> D{Total above 1000?}
+    D -- No --> E[Create order]
+    D -- Yes --> F[Transaction: create pending PO + linked approval + audit]
+    F --> G[Human decision]
+    G --> H{Decision valid and approval still pending?}
+    H -- No --> I[Reject transition; no state change]
+    H -- Yes --> J{Approved?}
+    J -- Yes --> K[PO becomes ordered + approval approved + audit]
+    J -- No --> L[PO becomes cancelled + approval rejected + audit]
+```
+
+**Verification status:** these tests were added but not run in this environment. The available container has Go 1.23.2 while the module declares Go 1.27.0, and network access was unavailable for cloning dependencies. Run `go test ./...` with the repository's declared Go toolchain before merging. This patch does not yet add authentication/authorization; the server should remain on a trusted local network until that is addressed.
