@@ -1,0 +1,21 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+aosphere
+
+# Database & Runtime Data
+data/*.db
+data/*.db-shm
+data/*.db-wal
+*.db
+*.db-shm
+*.db-wal
+
+# OS and Editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
