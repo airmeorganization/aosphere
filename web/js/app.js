@@ -1130,13 +1130,21 @@ const app = {
   },
 
   async decideApproval(apprId, decision) {
-    await fetch('/api/approvals/decide', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ approval_id: apprId, decision })
-    });
-    this.showToast(`Approval ${decision}`);
-    this.loadAllData();
+    try {
+      const res = await fetch('/api/approvals/decide', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approval_id: apprId, decision })
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(body.error || body.message || `Approval decision failed (${res.status})`);
+      }
+      this.showToast(`Approval ${decision}`);
+      await this.loadAllData();
+    } catch (err) {
+      this.showToast(err.message || 'Could not update approval');
+    }
   },
 
   // ---------------- Modals ----------------
@@ -1251,20 +1259,30 @@ const app = {
       unit_cost: cost
     }]);
 
-    await fetch('/api/purchase-orders', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        supplier_id: supplierId,
-        items_json: items,
-        total: total,
-        notes: notes
-      })
-    });
+    try {
+      const res = await fetch('/api/purchase-orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          supplier_id: supplierId,
+          items_json: items,
+          total: total,
+          notes: notes
+        })
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(body.error || body.message || `Purchase order request failed (${res.status})`);
+      }
 
-    this.showToast(total > 1000 ? 'PO created & sent to Approval Inbox' : 'Purchase Order drafted');
-    this.closeModal();
-    this.loadAllData();
+      this.showToast(body.status === 'pending_approval'
+        ? 'PO queued for human approval'
+        : 'Purchase order created');
+      this.closeModal();
+      await this.loadAllData();
+    } catch (err) {
+      this.showToast(err.message || 'Could not create purchase order');
+    }
   },
 
   openNewDealModal() {
