@@ -10,6 +10,8 @@ aosphere
 data/*.db
 data/*.db-shm
 data/*.db-wal
+data/tmp/
+data/backups/
 *.db
 *.db-shm
 *.db-wal

@@ -10,6 +10,7 @@ import (
 
 	"aosphere/internal/auth"
 	"aosphere/internal/db"
+	"aosphere/internal/mcp"
 	"aosphere/internal/service"
 )
 
@@ -317,4 +318,73 @@ func TestWorkflowAPI_TrialBalanceAndBackup(t *testing.T) {
 		t.Errorf("expected backup size > 0, got %d", backupResp.SizeBytes)
 	}
 }
+
+func TestWorkflowAPI_KillSwitchAndExecutions(t *testing.T) {
+	testAPI, database := setupTestAPI(t)
+	defer database.Close()
+
+	mux := http.NewServeMux()
+	testAPI.RegisterRoutes(mux)
+
+	adminCtx := &auth.AuthContext{
+		UserID: "usr_admin",
+		OrgID:  "org_default",
+		Role:   auth.RoleAdmin,
+		Email:  "admin@aosphere.local",
+	}
+
+	agentCtx := &auth.AuthContext{
+		UserID:   "usr_agent",
+		OrgID:    "org_default",
+		Role:     auth.RoleOperations,
+		IsAPIKey: true,
+	}
+
+	// 1. Non-admin accessing kill switch -> 403 Forbidden
+	reqForbidden := httptest.NewRequest(http.MethodGet, "/api/admin/kill-switch", nil)
+	reqForbidden = reqForbidden.WithContext(context.WithValue(reqForbidden.Context(), AuthCtxKey, agentCtx))
+	rrForbidden := httptest.NewRecorder()
+	mux.ServeHTTP(rrForbidden, reqForbidden)
+	if rrForbidden.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for non-admin on kill-switch, got %d", rrForbidden.Code)
+	}
+
+	// 2. Admin queries kill switch
+	reqGet := httptest.NewRequest(http.MethodGet, "/api/admin/kill-switch", nil)
+	reqGet = reqGet.WithContext(context.WithValue(reqGet.Context(), AuthCtxKey, adminCtx))
+	rrGet := httptest.NewRecorder()
+	mux.ServeHTTP(rrGet, reqGet)
+	if rrGet.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for admin on kill-switch, got %d", rrGet.Code)
+	}
+
+	// 3. Admin toggles kill switch to true
+	togglePayload := map[string]bool{"active": true}
+	bToggle, _ := json.Marshal(togglePayload)
+	reqPost := httptest.NewRequest(http.MethodPost, "/api/admin/kill-switch", bytes.NewReader(bToggle))
+	reqPost.Header.Set("Content-Type", "application/json")
+	reqPost = reqPost.WithContext(context.WithValue(reqPost.Context(), AuthCtxKey, adminCtx))
+	rrPost := httptest.NewRecorder()
+	mux.ServeHTTP(rrPost, reqPost)
+	if rrPost.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on kill switch toggle, got %d", rrPost.Code)
+	}
+
+	if !mcp.DefaultKillSwitch().IsActive("org_default") {
+		t.Errorf("expected kill switch to be active for org_default")
+	}
+
+	// Cleanup kill switch
+	mcp.DefaultKillSwitch().Reset()
+
+	// 4. Query agent-executions endpoint
+	reqExecs := httptest.NewRequest(http.MethodGet, "/api/admin/agent-executions", nil)
+	reqExecs = reqExecs.WithContext(context.WithValue(reqExecs.Context(), AuthCtxKey, adminCtx))
+	rrExecs := httptest.NewRecorder()
+	mux.ServeHTTP(rrExecs, reqExecs)
+	if rrExecs.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for agent-executions endpoint, got %d", rrExecs.Code)
+	}
+}
+
 

@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"aosphere/internal/auth"
 	"aosphere/internal/service"
@@ -46,10 +47,12 @@ type SessionContext struct {
 }
 
 type MCPServer struct {
-	store    *store.Store
-	service  *service.WorkflowService
-	sessions map[string]*SessionContext
-	mu       sync.RWMutex
+	store       *store.Store
+	service     *service.WorkflowService
+	sessions    map[string]*SessionContext
+	rateLimiter *RateLimiter
+	killSwitch  *KillSwitchManager
+	mu          sync.RWMutex
 }
 
 func NewMCPServer(s *store.Store, svc *service.WorkflowService) *MCPServer {
@@ -57,10 +60,20 @@ func NewMCPServer(s *store.Store, svc *service.WorkflowService) *MCPServer {
 		svc = service.NewWorkflowService(s)
 	}
 	return &MCPServer{
-		store:    s,
-		service:  svc,
-		sessions: make(map[string]*SessionContext),
+		store:       s,
+		service:     svc,
+		sessions:    make(map[string]*SessionContext),
+		rateLimiter: NewRateLimiter(60, 5),
+		killSwitch:  DefaultKillSwitch(),
 	}
+}
+
+func (m *MCPServer) RateLimiter() *RateLimiter {
+	return m.rateLimiter
+}
+
+func (m *MCPServer) KillSwitch() *KillSwitchManager {
+	return m.killSwitch
 }
 
 // authenticateRequest extracts and validates the API key or session token
@@ -370,182 +383,20 @@ func (m *MCPServer) ProcessRequestWithContext(req *JSONRPCRequest, sessCtx *Sess
 }
 
 func (m *MCPServer) getToolDefinitions() []map[string]interface{} {
-	return []map[string]interface{}{
-		{
-			"name":        "erp_check_stock",
-			"description": "Inspect stock levels, reserved quantities, and threshold alerts for SKUs.",
-			"inputSchema": map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"below_threshold_only": map[string]interface{}{
-						"type":        "boolean",
-						"description": "If true, only returns items where stock_quantity <= min_threshold",
-					},
-				},
-			},
-		},
-		{
-			"name":        "erp_adjust_stock",
-			"description": "Adjust SKU inventory quantity with optimistic locking. If stock drops below threshold, automatically triggers reorder workflows.",
-			"inputSchema": map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"sku_id":           map[string]interface{}{"type": "string"},
-					"delta":            map[string]interface{}{"type": "integer", "description": "Positive to add stock, negative to consume/sell"},
-					"reason":           map[string]interface{}{"type": "string"},
-					"expected_version": map[string]interface{}{"type": "integer", "description": "Optional version for optimistic concurrency control"},
-					"idempotency_key":  map[string]interface{}{"type": "string", "description": "Unique request key for safe retries"},
-				},
-				"required": []string{"sku_id", "delta", "reason"},
-			},
-		},
-		{
-			"name":        "erp_create_purchase_order",
-			"description": "Create a purchase order for a supplier with server-side pricing and entity verification. Orders > $1,000 route to human approval.",
-			"inputSchema": map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"supplier_id":     map[string]interface{}{"type": "string"},
-					"items": map[string]interface{}{
-						"type": "array",
-						"items": map[string]interface{}{
-							"type": "object",
-							"properties": map[string]interface{}{
-								"sku_code":  map[string]interface{}{"type": "string"},
-								"quantity":  map[string]interface{}{"type": "integer"},
-								"unit_cost": map[string]interface{}{"type": "number"},
-							},
-							"required": []string{"sku_code", "quantity", "unit_cost"},
-						},
-					},
-					"notes":           map[string]interface{}{"type": "string"},
-					"idempotency_key": map[string]interface{}{"type": "string", "description": "Unique request key for safe retries"},
-				},
-				"required": []string{"supplier_id", "items"},
-			},
-		},
-		{
-			"name":        "crm_manage_deal",
-			"description": "Update deal stage (lead, qualified, proposal, negotiation, won, lost) or log client notes.",
-			"inputSchema": map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"deal_id": map[string]interface{}{"type": "string"},
-					"stage":   map[string]interface{}{"type": "string", "enum": []string{"lead", "qualified", "proposal", "negotiation", "won", "lost"}},
-				},
-				"required": []string{"deal_id", "stage"},
-			},
-		},
-		{
-			"name":        "fin_get_summary",
-			"description": "Get real-time Profit & Loss (P&L), unpaid client receivables, and financial health.",
-			"inputSchema": map[string]interface{}{
-				"type": "object",
-			},
-		},
-		{
-			"name":        "fin_create_invoice",
-			"description": "Generate a compliant client invoice with line items, tax, and optional recurring schedule.",
-			"inputSchema": map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"customer_id": map[string]interface{}{"type": "string"},
-					"items": map[string]interface{}{
-						"type": "array",
-						"items": map[string]interface{}{
-							"type": "object",
-							"properties": map[string]interface{}{
-								"desc":  map[string]interface{}{"type": "string"},
-								"qty":   map[string]interface{}{"type": "integer"},
-								"price": map[string]interface{}{"type": "number"},
-							},
-							"required": []string{"desc", "qty", "price"},
-						},
-					},
-					"due_date":        map[string]interface{}{"type": "string", "description": "YYYY-MM-DD"},
-					"recurring":       map[string]interface{}{"type": "string", "enum": []string{"none", "monthly", "quarterly", "annual"}},
-					"idempotency_key": map[string]interface{}{"type": "string", "description": "Unique request key for safe retries"},
-				},
-				"required": []string{"customer_id", "items", "due_date"},
-			},
-		},
-		{
-			"name":        "presence_sync_nap",
-			"description": "Synchronize official business Name, Address, Phone (NAP) across search engines and directories.",
-			"inputSchema": map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"business_name": map[string]interface{}{"type": "string"},
-					"address":       map[string]interface{}{"type": "string"},
-					"phone":         map[string]interface{}{"type": "string"},
-					"website":       map[string]interface{}{"type": "string"},
-				},
-				"required": []string{"business_name", "address", "phone", "website"},
-			},
-		},
-		{
-			"name":        "reputation_draft_reply",
-			"description": "Analyze review sentiment and draft an empathetic response for human review.",
-			"inputSchema": map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"review_id":  map[string]interface{}{"type": "string"},
-					"reply_text": map[string]interface{}{"type": "string"},
-				},
-				"required": []string{"review_id", "reply_text"},
-			},
-		},
-		{
-			"name":        "approvals_list_pending",
-			"description": "View actions waiting for human authorization in the Approval Inbox.",
-			"inputSchema": map[string]interface{}{
-				"type": "object",
-			},
-		},
-		{
-			"name":        "sys_reconcile",
-			"description": "Run business workflow reconciliation scan to detect orphan approvals, unlinked pending POs, and inventory reservation anomalies.",
-			"inputSchema": map[string]interface{}{
-				"type": "object",
-			},
-		},
-		{
-			"name":        "fin_trial_balance",
-			"description": "Inspect the General Ledger trial balance, showing debits, credits, and balance verification across all accounts.",
-			"inputSchema": map[string]interface{}{
-				"type": "object",
-			},
-		},
-		{
-			"name":        "sys_backup",
-			"description": "Trigger an atomic online SQLite snapshot backup and run integrity check verification.",
-			"inputSchema": map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"prefix": map[string]interface{}{
-						"type":        "string",
-						"description": "Optional filename prefix for the backup",
-					},
-				},
-			},
-		},
+	var list []map[string]interface{}
+	for _, tool := range Registry {
+		def := map[string]interface{}{
+			"name":        tool.Name,
+			"description": tool.Description,
+			"category":    string(tool.Category),
+			"inputSchema": tool.InputSchema,
+		}
+		if tool.OutputSchema != nil {
+			def["outputSchema"] = tool.OutputSchema
+		}
+		list = append(list, def)
 	}
-}
-
-// toolPermissions maps each tool to the required RBAC capability
-var toolPermissions = map[string]auth.Permission{
-	"erp_check_stock":           auth.PermRead,
-	"erp_adjust_stock":          auth.PermManageInventory,
-	"erp_create_purchase_order": auth.PermManageOrders,
-	"crm_manage_deal":           auth.PermManageOrders,
-	"fin_get_summary":           auth.PermRead,
-	"fin_create_invoice":        auth.PermManageFinance,
-	"fin_trial_balance":         auth.PermRead,
-	"presence_sync_nap":         auth.PermManageInventory,
-	"reputation_draft_reply":    auth.PermRead,
-	"approvals_list_pending":    auth.PermApproveOrders,
-	"sys_reconcile":             auth.PermRead,
-	"sys_backup":                auth.PermAdmin,
+	return list
 }
 
 func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext) *JSONRPCResponse {
@@ -561,35 +412,17 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 			Error:   &RPCError{Code: -32602, Message: "Invalid parameters"},
 		}
 	}
+	if params.Arguments == nil {
+		params.Arguments = make(map[string]interface{})
+	}
 
-	// 1. RBAC Capability Validation
-	requiredPerm, hasPerm := toolPermissions[params.Name]
-	if hasPerm && (sessCtx == nil || sessCtx.AuthCtx == nil || !sessCtx.AuthCtx.Can(requiredPerm)) {
-		role := "anonymous"
-		agentID := "unknown"
-		orgID := "org_default"
-		if sessCtx != nil && sessCtx.AuthCtx != nil {
-			role = string(sessCtx.AuthCtx.Role)
-			agentID = sessCtx.AgentID
-			orgID = sessCtx.AuthCtx.OrgID
-		}
-
-		_ = m.store.LogAuditForOrg(orgID, "agent", agentID, "MCP_TOOL_FORBIDDEN", "tools", params.Name,
-			fmt.Sprintf("Forbidden: role %q lacks permission %q", role, requiredPerm), "{}")
-
+	// 1. Tool Lookup in Centralized Registry
+	toolDef, exists := Registry[params.Name]
+	if !exists {
 		return &JSONRPCResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,
-			Result: map[string]interface{}{
-				"content": []map[string]interface{}{
-					{
-						"type": "text",
-						"text": fmt.Sprintf("Error: Permission denied. Role %q lacks required permission %q to execute %q.",
-							role, requiredPerm, params.Name),
-					},
-				},
-				"isError": true,
-			},
+			Error:   &RPCError{Code: -32601, Message: fmt.Sprintf("Unknown tool: %s", params.Name)},
 		}
 	}
 
@@ -601,10 +434,109 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 		agentID = sessCtx.AgentID
 	}
 
+	// 2. Rate Limiting and Concurrency Control
+	releaseSlot, err := m.rateLimiter.Acquire(agentID)
+	if err != nil {
+		_ = m.store.LogAuditForOrg(orgID, "agent", agentID, "MCP_RATELIMIT_EXCEEDED", "tools", params.Name, err.Error(), "{}")
+		return &JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error:   &RPCError{Code: -32029, Message: err.Error()},
+		}
+	}
+	defer releaseSlot()
+
+	// 3. Emergency Kill Switch Enforcement
+	if toolDef.Category != CategoryReadOnly && m.killSwitch.IsActive(orgID) {
+		_ = m.store.LogAuditForOrg(orgID, "agent", agentID, "MCP_KILLSWITCH_BLOCKED", "tools", params.Name,
+			"Tool execution blocked: emergency kill switch is active", "{}")
+		return &JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result: map[string]interface{}{
+				"content": []map[string]interface{}{
+					{
+						"type": "text",
+						"text": fmt.Sprintf("Error: %v", ErrKillSwitchActive),
+					},
+				},
+				"isError": true,
+			},
+		}
+	}
+
+	// 4. RBAC Capability Validation
+	if sessCtx == nil || sessCtx.AuthCtx == nil || !sessCtx.AuthCtx.Can(toolDef.RequiredPermission) {
+		role := "anonymous"
+		if sessCtx != nil && sessCtx.AuthCtx != nil {
+			role = string(sessCtx.AuthCtx.Role)
+		}
+
+		_ = m.store.LogAuditForOrg(orgID, "agent", agentID, "MCP_TOOL_FORBIDDEN", "tools", params.Name,
+			fmt.Sprintf("Forbidden: role %q lacks permission %q", role, toolDef.RequiredPermission), "{}")
+
+		return &JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result: map[string]interface{}{
+				"content": []map[string]interface{}{
+					{
+						"type": "text",
+						"text": fmt.Sprintf("Error: Permission denied. Role %q lacks required permission %q to execute %q.",
+							role, toolDef.RequiredPermission, params.Name),
+					},
+				},
+				"isError": true,
+			},
+		}
+	}
+
+	// 5. Schema Validation against Typed Tool Registry
+	if err := ValidateToolInput(params.Name, params.Arguments); err != nil {
+		return &JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error:   &RPCError{Code: -32602, Message: fmt.Sprintf("Invalid arguments: %v", err)},
+		}
+	}
+
+	// 6. Untrusted Prompt Injection Detection & Input Cleansing
+	for k, v := range params.Arguments {
+		if s, ok := v.(string); ok {
+			sanitized, err := SanitizePromptInput(s)
+			if err != nil {
+				_ = m.store.LogAuditForOrg(orgID, "agent", agentID, "MCP_PROMPT_INJECTION", "tools", params.Name,
+					fmt.Sprintf("Prompt injection detected in parameter %q: %s", k, s), "{}")
+				return &JSONRPCResponse{
+					JSONRPC: "2.0",
+					ID:      req.ID,
+					Result: map[string]interface{}{
+						"content": []map[string]interface{}{
+							{
+								"type": "text",
+								"text": fmt.Sprintf("Error: Security violation: %v in argument %q.", ErrPromptInjection, k),
+							},
+						},
+						"isError": true,
+					},
+				}
+			}
+			params.Arguments[k] = sanitized
+		}
+	}
+
+	// 7. Context Isolation: Strip caller-supplied org_id to prevent cross-tenant tampering
+	delete(params.Arguments, "org_id")
+
+	// 8. Execution Deadline and Duration Tracking
+	startTime := time.Now()
+	toolCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	textResult := ""
 	isErr := false
 
-	// 2. Execute Tool with Tenant Scoping
+	// 9. Execute Tool with Tenant Scoping and Deadline Context
 	switch params.Name {
 	case "erp_check_stock":
 		belowOnly := false
@@ -634,7 +566,7 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 		if sessCtx != nil {
 			authContext = sessCtx.AuthCtx
 		}
-		item, err := m.service.AdjustStock(context.Background(), orgID, skuID, int(deltaFloat), reason, authContext, expectedVer, idempKey)
+		item, err := m.service.AdjustStock(toolCtx, orgID, skuID, int(deltaFloat), reason, authContext, expectedVer, idempKey)
 		if err != nil {
 			textResult = fmt.Sprintf("Error updating stock: %v", err)
 			isErr = true
@@ -667,7 +599,7 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 		if sessCtx != nil {
 			authContext = sessCtx.AuthCtx
 		}
-		res, err := m.service.CreatePurchaseOrder(context.Background(), orgID, service.CreatePORequest{
+		res, err := m.service.CreatePurchaseOrder(toolCtx, orgID, service.CreatePORequest{
 			SupplierID: supplierID,
 			Items:      poItems,
 			Notes:      notes,
@@ -731,7 +663,7 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 		if sessCtx != nil {
 			authContext = sessCtx.AuthCtx
 		}
-		inv, err := m.service.CreateInvoice(context.Background(), orgID, service.CreateInvoiceRequest{
+		inv, err := m.service.CreateInvoice(toolCtx, orgID, service.CreateInvoiceRequest{
 			CustomerID: custID,
 			Items:      invItems,
 			DueDate:    dueDate,
@@ -780,7 +712,7 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 		}
 
 	case "sys_reconcile":
-		report, err := m.service.ReconcileDiscrepancies(context.Background(), orgID)
+		report, err := m.service.ReconcileDiscrepancies(toolCtx, orgID)
 		if err != nil {
 			textResult = fmt.Sprintf("Error running reconciliation: %v", err)
 			isErr = true
@@ -790,7 +722,7 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 		}
 
 	case "fin_trial_balance":
-		report, err := m.service.TrialBalance(context.Background(), orgID)
+		report, err := m.service.TrialBalance(toolCtx, orgID)
 		if err != nil {
 			textResult = fmt.Sprintf("Error fetching trial balance: %v", err)
 			isErr = true
@@ -804,7 +736,7 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 		if p, ok := params.Arguments["prefix"].(string); ok && p != "" {
 			prefix = p
 		}
-		res, err := m.service.CreateBackup(context.Background(), prefix)
+		res, err := m.service.CreateBackup(toolCtx, prefix)
 		if err != nil {
 			textResult = fmt.Sprintf("Backup failed: %v", err)
 			isErr = true
@@ -845,6 +777,22 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 		fmt.Sprintf("args=%s res=%s", argsStr, resStr),
 		fmt.Sprintf(`{"status":"%s"}`, auditStatus),
 	)
+
+	// 4. Durable Execution Logging in agent_executions table
+	durationMS := time.Since(startTime).Milliseconds()
+	argsJSON := TruncateJSON(params.Arguments, 1000)
+	resJSON := TruncateJSON(textResult, 1000)
+	_ = RecordAgentExecution(context.Background(), m.store.DB(), AgentExecution{
+		OrgID:         orgID,
+		AgentID:       agentID,
+		ToolName:      params.Name,
+		Category:      string(toolDef.Category),
+		ArgumentsJSON: argsJSON,
+		ResultJSON:    resJSON,
+		IsError:       isErr,
+		DurationMS:    durationMS,
+		CreatedAt:     startTime,
+	})
 
 	return &JSONRPCResponse{
 		JSONRPC: "2.0",

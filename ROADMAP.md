@@ -146,22 +146,22 @@ flowchart TD
 
 **Goal:** Agents should be capable of useful work without being able to bypass the BOS's business rules.
 
-### Agent Platform Checklist (0/15)
-- [ ] Comprehensive MCP registry detailing tools, resources, prompts, permissions, and side effects.
-- [ ] Strongly typed JSON schemas for all tool inputs and outputs.
-- [ ] Route all agent tool calls directly through the core application services.
-- [ ] Per-tool and per-entity permission enforcement.
-- [ ] Clear categorization: Read-only, Reversible mutations, High-impact mutations.
-- [ ] Durable execution IDs, idempotency keys, execution deadlines, and cancellation tokens.
-- [ ] Persistent agent run history: tool inputs, results, execution duration, and error traces.
-- [ ] Treat all external inputs (reviews, emails, web content) as untrusted; guard against prompt injection.
-- [ ] Enforce factual validation; prevent hallucinated IDs or fabricated financial amounts.
-- [ ] Context isolation: prevent agents from accessing keys or cross-tenant records via arguments.
-- [ ] Rate limits, token/cost budgets, and concurrency controls for agent actions.
-- [ ] Approval escalation, timeouts, human handoff, and an emergency global kill switch.
-- [ ] Reliable event streaming with reconnect buffers and message replay.
-- [ ] Versioned MCP tool contracts with integration tests.
-- [ ] Automated adversarial testing suite simulating rogue agent tool executions.
+### Agent Platform Checklist (15/15)
+- [x] Comprehensive MCP registry detailing tools, resources, prompts, permissions, and side effects (`internal/mcp/registry.go`).
+- [x] Strongly typed JSON schemas for all tool inputs and outputs.
+- [x] Route all agent tool calls directly through the core application services (`WorkflowService`).
+- [x] Per-tool and per-entity permission enforcement.
+- [x] Clear categorization: Read-only, Reversible mutations, High-impact mutations.
+- [x] Durable execution IDs, idempotency keys, execution deadlines (30s context timeout), and cancellation tokens.
+- [x] Persistent agent run history: tool inputs, results, execution duration, and error traces (`agent_executions` table).
+- [x] Treat all external inputs (reviews, emails, web content) as untrusted; guard against prompt injection (`SanitizePromptInput`).
+- [x] Enforce factual validation; prevent hallucinated IDs or fabricated financial amounts.
+- [x] Context isolation: prevent agents from accessing keys or cross-tenant records via arguments.
+- [x] Rate limits, token/cost budgets, and concurrency controls for agent actions (`internal/mcp/ratelimit.go`).
+- [x] Approval escalation, timeouts, human handoff, and an emergency global kill switch (`internal/mcp/guard.go`, `/api/admin/kill-switch`).
+- [x] Reliable event streaming with reconnect buffers and message replay (`Last-Event-ID` outbox replay in `/api/events`).
+- [x] Versioned MCP tool contracts with integration tests (`internal/mcp/server_test.go`).
+- [x] Automated adversarial testing suite simulating rogue agent tool executions (`internal/mcp/adversarial_test.go`).
 
 > **Exit Gate**: Agents cannot bypass business rules or permissions applied to humans; all agent actions are traceable, stoppable, and safe to retry.
 

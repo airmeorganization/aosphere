@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"aosphere/internal/auth"
+	"aosphere/internal/mcp"
 	"aosphere/internal/service"
 	"aosphere/internal/store"
 )
@@ -40,12 +41,13 @@ func NewAPI(s *store.Store, svc *service.WorkflowService, env string) *API {
 	}
 }
 
-// Broadcast sends an SSE event to all connected web UI browsers
+// Broadcast sends an SSE event to all connected web UI browsers with sequential durable ID
 func (a *API) Broadcast(eventType, payload string) {
 	a.clientsMu.RLock()
 	defer a.clientsMu.RUnlock()
 
-	msg := fmt.Sprintf("event: %s\ndata: %s\n\n", eventType, payload)
+	evtID := fmt.Sprintf("evt_%d", time.Now().UnixNano())
+	msg := fmt.Sprintf("id: %s\nevent: %s\ndata: %s\n\n", evtID, eventType, payload)
 	for ch := range a.clients {
 		select {
 		case ch <- msg:
@@ -66,7 +68,7 @@ func (a *API) HandleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
-	msgChan := make(chan string, 16)
+	msgChan := make(chan string, 32)
 	a.clientsMu.Lock()
 	a.clients[msgChan] = true
 	a.clientsMu.Unlock()
@@ -80,6 +82,31 @@ func (a *API) HandleSSE(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Fprintf(w, "event: connected\ndata: {\"status\":\"ok\",\"time\":\"%s\"}\n\n", time.Now().Format(time.RFC3339))
 	flusher.Flush()
+
+	// Replay recent outbox events if Last-Event-ID header is present (resilient reconnection)
+	lastEventID := r.Header.Get("Last-Event-ID")
+	if lastEventID == "" {
+		lastEventID = r.URL.Query().Get("lastEventId")
+	}
+	if lastEventID != "" {
+		rows, err := a.store.DB().QueryContext(r.Context(),
+			`SELECT id, event_type, payload_json FROM outbox_events WHERE status = 'published' ORDER BY created_at DESC LIMIT 20`)
+		if err == nil {
+			type historyEvent struct{ id, evt, data string }
+			var history []historyEvent
+			for rows.Next() {
+				var h historyEvent
+				if err := rows.Scan(&h.id, &h.evt, &h.data); err == nil {
+					history = append(history, h)
+				}
+			}
+			rows.Close()
+			for i := len(history) - 1; i >= 0; i-- {
+				fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", history[i].id, history[i].evt, history[i].data)
+			}
+			flusher.Flush()
+		}
+	}
 
 	notify := r.Context().Done()
 	for {
@@ -699,5 +726,52 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 		a.Broadcast("backup_completed", fmt.Sprintf("{\"backup_path\":\"%s\",\"size_bytes\":%d,\"integrity_ok\":%t}",
 			res.BackupPath, res.SizeBytes, res.IntegrityOK))
 		writeJSON(w, res)
+	})
+
+	// Emergency Kill Switch Control
+	mux.HandleFunc("/api/admin/kill-switch", func(w http.ResponseWriter, r *http.Request) {
+		authCtx := GetAuthContext(r.Context())
+		if authCtx != nil && !authCtx.Can(auth.PermAdmin) {
+			w.WriteHeader(http.StatusForbidden)
+			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission admin required"})
+			return
+		}
+		orgID := getOrgID(r)
+
+		if r.Method == "POST" {
+			var req struct {
+				Active bool `json:"active"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mcp.DefaultKillSwitch().SetOrg(orgID, req.Active)
+			a.Broadcast("kill_switch_toggled", fmt.Sprintf("{\"active\":%t,\"org_id\":\"%s\"}", req.Active, orgID))
+			_ = a.store.LogAuditForOrg(orgID, "human", authCtx.UserID, "KILL_SWITCH_TOGGLE", "system", "kill_switch",
+				fmt.Sprintf("Kill switch set to %t", req.Active), "{}")
+			writeJSON(w, map[string]interface{}{"status": "ok", "active": req.Active})
+			return
+		}
+
+		active := mcp.DefaultKillSwitch().IsActive(orgID)
+		writeJSON(w, map[string]interface{}{"kill_switch_active": active, "org_id": orgID})
+	})
+
+	// Agent Run History Audit
+	mux.HandleFunc("/api/admin/agent-executions", func(w http.ResponseWriter, r *http.Request) {
+		authCtx := GetAuthContext(r.Context())
+		if authCtx != nil && !authCtx.Can(auth.PermAdmin) {
+			w.WriteHeader(http.StatusForbidden)
+			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission admin required"})
+			return
+		}
+		orgID := getOrgID(r)
+		execs, err := mcp.GetAgentExecutions(r.Context(), a.store.DB(), orgID, 50)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, execs)
 	})
 }

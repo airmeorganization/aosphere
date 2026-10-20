@@ -98,6 +98,34 @@ var Migrations = []Migration{
 		CREATE INDEX IF NOT EXISTS idx_journal_lines_entry ON journal_lines(entry_id);
 		`,
 	},
+	{
+		Version: 4,
+		Name:    "004_agent_executions_and_settings",
+		SQL: `
+		CREATE TABLE IF NOT EXISTS agent_executions (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			agent_id TEXT NOT NULL,
+			tool_name TEXT NOT NULL,
+			category TEXT NOT NULL, -- read_only, reversible_mutation, high_impact_mutation
+			arguments_json TEXT NOT NULL,
+			result_json TEXT NOT NULL,
+			is_error BOOLEAN NOT NULL DEFAULT 0,
+			duration_ms INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE INDEX IF NOT EXISTS idx_agent_exec_org ON agent_executions(org_id, created_at);
+		CREATE INDEX IF NOT EXISTS idx_agent_exec_agent ON agent_executions(agent_id, created_at);
+
+		CREATE TABLE IF NOT EXISTS system_settings (
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			key TEXT NOT NULL,
+			value TEXT NOT NULL,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (org_id, key)
+		);
+		`,
+	},
 }
 
 // RunMigrations applies all pending migrations in sequential order
