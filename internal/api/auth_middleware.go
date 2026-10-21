@@ -23,11 +23,30 @@ func GetAuthContext(ctx context.Context) *auth.AuthContext {
 }
 
 // AuthenticateMiddleware attempts to identify the caller from session cookies, Bearer tokens, or API keys
-func AuthenticateMiddleware(s *store.Store) func(http.Handler) http.Handler {
+func AuthenticateMiddleware(s *store.Store, env ...string) func(http.Handler) http.Handler {
+	environment := "production"
+	if len(env) > 0 && env[0] != "" {
+		environment = env[0]
+	}
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			token := auth.ExtractToken(r)
 			if token == "" {
+				// In local development environment ONLY, provide default developer identity for convenience
+				if environment == "development" {
+					devCtx := &auth.AuthContext{
+						UserID:   "usr_dev",
+						OrgID:    "org_default",
+						Email:    "dev@aosphere.local",
+						Name:     "Local Developer",
+						Role:     auth.RoleAdmin,
+						IsAPIKey: false,
+					}
+					next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), AuthCtxKey, devCtx)))
+					return
+				}
+				// In production/staging/test, caller remains unauthenticated (authCtx == nil)
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -35,7 +54,7 @@ func AuthenticateMiddleware(s *store.Store) func(http.Handler) http.Handler {
 			tokenHash := auth.HashToken(token)
 
 			// 1. Try API key lookup (for AI agents or service integrations)
-			if strings.HasPrefix(token, "ao_sk_") {
+			if strings.HasPrefix(token, "ao_sk_") || strings.HasPrefix(token, "ao_live_") {
 				apiKey, err := s.GetAPIKeyByHash(tokenHash)
 				if err == nil && apiKey != nil {
 					role, _ := auth.ParseRole(apiKey.Role)

@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -480,6 +481,47 @@ func TestMCPServer_Phase6LifecycleTools(t *testing.T) {
 	resPayMap, _ := respPay.Result.(map[string]interface{})
 	if isErr, _ := resPayMap["isError"].(bool); !isErr {
 		t.Errorf("expected isError=true for non-existent PO payment")
+	}
+}
+
+func TestMCPServer_StdioAuthentication(t *testing.T) {
+	server, appStore, _, cleanup := setupTestMCPServer(t)
+	defer cleanup()
+
+	// 1. Create a user and scoped API key
+	user, err := appStore.CreateUser("org_default", "agent_owner@aosphere.local", "hashedpassword123", "Agent Owner", "admin")
+	if err != nil {
+		t.Fatalf("CreateUser failed: %v", err)
+	}
+	rawKey, _ := auth.GenerateRandomToken("ao_sk")
+	keyHash := auth.HashToken(rawKey)
+	_, err = appStore.CreateAPIKey("org_default", user.ID, "Automation Agent", keyHash, "operations", "erp_list_skus,erp_adjust_stock")
+	if err != nil {
+		t.Fatalf("CreateAPIKey failed: %v", err)
+	}
+
+	// 2. Test AuthenticateToken with valid key
+	authCtx, agentName, err := server.AuthenticateToken(rawKey)
+	if err != nil {
+		t.Fatalf("AuthenticateToken with valid key failed: %v", err)
+	}
+	if authCtx.Role != auth.RoleOperations || authCtx.OrgID != "org_default" || agentName != "Automation Agent" {
+		t.Errorf("unexpected identity from AuthenticateToken: %+v, agent: %s", authCtx, agentName)
+	}
+
+	// 3. Test AuthenticateToken with invalid key
+	_, _, err = server.AuthenticateToken("ao_sk_invalid_bogus_token")
+	if err == nil {
+		t.Error("expected error for bogus API key, got nil")
+	}
+
+	// 4. Test Stdio in production environment with no key -> must reject
+	server.SetEnv("production")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately so if it proceeds it exits
+	err = server.HandleStdio(ctx, "")
+	if err == nil || !strings.Contains(err.Error(), "authentication required") {
+		t.Errorf("expected authentication required error for production stdio without key, got: %v", err)
 	}
 }
 

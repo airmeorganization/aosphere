@@ -64,12 +64,13 @@ func main() {
 	appStore := store.NewStore(database)
 	workflowSvc := service.NewWorkflowService(appStore)
 	mcpServer := mcp.NewMCPServer(appStore, workflowSvc)
+	mcpServer.SetEnv(string(cfg.Env))
 
 	// 4. Handle MCP Stdio Mode (for Claude Desktop, Antigravity, Cursor)
 	if cfg.MCPStdio {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		if err := mcpServer.HandleStdio(ctx); err != nil {
+		if err := mcpServer.HandleStdio(ctx, ""); err != nil {
 			logger.Error("MCP stdio error", slog.Any("error", err))
 			os.Exit(1)
 		}
@@ -96,8 +97,8 @@ func main() {
 
 	// 6. Start Durable Background Outbox Worker
 	workerCtx, cancelWorker := context.WithCancel(context.Background())
-	outboxDone := workflowSvc.StartOutboxWorker(workerCtx, service.DefaultOutboxWorkerConfig(), func(eventType, payload string) error {
-		appAPI.Broadcast(eventType, payload)
+	outboxDone := workflowSvc.StartOrgOutboxWorker(workerCtx, service.DefaultOutboxWorkerConfig(), func(orgID, eventType, payload string) error {
+		appAPI.BroadcastForOrg(orgID, eventType, payload)
 		return nil
 	})
 
@@ -107,7 +108,7 @@ func main() {
 	handler = api.LoggingMiddleware(logger)(handler)
 	handler = api.MetricsMiddleware(handler)
 	handler = api.SecurityHeadersMiddleware(cfg.Env == config.EnvProduction)(handler)
-	handler = api.AuthenticateMiddleware(appStore)(handler)
+	handler = api.AuthenticateMiddleware(appStore, string(cfg.Env))(handler)
 	handler = api.CORSMiddleware(handler)
 	handler = api.RequestIDMiddleware(handler)
 

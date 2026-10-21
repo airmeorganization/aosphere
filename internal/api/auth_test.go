@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -176,5 +177,134 @@ func TestTenantIsolation_APIRoutes(t *testing.T) {
 	json.NewDecoder(rrSKUs.Body).Decode(&skus)
 	if len(skus) != 0 {
 		t.Errorf("SECURITY LEAK: Tenant Two received %d SKUs belonging to another organization!", len(skus))
+	}
+}
+
+func TestUnauthenticatedAccessBlockedInProduction(t *testing.T) {
+	testAPI, database := setupTestAPI(t)
+	defer database.Close()
+	testAPI.env = "production"
+
+	mux := http.NewServeMux()
+	testAPI.RegisterRoutes(mux)
+	handler := AuthenticateMiddleware(testAPI.store, "production")(mux)
+
+	protectedEndpoints := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/skus"},
+		{http.MethodPost, "/api/skus/adjust"},
+		{http.MethodGet, "/api/suppliers"},
+		{http.MethodGet, "/api/purchase-orders"},
+		{http.MethodPost, "/api/purchase-orders"},
+		{http.MethodGet, "/api/deals"},
+		{http.MethodPost, "/api/deals"},
+		{http.MethodGet, "/api/invoices"},
+		{http.MethodGet, "/api/financial-summary"},
+		{http.MethodGet, "/api/ledger/trial-balance"},
+		{http.MethodGet, "/api/employees"},
+		{http.MethodGet, "/api/timesheets"},
+		{http.MethodGet, "/api/approvals"},
+		{http.MethodGet, "/api/audit-logs"},
+		{http.MethodGet, "/api/reconciliation"},
+		{http.MethodPost, "/api/backup/run"},
+		{http.MethodGet, "/api/admin/kill-switch"},
+		{http.MethodGet, "/api/admin/agent-executions"},
+		{http.MethodGet, "/api/documents"},
+		{http.MethodGet, "/api/search"},
+		{http.MethodGet, "/api/export"},
+		{http.MethodGet, "/api/notifications"},
+		{http.MethodGet, "/api/organization"},
+	}
+
+	for _, ep := range protectedEndpoints {
+		t.Run(ep.method+" "+ep.path, func(t *testing.T) {
+			req := httptest.NewRequest(ep.method, ep.path, nil)
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusUnauthorized {
+				t.Errorf("CRITICAL SECURITY HOLE: Anonymous request to %s %s was not blocked with 401 Unauthorized! Got %d",
+					ep.method, ep.path, rr.Code)
+			}
+		})
+	}
+}
+
+func TestCORSPolicyHardening(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/version", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"version":"1.0"}`))
+	})
+	handler := CORSMiddleware(mux)
+
+	// 1. Preflight OPTIONS with specific Origin
+	reqPreflight := httptest.NewRequest(http.MethodOptions, "/api/version", nil)
+	reqPreflight.Header.Set("Origin", "https://app.aosphere.io")
+	rrPreflight := httptest.NewRecorder()
+	handler.ServeHTTP(rrPreflight, reqPreflight)
+
+	if rrPreflight.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for OPTIONS preflight, got %d", rrPreflight.Code)
+	}
+	if origin := rrPreflight.Header().Get("Access-Control-Allow-Origin"); origin != "https://app.aosphere.io" {
+		t.Errorf("expected reflected origin https://app.aosphere.io, got %s", origin)
+	}
+	if creds := rrPreflight.Header().Get("Access-Control-Allow-Credentials"); creds != "true" {
+		t.Errorf("expected Access-Control-Allow-Credentials: true, got %s", creds)
+	}
+
+	// 2. Regular GET with Origin
+	reqGet := httptest.NewRequest(http.MethodGet, "/api/version", nil)
+	reqGet.Header.Set("Origin", "https://app.aosphere.io")
+	rrGet := httptest.NewRecorder()
+	handler.ServeHTTP(rrGet, reqGet)
+
+	if origin := rrGet.Header().Get("Access-Control-Allow-Origin"); origin != "https://app.aosphere.io" {
+		t.Errorf("expected reflected origin on GET, got %s", origin)
+	}
+	if creds := rrGet.Header().Get("Access-Control-Allow-Credentials"); creds != "true" {
+		t.Errorf("expected Access-Control-Allow-Credentials: true on GET, got %s", creds)
+	}
+}
+
+func TestTenantIsolatedSSE(t *testing.T) {
+	testAPI, database := setupTestAPI(t)
+	defer database.Close()
+
+	ch1 := make(chan string, 4)
+	ch2 := make(chan string, 4)
+
+	testAPI.clientsMu.Lock()
+	testAPI.clients[ch1] = "org_alpha"
+	testAPI.clients[ch2] = "org_beta"
+	testAPI.clientsMu.Unlock()
+
+	defer func() {
+		testAPI.clientsMu.Lock()
+		delete(testAPI.clients, ch1)
+		delete(testAPI.clients, ch2)
+		testAPI.clientsMu.Unlock()
+	}()
+
+	// Broadcast an event strictly for org_alpha
+	testAPI.BroadcastForOrg("org_alpha", "invoice_created", `{"invoice_id":"inv_alpha_01"}`)
+
+	select {
+	case msg := <-ch1:
+		if !strings.Contains(msg, "invoice_created") || !strings.Contains(msg, "inv_alpha_01") {
+			t.Errorf("org_alpha received unexpected message: %s", msg)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected org_alpha subscriber to receive message")
+	}
+
+	// Verify org_beta received NOTHING
+	select {
+	case msg := <-ch2:
+		t.Fatalf("SECURITY VIOLATION: org_beta received tenant event belonging to org_alpha: %s", msg)
+	case <-time.After(100 * time.Millisecond):
+		// Success: nothing leaked to org_beta
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"aosphere/internal/metrics"
 	"aosphere/internal/service"
 	"aosphere/internal/store"
+	"github.com/google/uuid"
 )
 
 func getOrgID(r *http.Request) string {
@@ -23,11 +24,11 @@ func getOrgID(r *http.Request) string {
 }
 
 type API struct {
-	store      *store.Store
-	service    *service.WorkflowService
-	env        string
-	clients    map[chan string]bool
-	clientsMu  sync.RWMutex
+	store     *store.Store
+	service   *service.WorkflowService
+	env       string
+	clients   map[chan string]string // map[msgChan]orgID
+	clientsMu sync.RWMutex
 }
 
 func NewAPI(s *store.Store, svc *service.WorkflowService, env string) *API {
@@ -38,23 +39,54 @@ func NewAPI(s *store.Store, svc *service.WorkflowService, env string) *API {
 		store:   s,
 		service: svc,
 		env:     env,
-		clients: make(map[chan string]bool),
+		clients: make(map[chan string]string),
 	}
 }
 
-// Broadcast sends an SSE event to all connected web UI browsers with sequential durable ID
-func (a *API) Broadcast(eventType, payload string) {
+// requireAuth validates that the request is authenticated and has the required permission
+func (a *API) requireAuth(w http.ResponseWriter, r *http.Request, perm auth.Permission) (*auth.AuthContext, bool) {
+	authCtx := GetAuthContext(r.Context())
+	if authCtx == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		writeJSON(w, map[string]string{
+			"error":   "unauthorized",
+			"message": "Authentication required. Please provide a valid session token or API key.",
+		})
+		return nil, false
+	}
+	if perm != "" && !authCtx.Can(perm) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		writeJSON(w, map[string]string{
+			"error":   "forbidden",
+			"message": fmt.Sprintf("Permission %s required", perm),
+		})
+		return authCtx, false
+	}
+	return authCtx, true
+}
+
+// BroadcastForOrg sends an SSE event to clients belonging to that organization
+func (a *API) BroadcastForOrg(orgID, eventType, payload string) {
 	a.clientsMu.RLock()
 	defer a.clientsMu.RUnlock()
 
-	evtID := fmt.Sprintf("evt_%d", time.Now().UnixNano())
+	evtID := fmt.Sprintf("evt_%d_%s", time.Now().UnixNano(), uuid.New().String()[:8])
 	msg := fmt.Sprintf("id: %s\nevent: %s\ndata: %s\n\n", evtID, eventType, payload)
-	for ch := range a.clients {
-		select {
-		case ch <- msg:
-		default:
+	for ch, clientOrgID := range a.clients {
+		if orgID == "" || orgID == "*" || clientOrgID == orgID {
+			select {
+			case ch <- msg:
+			default:
+			}
 		}
 	}
+}
+
+// Broadcast sends an event across all clients for backwards compatibility
+func (a *API) Broadcast(eventType, payload string) {
+	a.BroadcastForOrg("*", eventType, payload)
 }
 
 func (a *API) HandleSSE(w http.ResponseWriter, r *http.Request) {
@@ -64,14 +96,32 @@ func (a *API) HandleSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	orgID := getOrgID(r)
+	authCtx := GetAuthContext(r.Context())
+	if a.env == "production" && authCtx == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		writeJSON(w, map[string]string{
+			"error":   "unauthorized",
+			"message": "Authentication required for live event stream.",
+		})
+		return
+	}
+	if authCtx != nil && authCtx.OrgID != "" {
+		orgID = authCtx.OrgID
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if origin := r.Header.Get("Origin"); origin != "" {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+	}
 
 	msgChan := make(chan string, 32)
 	a.clientsMu.Lock()
-	a.clients[msgChan] = true
+	a.clients[msgChan] = orgID
 	a.clientsMu.Unlock()
 
 	defer func() {
@@ -81,17 +131,17 @@ func (a *API) HandleSSE(w http.ResponseWriter, r *http.Request) {
 		close(msgChan)
 	}()
 
-	fmt.Fprintf(w, "event: connected\ndata: {\"status\":\"ok\",\"time\":\"%s\"}\n\n", time.Now().Format(time.RFC3339))
+	fmt.Fprintf(w, "event: connected\ndata: {\"status\":\"ok\",\"org_id\":\"%s\",\"time\":\"%s\"}\n\n", orgID, time.Now().Format(time.RFC3339))
 	flusher.Flush()
 
-	// Replay recent outbox events if Last-Event-ID header is present (resilient reconnection)
+	// Replay recent outbox events for THIS organization if Last-Event-ID header is present (resilient reconnection)
 	lastEventID := r.Header.Get("Last-Event-ID")
 	if lastEventID == "" {
 		lastEventID = r.URL.Query().Get("lastEventId")
 	}
 	if lastEventID != "" {
 		rows, err := a.store.DB().QueryContext(r.Context(),
-			`SELECT id, event_type, payload_json FROM outbox_events WHERE status = 'published' ORDER BY created_at DESC LIMIT 20`)
+			`SELECT id, event_type, payload_json FROM outbox_events WHERE org_id = ? AND status = 'published' ORDER BY created_at DESC LIMIT 20`, orgID)
 		if err == nil {
 			type historyEvent struct{ id, evt, data string }
 			var history []historyEvent
@@ -167,9 +217,12 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 
 	// ERP
 	mux.HandleFunc("/api/skus", func(w http.ResponseWriter, r *http.Request) {
-		orgID := getOrgID(r)
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
 		below := r.URL.Query().Get("below_threshold") == "true"
-		items, err := a.store.GetSKUsForOrg(orgID, below)
+		items, err := a.store.GetSKUsForOrg(authCtx.OrgID, below)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -182,10 +235,8 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		authCtx := GetAuthContext(r.Context())
-		if authCtx != nil && !authCtx.Can(auth.PermManageInventory) {
-			w.WriteHeader(http.StatusForbidden)
-			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission manage_inventory required"})
+		authCtx, ok := a.requireAuth(w, r, auth.PermManageInventory)
+		if !ok {
 			return
 		}
 		var req struct {
@@ -203,8 +254,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 		if idempKey == "" {
 			idempKey = req.IdempotencyKey
 		}
-		orgID := getOrgID(r)
-		updated, err := a.service.AdjustStock(r.Context(), orgID, req.SKUID, req.Delta, req.Reason, authCtx, req.ExpectedVersion, idempKey)
+		updated, err := a.service.AdjustStock(r.Context(), authCtx.OrgID, req.SKUID, req.Delta, req.Reason, authCtx, req.ExpectedVersion, idempKey)
 		if err != nil {
 			if errors.Is(err, service.ErrStaleVersion) {
 				w.WriteHeader(http.StatusConflict)
@@ -219,13 +269,16 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		a.Broadcast("stock_updated", fmt.Sprintf("{\"sku_id\":\"%s\",\"new_stock\":%d}", updated.ID, updated.StockQuantity))
+		a.BroadcastForOrg(authCtx.OrgID, "stock_updated", fmt.Sprintf("{\"sku_id\":\"%s\",\"new_stock\":%d}", updated.ID, updated.StockQuantity))
 		writeJSON(w, updated)
 	})
 
 	mux.HandleFunc("/api/suppliers", func(w http.ResponseWriter, r *http.Request) {
-		orgID := getOrgID(r)
-		sups, err := a.store.GetSuppliersForOrg(orgID)
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		sups, err := a.store.GetSuppliersForOrg(authCtx.OrgID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -234,12 +287,9 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("/api/purchase-orders", func(w http.ResponseWriter, r *http.Request) {
-		orgID := getOrgID(r)
 		if r.Method == "POST" {
-			authCtx := GetAuthContext(r.Context())
-			if authCtx != nil && !authCtx.Can(auth.PermManageOrders) {
-				w.WriteHeader(http.StatusForbidden)
-				writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission manage_orders required"})
+			authCtx, ok := a.requireAuth(w, r, auth.PermManageOrders)
+			if !ok {
 				return
 			}
 			var req struct {
@@ -266,20 +316,24 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 				Items:      req.Items,
 				Notes:      req.Notes,
 			}
-			res, err := a.service.CreatePurchaseOrder(r.Context(), orgID, poReq, authCtx, idempKey)
+			res, err := a.service.CreatePurchaseOrder(r.Context(), authCtx.OrgID, poReq, authCtx, idempKey)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			a.Broadcast("po_created", fmt.Sprintf("{\"po_number\":\"%s\"}", res.PurchaseOrder.PONumber))
+			a.BroadcastForOrg(authCtx.OrgID, "po_created", fmt.Sprintf("{\"po_number\":\"%s\"}", res.PurchaseOrder.PONumber))
 			if res.RequiresApproval {
-				a.Broadcast("approval_required", fmt.Sprintf("{\"approval_id\":\"%s\"}", res.Approval.ID))
+				a.BroadcastForOrg(authCtx.OrgID, "approval_required", fmt.Sprintf("{\"approval_id\":\"%s\"}", res.Approval.ID))
 			}
 			w.WriteHeader(http.StatusCreated)
 			writeJSON(w, res.PurchaseOrder)
 			return
 		}
-		pos, err := a.store.GetPurchaseOrdersForOrg(orgID)
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		pos, err := a.store.GetPurchaseOrdersForOrg(authCtx.OrgID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -292,10 +346,8 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		authCtx := GetAuthContext(r.Context())
-		if authCtx != nil && !authCtx.Can(auth.PermManageOrders) {
-			w.WriteHeader(http.StatusForbidden)
-			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission manage_orders required"})
+		authCtx, ok := a.requireAuth(w, r, auth.PermManageOrders)
+		if !ok {
 			return
 		}
 		var req struct {
@@ -310,8 +362,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 		if idempKey == "" {
 			idempKey = req.IdempotencyKey
 		}
-		orgID := getOrgID(r)
-		po, err := a.service.ReceivePurchaseOrder(r.Context(), orgID, req.POID, authCtx, idempKey)
+		po, err := a.service.ReceivePurchaseOrder(r.Context(), authCtx.OrgID, req.POID, authCtx, idempKey)
 		if err != nil {
 			if errors.Is(err, service.ErrInvalidStateTransition) {
 				w.WriteHeader(http.StatusConflict)
@@ -321,7 +372,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		a.Broadcast("po_received", fmt.Sprintf("{\"po_number\":\"%s\"}", po.PONumber))
+		a.BroadcastForOrg(authCtx.OrgID, "po_received", fmt.Sprintf("{\"po_number\":\"%s\"}", po.PONumber))
 		writeJSON(w, po)
 	})
 
@@ -330,10 +381,8 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		authCtx := GetAuthContext(r.Context())
-		if authCtx != nil && !authCtx.Can(auth.PermManageFinance) {
-			w.WriteHeader(http.StatusForbidden)
-			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission manage_finance required"})
+		authCtx, ok := a.requireAuth(w, r, auth.PermManageFinance)
+		if !ok {
 			return
 		}
 		var req struct {
@@ -348,8 +397,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 		if idempKey == "" {
 			idempKey = req.IdempotencyKey
 		}
-		orgID := getOrgID(r)
-		po, err := a.service.PayPurchaseOrder(r.Context(), orgID, req.POID, authCtx, idempKey)
+		po, err := a.service.PayPurchaseOrder(r.Context(), authCtx.OrgID, req.POID, authCtx, idempKey)
 		if err != nil {
 			if errors.Is(err, service.ErrPONotReceived) {
 				w.WriteHeader(http.StatusConflict)
@@ -359,12 +407,16 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		a.Broadcast("po_paid", fmt.Sprintf("{\"po_number\":\"%s\"}", po.PONumber))
+		a.BroadcastForOrg(authCtx.OrgID, "po_paid", fmt.Sprintf("{\"po_number\":\"%s\"}", po.PONumber))
 		writeJSON(w, po)
 	})
 
 	// CRM
 	mux.HandleFunc("/api/customers", func(w http.ResponseWriter, r *http.Request) {
+		_, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
 		custs, err := a.store.GetCustomers()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -375,6 +427,10 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 
 	mux.HandleFunc("/api/deals", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" {
+			authCtx, ok := a.requireAuth(w, r, auth.PermManageOrders)
+			if !ok {
+				return
+			}
 			var req struct {
 				Title      string  `json:"title"`
 				CustomerID string  `json:"customer_id"`
@@ -386,13 +442,21 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			deal, err := a.store.CreateDeal(req.Title, req.CustomerID, req.Value, req.Stage, 60, req.CloseDate, "human", "web_user")
+			actorType := "human"
+			if authCtx.IsAPIKey {
+				actorType = "agent"
+			}
+			deal, err := a.store.CreateDeal(req.Title, req.CustomerID, req.Value, req.Stage, 60, req.CloseDate, actorType, authCtx.UserID)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			a.Broadcast("deal_created", fmt.Sprintf("{\"deal_id\":\"%s\"}", deal.ID))
+			a.BroadcastForOrg(authCtx.OrgID, "deal_created", fmt.Sprintf("{\"deal_id\":\"%s\"}", deal.ID))
 			writeJSON(w, deal)
+			return
+		}
+		_, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
 			return
 		}
 		deals, err := a.store.GetDeals()
@@ -408,6 +472,10 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		authCtx, ok := a.requireAuth(w, r, auth.PermManageOrders)
+		if !ok {
+			return
+		}
 		var req struct {
 			DealID string `json:"deal_id"`
 			Stage  string `json:"stage"`
@@ -416,11 +484,15 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := a.store.UpdateDealStage(req.DealID, req.Stage, "human", "web_user"); err != nil {
+		actorType := "human"
+		if authCtx.IsAPIKey {
+			actorType = "agent"
+		}
+		if err := a.store.UpdateDealStage(req.DealID, req.Stage, actorType, authCtx.UserID); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		a.Broadcast("deal_stage_changed", fmt.Sprintf("{\"deal_id\":\"%s\",\"stage\":\"%s\"}", req.DealID, req.Stage))
+		a.BroadcastForOrg(authCtx.OrgID, "deal_stage_changed", fmt.Sprintf("{\"deal_id\":\"%s\",\"stage\":\"%s\"}", req.DealID, req.Stage))
 		writeJSON(w, map[string]string{"status": "ok"})
 	})
 
@@ -429,7 +501,10 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		authCtx := GetAuthContext(r.Context())
+		authCtx, ok := a.requireAuth(w, r, auth.PermManageOrders)
+		if !ok {
+			return
+		}
 		var req struct {
 			DealID string                `json:"deal_id"`
 			Items  []service.InvoiceItem `json:"items"`
@@ -438,13 +513,12 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		orgID := getOrgID(r)
-		quote, err := a.service.GenerateQuote(r.Context(), orgID, req.DealID, req.Items, authCtx)
+		quote, err := a.service.GenerateQuote(r.Context(), authCtx.OrgID, req.DealID, req.Items, authCtx)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		a.Broadcast("quote_generated", fmt.Sprintf("{\"quote_number\":\"%s\",\"deal_id\":\"%s\"}", quote.QuoteNumber, req.DealID))
+		a.BroadcastForOrg(authCtx.OrgID, "quote_generated", fmt.Sprintf("{\"quote_number\":\"%s\",\"deal_id\":\"%s\"}", quote.QuoteNumber, req.DealID))
 		writeJSON(w, quote)
 	})
 
@@ -453,10 +527,8 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		authCtx := GetAuthContext(r.Context())
-		if authCtx != nil && !authCtx.Can(auth.PermManageFinance) {
-			w.WriteHeader(http.StatusForbidden)
-			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission manage_finance required"})
+		authCtx, ok := a.requireAuth(w, r, auth.PermManageFinance)
+		if !ok {
 			return
 		}
 		var req struct {
@@ -471,24 +543,20 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 		if idempKey == "" {
 			idempKey = req.IdempotencyKey
 		}
-		orgID := getOrgID(r)
-		inv, err := a.service.ConvertDealToInvoice(r.Context(), orgID, req.DealID, authCtx, idempKey)
+		inv, err := a.service.ConvertDealToInvoice(r.Context(), authCtx.OrgID, req.DealID, authCtx, idempKey)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		a.Broadcast("deal_converted", fmt.Sprintf("{\"deal_id\":\"%s\",\"invoice_number\":\"%s\"}", req.DealID, inv.InvoiceNumber))
+		a.BroadcastForOrg(authCtx.OrgID, "deal_converted", fmt.Sprintf("{\"deal_id\":\"%s\",\"invoice_number\":\"%s\"}", req.DealID, inv.InvoiceNumber))
 		writeJSON(w, inv)
 	})
 
 	// FINANCIAL
 	mux.HandleFunc("/api/invoices", func(w http.ResponseWriter, r *http.Request) {
-		orgID := getOrgID(r)
 		if r.Method == "POST" {
-			authCtx := GetAuthContext(r.Context())
-			if authCtx != nil && !authCtx.Can(auth.PermManageFinance) {
-				w.WriteHeader(http.StatusForbidden)
-				writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission manage_finance required"})
+			authCtx, ok := a.requireAuth(w, r, auth.PermManageFinance)
+			if !ok {
 				return
 			}
 			var req struct {
@@ -518,17 +586,21 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 				DueDate:    req.DueDate,
 				Recurring:  req.Recurring,
 			}
-			inv, err := a.service.CreateInvoice(r.Context(), orgID, invReq, authCtx, idempKey)
+			inv, err := a.service.CreateInvoice(r.Context(), authCtx.OrgID, invReq, authCtx, idempKey)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			a.Broadcast("invoice_created", fmt.Sprintf("{\"invoice_number\":\"%s\"}", inv.InvoiceNumber))
+			a.BroadcastForOrg(authCtx.OrgID, "invoice_created", fmt.Sprintf("{\"invoice_number\":\"%s\"}", inv.InvoiceNumber))
 			w.WriteHeader(http.StatusCreated)
 			writeJSON(w, inv)
 			return
 		}
-		invs, err := a.store.GetInvoicesForOrg(orgID)
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		invs, err := a.store.GetInvoicesForOrg(authCtx.OrgID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -541,10 +613,8 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		authCtx := GetAuthContext(r.Context())
-		if authCtx != nil && !authCtx.Can(auth.PermManageFinance) {
-			w.WriteHeader(http.StatusForbidden)
-			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission manage_finance required"})
+		authCtx, ok := a.requireAuth(w, r, auth.PermManageFinance)
+		if !ok {
 			return
 		}
 		var req struct {
@@ -559,8 +629,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 		if idempKey == "" {
 			idempKey = req.IdempotencyKey
 		}
-		orgID := getOrgID(r)
-		inv, err := a.service.PayInvoice(r.Context(), orgID, req.InvoiceID, authCtx, idempKey)
+		inv, err := a.service.PayInvoice(r.Context(), authCtx.OrgID, req.InvoiceID, authCtx, idempKey)
 		if err != nil {
 			if errors.Is(err, service.ErrInvalidStateTransition) {
 				w.WriteHeader(http.StatusConflict)
@@ -570,11 +639,15 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		a.Broadcast("invoice_paid", fmt.Sprintf("{\"invoice_number\":\"%s\"}", inv.InvoiceNumber))
+		a.BroadcastForOrg(authCtx.OrgID, "invoice_paid", fmt.Sprintf("{\"invoice_number\":\"%s\"}", inv.InvoiceNumber))
 		writeJSON(w, inv)
 	})
 
 	mux.HandleFunc("/api/financial-summary", func(w http.ResponseWriter, r *http.Request) {
+		_, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
 		summary, err := a.store.GetFinancialSummary()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -584,14 +657,11 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("/api/ledger/trial-balance", func(w http.ResponseWriter, r *http.Request) {
-		authCtx := GetAuthContext(r.Context())
-		if authCtx != nil && !authCtx.Can(auth.PermRead) {
-			w.WriteHeader(http.StatusForbidden)
-			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission read required"})
+		authCtx, ok := a.requireAuth(w, r, auth.PermManageFinance)
+		if !ok {
 			return
 		}
-		orgID := getOrgID(r)
-		report, err := a.service.TrialBalance(r.Context(), orgID)
+		report, err := a.service.TrialBalance(r.Context(), authCtx.OrgID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -600,6 +670,10 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("/api/expenses", func(w http.ResponseWriter, r *http.Request) {
+		_, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
 		exps, err := a.store.GetExpenses()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -610,12 +684,9 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 
 	// HRMS & PRODUCTIVITY
 	mux.HandleFunc("/api/employees", func(w http.ResponseWriter, r *http.Request) {
-		orgID := getOrgID(r)
 		if r.Method == "POST" {
-			authCtx := GetAuthContext(r.Context())
-			if authCtx != nil && !authCtx.Can(auth.PermManageHR) {
-				w.WriteHeader(http.StatusForbidden)
-				writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission manage_hr required"})
+			authCtx, ok := a.requireAuth(w, r, auth.PermManageHR)
+			if !ok {
 				return
 			}
 			var req struct {
@@ -630,13 +701,17 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			emp, err := a.store.CreateEmployee(orgID, req.Name, req.Role, req.Department, req.Email, req.Phone, req.HourlyRate)
+			emp, err := a.store.CreateEmployee(authCtx.OrgID, req.Name, req.Role, req.Department, req.Email, req.Phone, req.HourlyRate)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			a.Broadcast("employee_added", fmt.Sprintf("{\"id\":\"%s\",\"name\":\"%s\"}", emp.ID, emp.Name))
+			a.BroadcastForOrg(authCtx.OrgID, "employee_added", fmt.Sprintf("{\"id\":\"%s\",\"name\":\"%s\"}", emp.ID, emp.Name))
 			writeJSON(w, emp)
+			return
+		}
+		_, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
 			return
 		}
 		emps, err := a.store.GetEmployees()
@@ -648,8 +723,11 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("/api/timesheets", func(w http.ResponseWriter, r *http.Request) {
-		orgID := getOrgID(r)
-		ts, err := a.store.GetTimesheetsForOrg(orgID)
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		ts, err := a.store.GetTimesheetsForOrg(authCtx.OrgID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -662,10 +740,8 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		authCtx := GetAuthContext(r.Context())
-		if authCtx != nil && !authCtx.Can(auth.PermManageHR) {
-			w.WriteHeader(http.StatusForbidden)
-			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission manage_hr required"})
+		authCtx, ok := a.requireAuth(w, r, auth.PermManageHR)
+		if !ok {
 			return
 		}
 		var req struct {
@@ -675,12 +751,11 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		orgID := getOrgID(r)
-		if err := a.service.ApproveTimesheet(r.Context(), orgID, req.TimesheetID, authCtx); err != nil {
+		if err := a.service.ApproveTimesheet(r.Context(), authCtx.OrgID, req.TimesheetID, authCtx); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		a.Broadcast("timesheet_approved", fmt.Sprintf("{\"timesheet_id\":\"%s\"}", req.TimesheetID))
+		a.BroadcastForOrg(authCtx.OrgID, "timesheet_approved", fmt.Sprintf("{\"timesheet_id\":\"%s\"}", req.TimesheetID))
 		writeJSON(w, map[string]string{"status": "ok"})
 	})
 
@@ -689,10 +764,8 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		authCtx := GetAuthContext(r.Context())
-		if authCtx != nil && !authCtx.Can(auth.PermManageHR) {
-			w.WriteHeader(http.StatusForbidden)
-			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission manage_hr required"})
+		authCtx, ok := a.requireAuth(w, r, auth.PermManageHR)
+		if !ok {
 			return
 		}
 		var req struct {
@@ -702,17 +775,20 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		orgID := getOrgID(r)
-		res, err := a.service.LockPayroll(r.Context(), orgID, req.Period, authCtx)
+		res, err := a.service.LockPayroll(r.Context(), authCtx.OrgID, req.Period, authCtx)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		a.Broadcast("payroll_locked", fmt.Sprintf("{\"period\":\"%s\",\"total_gross\":%.2f}", res.Period, res.TotalGrossDollars))
+		a.BroadcastForOrg(authCtx.OrgID, "payroll_locked", fmt.Sprintf("{\"period\":\"%s\",\"total_gross\":%.2f}", res.Period, res.TotalGrossDollars))
 		writeJSON(w, res)
 	})
 
 	mux.HandleFunc("/api/shifts", func(w http.ResponseWriter, r *http.Request) {
+		_, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
 		shifts, err := a.store.GetShifts()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -726,6 +802,10 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		authCtx, ok := a.requireAuth(w, r, auth.PermManageHR)
+		if !ok {
+			return
+		}
 		var req struct {
 			ShiftID string `json:"shift_id"`
 			Status  string `json:"status"`
@@ -734,15 +814,23 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := a.store.UpdateShiftStatus(req.ShiftID, req.Status, "human", "web_user"); err != nil {
+		actorType := "human"
+		if authCtx.IsAPIKey {
+			actorType = "agent"
+		}
+		if err := a.store.UpdateShiftStatus(req.ShiftID, req.Status, actorType, authCtx.UserID); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		a.Broadcast("shift_updated", fmt.Sprintf("{\"shift_id\":\"%s\"}", req.ShiftID))
+		a.BroadcastForOrg(authCtx.OrgID, "shift_updated", fmt.Sprintf("{\"shift_id\":\"%s\"}", req.ShiftID))
 		writeJSON(w, map[string]string{"status": "ok"})
 	})
 
 	mux.HandleFunc("/api/tasks", func(w http.ResponseWriter, r *http.Request) {
+		_, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
 		tasks, err := a.store.GetTasks()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -756,6 +844,10 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
 		var req struct {
 			TaskID string `json:"task_id"`
 			Status string `json:"status"`
@@ -764,16 +856,24 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := a.store.UpdateTaskStatus(req.TaskID, req.Status, "human", "web_user"); err != nil {
+		actorType := "human"
+		if authCtx.IsAPIKey {
+			actorType = "agent"
+		}
+		if err := a.store.UpdateTaskStatus(req.TaskID, req.Status, actorType, authCtx.UserID); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		a.Broadcast("task_updated", fmt.Sprintf("{\"task_id\":\"%s\"}", req.TaskID))
+		a.BroadcastForOrg(authCtx.OrgID, "task_updated", fmt.Sprintf("{\"task_id\":\"%s\"}", req.TaskID))
 		writeJSON(w, map[string]string{"status": "ok"})
 	})
 
 	// DIGITAL PRESENCE & REPUTATION
 	mux.HandleFunc("/api/listings", func(w http.ResponseWriter, r *http.Request) {
+		_, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
 		listings, err := a.store.GetListings()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -787,6 +887,10 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		authCtx, ok := a.requireAuth(w, r, auth.PermManageOrders)
+		if !ok {
+			return
+		}
 		var req struct {
 			BusinessName string `json:"business_name"`
 			Address      string `json:"address"`
@@ -797,15 +901,23 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := a.store.SyncNAP(req.BusinessName, req.Address, req.Phone, req.Website, "human", "web_user"); err != nil {
+		actorType := "human"
+		if authCtx.IsAPIKey {
+			actorType = "agent"
+		}
+		if err := a.store.SyncNAP(req.BusinessName, req.Address, req.Phone, req.Website, actorType, authCtx.UserID); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		a.Broadcast("nap_synced", "{\"status\":\"synced\"}")
+		a.BroadcastForOrg(authCtx.OrgID, "nap_synced", "{\"status\":\"synced\"}")
 		writeJSON(w, map[string]string{"status": "synced"})
 	})
 
 	mux.HandleFunc("/api/reviews", func(w http.ResponseWriter, r *http.Request) {
+		_, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
 		revs, err := a.store.GetReviews()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -817,6 +929,10 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/reviews/reply", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		authCtx, ok := a.requireAuth(w, r, auth.PermManageOrders)
+		if !ok {
 			return
 		}
 		var req struct {
@@ -832,19 +948,26 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 		if req.Publish {
 			status = "published"
 		}
-		if err := a.store.ReplyReview(req.ReviewID, req.ReplyText, status, "human", "web_user"); err != nil {
+		actorType := "human"
+		if authCtx.IsAPIKey {
+			actorType = "agent"
+		}
+		if err := a.store.ReplyReview(req.ReviewID, req.ReplyText, status, actorType, authCtx.UserID); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		a.Broadcast("review_replied", fmt.Sprintf("{\"review_id\":\"%s\"}", req.ReviewID))
+		a.BroadcastForOrg(authCtx.OrgID, "review_replied", fmt.Sprintf("{\"review_id\":\"%s\"}", req.ReviewID))
 		writeJSON(w, map[string]string{"status": "ok"})
 	})
 
 	// APPROVALS & AUDIT
 	mux.HandleFunc("/api/approvals", func(w http.ResponseWriter, r *http.Request) {
-		orgID := getOrgID(r)
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
 		status := r.URL.Query().Get("status")
-		apprs, err := a.store.GetApprovalsForOrg(orgID, status)
+		apprs, err := a.store.GetApprovalsForOrg(authCtx.OrgID, status)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -857,10 +980,8 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		authCtx := GetAuthContext(r.Context())
-		if authCtx != nil && !authCtx.Can(auth.PermApproveOrders) {
-			w.WriteHeader(http.StatusForbidden)
-			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission approve_orders required"})
+		authCtx, ok := a.requireAuth(w, r, auth.PermApproveOrders)
+		if !ok {
 			return
 		}
 		var req struct {
@@ -876,8 +997,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 		if idempKey == "" {
 			idempKey = req.IdempotencyKey
 		}
-		orgID := getOrgID(r)
-		appr, err := a.service.DecideApproval(r.Context(), orgID, req.ApprovalID, req.Decision, authCtx, idempKey)
+		appr, err := a.service.DecideApproval(r.Context(), authCtx.OrgID, req.ApprovalID, req.Decision, authCtx, idempKey)
 		if err != nil {
 			if errors.Is(err, service.ErrUnauthorizedAction) {
 				w.WriteHeader(http.StatusForbidden)
@@ -892,13 +1012,16 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		a.Broadcast("approval_decided", fmt.Sprintf("{\"id\":\"%s\",\"decision\":\"%s\",\"execution\":\"%s\"}", req.ApprovalID, req.Decision, appr.ExecutionStatus))
+		a.BroadcastForOrg(authCtx.OrgID, "approval_decided", fmt.Sprintf("{\"id\":\"%s\",\"decision\":\"%s\",\"execution\":\"%s\"}", req.ApprovalID, req.Decision, appr.ExecutionStatus))
 		writeJSON(w, map[string]interface{}{"status": "ok", "approval": appr})
 	})
 
 	mux.HandleFunc("/api/audit-logs", func(w http.ResponseWriter, r *http.Request) {
-		orgID := getOrgID(r)
-		logs, err := a.store.GetAuditLogsForOrg(orgID, 50)
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		logs, err := a.store.GetAuditLogsForOrg(authCtx.OrgID, 50)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -908,8 +1031,11 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 
 	// Business Integrity & Reconciliation Scan
 	mux.HandleFunc("/api/reconciliation", func(w http.ResponseWriter, r *http.Request) {
-		orgID := getOrgID(r)
-		report, err := a.service.ReconcileDiscrepancies(r.Context(), orgID)
+		authCtx, ok := a.requireAuth(w, r, auth.PermAdmin)
+		if !ok {
+			return
+		}
+		report, err := a.service.ReconcileDiscrepancies(r.Context(), authCtx.OrgID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -923,10 +1049,8 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		authCtx := GetAuthContext(r.Context())
-		if authCtx != nil && !authCtx.Can(auth.PermAdmin) {
-			w.WriteHeader(http.StatusForbidden)
-			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission admin required"})
+		authCtx, ok := a.requireAuth(w, r, auth.PermAdmin)
+		if !ok {
 			return
 		}
 		res, err := a.service.CreateBackup(r.Context(), "manual")
@@ -934,20 +1058,18 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, fmt.Sprintf("Backup failed: %v", err), http.StatusInternalServerError)
 			return
 		}
-		a.Broadcast("backup_completed", fmt.Sprintf("{\"backup_path\":\"%s\",\"size_bytes\":%d,\"integrity_ok\":%t}",
+		a.BroadcastForOrg(authCtx.OrgID, "backup_completed", fmt.Sprintf("{\"backup_path\":\"%s\",\"size_bytes\":%d,\"integrity_ok\":%t}",
 			res.BackupPath, res.SizeBytes, res.IntegrityOK))
 		writeJSON(w, res)
 	})
 
 	// Emergency Kill Switch Control
 	mux.HandleFunc("/api/admin/kill-switch", func(w http.ResponseWriter, r *http.Request) {
-		authCtx := GetAuthContext(r.Context())
-		if authCtx != nil && !authCtx.Can(auth.PermAdmin) {
-			w.WriteHeader(http.StatusForbidden)
-			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission admin required"})
+		authCtx, ok := a.requireAuth(w, r, auth.PermAdmin)
+		if !ok {
 			return
 		}
-		orgID := getOrgID(r)
+		orgID := authCtx.OrgID
 
 		if r.Method == "POST" {
 			var req struct {
@@ -958,7 +1080,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 				return
 			}
 			mcp.DefaultKillSwitch().SetOrg(orgID, req.Active)
-			a.Broadcast("kill_switch_toggled", fmt.Sprintf("{\"active\":%t,\"org_id\":\"%s\"}", req.Active, orgID))
+			a.BroadcastForOrg(orgID, "kill_switch_toggled", fmt.Sprintf("{\"active\":%t,\"org_id\":\"%s\"}", req.Active, orgID))
 			_ = a.store.LogAuditForOrg(orgID, "human", authCtx.UserID, "KILL_SWITCH_TOGGLE", "system", "kill_switch",
 				fmt.Sprintf("Kill switch set to %t", req.Active), "{}")
 			writeJSON(w, map[string]interface{}{"status": "ok", "active": req.Active})
@@ -971,14 +1093,11 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 
 	// Agent Run History Audit
 	mux.HandleFunc("/api/admin/agent-executions", func(w http.ResponseWriter, r *http.Request) {
-		authCtx := GetAuthContext(r.Context())
-		if authCtx != nil && !authCtx.Can(auth.PermAdmin) {
-			w.WriteHeader(http.StatusForbidden)
-			writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission admin required"})
+		authCtx, ok := a.requireAuth(w, r, auth.PermAdmin)
+		if !ok {
 			return
 		}
-		orgID := getOrgID(r)
-		execs, err := mcp.GetAgentExecutions(r.Context(), a.store.DB(), orgID, 50)
+		execs, err := mcp.GetAgentExecutions(r.Context(), a.store.DB(), authCtx.OrgID, 50)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -988,7 +1107,11 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 
 	// Document Repository
 	mux.HandleFunc("/api/documents", func(w http.ResponseWriter, r *http.Request) {
-		orgID := getOrgID(r)
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		orgID := authCtx.OrgID
 		switch r.Method {
 		case "GET":
 			docs, err := a.service.ListDocuments(r.Context(), orgID)
@@ -1009,14 +1132,14 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 				return
 			}
 			if req.Author == "" {
-				req.Author = "Admin"
+				req.Author = authCtx.Name
 			}
 			doc, err := a.service.CreateDocument(r.Context(), orgID, req.Title, req.Category, req.Content, req.Author)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			a.Broadcast("document_created", fmt.Sprintf("{\"id\":\"%s\",\"title\":\"%s\"}", doc.ID, doc.Title))
+			a.BroadcastForOrg(orgID, "document_created", fmt.Sprintf("{\"id\":\"%s\",\"title\":\"%s\"}", doc.ID, doc.Title))
 			writeJSON(w, doc)
 		case "DELETE":
 			docID := r.URL.Query().Get("id")
@@ -1028,7 +1151,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			a.Broadcast("document_deleted", fmt.Sprintf("{\"id\":\"%s\"}", docID))
+			a.BroadcastForOrg(orgID, "document_deleted", fmt.Sprintf("{\"id\":\"%s\"}", docID))
 			writeJSON(w, map[string]string{"status": "ok"})
 		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1037,9 +1160,12 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 
 	// Global Unified Search
 	mux.HandleFunc("/api/search", func(w http.ResponseWriter, r *http.Request) {
-		orgID := getOrgID(r)
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
 		query := r.URL.Query().Get("q")
-		results, err := a.service.GlobalSearch(r.Context(), orgID, query)
+		results, err := a.service.GlobalSearch(r.Context(), authCtx.OrgID, query)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -1049,9 +1175,12 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 
 	// CSV Export
 	mux.HandleFunc("/api/export", func(w http.ResponseWriter, r *http.Request) {
-		orgID := getOrgID(r)
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
 		entityType := r.URL.Query().Get("type")
-		data, err := a.service.ExportCSV(r.Context(), orgID, entityType)
+		data, err := a.service.ExportCSV(r.Context(), authCtx.OrgID, entityType)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -1064,9 +1193,12 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 
 	// In-App Notifications
 	mux.HandleFunc("/api/notifications", func(w http.ResponseWriter, r *http.Request) {
-		orgID := getOrgID(r)
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
 		unreadOnly := r.URL.Query().Get("unread") == "true"
-		notifs, err := a.service.ListNotifications(r.Context(), orgID, unreadOnly)
+		notifs, err := a.service.ListNotifications(r.Context(), authCtx.OrgID, unreadOnly)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -1079,7 +1211,10 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		orgID := getOrgID(r)
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
 		var req struct {
 			ID string `json:"id"`
 		}
@@ -1087,7 +1222,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := a.service.MarkNotificationRead(r.Context(), orgID, req.ID); err != nil {
+		if err := a.service.MarkNotificationRead(r.Context(), authCtx.OrgID, req.ID); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1096,12 +1231,9 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 
 	// Organization Profile & Settings
 	mux.HandleFunc("/api/organization", func(w http.ResponseWriter, r *http.Request) {
-		orgID := getOrgID(r)
 		if r.Method == "POST" || r.Method == "PUT" {
-			authCtx := GetAuthContext(r.Context())
-			if authCtx != nil && !authCtx.Can(auth.PermAdmin) {
-				w.WriteHeader(http.StatusForbidden)
-				writeJSON(w, map[string]string{"error": "forbidden", "message": "Permission admin required"})
+			authCtx, ok := a.requireAuth(w, r, auth.PermAdmin)
+			if !ok {
 				return
 			}
 			var p service.CompanyProfile
@@ -1109,16 +1241,20 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			p.OrgID = orgID
+			p.OrgID = authCtx.OrgID
 			if err := a.service.UpdateCompanyProfile(r.Context(), p); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			a.Broadcast("organization_updated", fmt.Sprintf("{\"org_id\":\"%s\",\"name\":\"%s\"}", orgID, p.CompanyName))
+			a.BroadcastForOrg(authCtx.OrgID, "organization_updated", fmt.Sprintf("{\"org_id\":\"%s\",\"name\":\"%s\"}", authCtx.OrgID, p.CompanyName))
 			writeJSON(w, map[string]string{"status": "ok"})
 			return
 		}
-		profile, err := a.service.GetCompanyProfile(r.Context(), orgID)
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		profile, err := a.service.GetCompanyProfile(r.Context(), authCtx.OrgID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

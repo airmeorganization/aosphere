@@ -22,6 +22,7 @@ const (
 	RoleHR         Role = "hr"
 	RoleEmployee   Role = "employee"
 	RoleReadOnly   Role = "readonly"
+	RoleAgent      Role = "agent"
 )
 
 // Permission defines a granular action capability
@@ -63,6 +64,9 @@ var rolePermissions = map[Role][]Permission{
 	},
 	RoleReadOnly: {
 		PermRead,
+	},
+	RoleAgent: {
+		PermRead, PermManageInventory, PermManageOrders,
 	},
 }
 
@@ -152,6 +156,8 @@ func ParseRole(roleStr string) (Role, error) {
 		return RoleEmployee, nil
 	case RoleReadOnly:
 		return RoleReadOnly, nil
+	case RoleAgent:
+		return RoleAgent, nil
 	default:
 		return "", fmt.Errorf("unknown role %q", roleStr)
 	}

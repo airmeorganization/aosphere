@@ -38,6 +38,17 @@ type OutboxEventRecord struct {
 
 // StartOutboxWorker starts the durable background outbox worker with exponential backoff and dead-letter queues
 func (s *WorkflowService) StartOutboxWorker(ctx context.Context, cfg OutboxWorkerConfig, handler func(eventType, payload string) error) <-chan struct{} {
+	var orgHandler func(orgID, eventType, payload string) error
+	if handler != nil {
+		orgHandler = func(orgID, eventType, payload string) error {
+			return handler(eventType, payload)
+		}
+	}
+	return s.StartOrgOutboxWorker(ctx, cfg, orgHandler)
+}
+
+// StartOrgOutboxWorker starts the durable background outbox worker with tenant-isolated routing
+func (s *WorkflowService) StartOrgOutboxWorker(ctx context.Context, cfg OutboxWorkerConfig, handler func(orgID, eventType, payload string) error) <-chan struct{} {
 	done := make(chan struct{})
 
 	if cfg.PollInterval <= 0 {
@@ -60,11 +71,11 @@ func (s *WorkflowService) StartOutboxWorker(ctx context.Context, cfg OutboxWorke
 			case <-ctx.Done():
 				// Drain pending items once more before stopping
 				drainCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				_, _ = s.ProcessOutboxBatch(drainCtx, cfg, handler)
+				_, _ = s.ProcessOutboxBatchWithOrg(drainCtx, cfg, handler)
 				cancel()
 				return
 			case <-ticker.C:
-				_, _ = s.ProcessOutboxBatch(ctx, cfg, handler)
+				_, _ = s.ProcessOutboxBatchWithOrg(ctx, cfg, handler)
 			}
 		}
 	}()
@@ -76,6 +87,17 @@ var outboxMu sync.Mutex
 
 // ProcessOutboxBatch processes a single batch of pending outbox events
 func (s *WorkflowService) ProcessOutboxBatch(ctx context.Context, cfg OutboxWorkerConfig, handler func(eventType, payload string) error) (int, error) {
+	var orgHandler func(orgID, eventType, payload string) error
+	if handler != nil {
+		orgHandler = func(orgID, eventType, payload string) error {
+			return handler(eventType, payload)
+		}
+	}
+	return s.ProcessOutboxBatchWithOrg(ctx, cfg, orgHandler)
+}
+
+// ProcessOutboxBatchWithOrg processes a single batch of pending outbox events with tenant isolation
+func (s *WorkflowService) ProcessOutboxBatchWithOrg(ctx context.Context, cfg OutboxWorkerConfig, handler func(orgID, eventType, payload string) error) (int, error) {
 	outboxMu.Lock()
 	defer outboxMu.Unlock()
 
@@ -102,7 +124,7 @@ func (s *WorkflowService) ProcessOutboxBatch(ctx context.Context, cfg OutboxWork
 	for _, e := range events {
 		var handleErr error
 		if handler != nil {
-			handleErr = handler(e.EventType, e.Payload)
+			handleErr = handler(e.OrgID, e.EventType, e.Payload)
 		}
 
 		now := time.Now()

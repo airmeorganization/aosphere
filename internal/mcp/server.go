@@ -53,6 +53,7 @@ type MCPServer struct {
 	sessions    map[string]*SessionContext
 	rateLimiter *RateLimiter
 	killSwitch  *KillSwitchManager
+	env         string
 	mu          sync.RWMutex
 }
 
@@ -66,7 +67,12 @@ func NewMCPServer(s *store.Store, svc *service.WorkflowService) *MCPServer {
 		sessions:    make(map[string]*SessionContext),
 		rateLimiter: NewRateLimiter(60, 5),
 		killSwitch:  DefaultKillSwitch(),
+		env:         "development",
 	}
+}
+
+func (m *MCPServer) SetEnv(env string) {
+	m.env = env
 }
 
 func (m *MCPServer) RateLimiter() *RateLimiter {
@@ -77,9 +83,8 @@ func (m *MCPServer) KillSwitch() *KillSwitchManager {
 	return m.killSwitch
 }
 
-// authenticateRequest extracts and validates the API key or session token
-func (m *MCPServer) authenticateRequest(r *http.Request) (*auth.AuthContext, string, error) {
-	token := auth.ExtractToken(r)
+// AuthenticateToken verifies an API key or session token and returns the caller identity
+func (m *MCPServer) AuthenticateToken(token string) (*auth.AuthContext, string, error) {
 	if token == "" {
 		return nil, "", fmt.Errorf("missing authentication token or API key")
 	}
@@ -87,7 +92,7 @@ func (m *MCPServer) authenticateRequest(r *http.Request) (*auth.AuthContext, str
 	tokenHash := auth.HashToken(token)
 
 	// 1. API key lookup
-	if strings.HasPrefix(token, "ao_sk_") {
+	if strings.HasPrefix(token, "ao_sk_") || strings.HasPrefix(token, "ao_live_") {
 		key, err := m.store.GetAPIKeyByHash(tokenHash)
 		if err != nil || key == nil {
 			return nil, "", fmt.Errorf("invalid or revoked API key")
@@ -119,23 +124,50 @@ func (m *MCPServer) authenticateRequest(r *http.Request) (*auth.AuthContext, str
 	}, user.Email, nil
 }
 
-// HandleStdio runs MCP over stdin/stdout for desktop AI agents (Claude Desktop, Antigravity, Cursor)
-func (m *MCPServer) HandleStdio(ctx context.Context) error {
+// authenticateRequest extracts and validates the API key or session token from HTTP request
+func (m *MCPServer) authenticateRequest(r *http.Request) (*auth.AuthContext, string, error) {
+	token := auth.ExtractToken(r)
+	return m.AuthenticateToken(token)
+}
+
+// HandleStdio runs MCP over stdin/stdout with strict authentication
+func (m *MCPServer) HandleStdio(ctx context.Context, apiKey string) error {
 	scanner := bufio.NewScanner(os.Stdin)
 	writer := bufio.NewWriter(os.Stdout)
 
-	cliAuthCtx := &auth.AuthContext{
-		UserID:   "usr_admin",
-		OrgID:    "org_default",
-		Email:    "cli@aosphere.local",
-		Name:     "stdio_agent",
-		Role:     auth.RoleOwner,
-		IsAPIKey: true,
+	if apiKey == "" {
+		apiKey = os.Getenv("AOSPHERE_API_KEY")
 	}
-	sessCtx := &SessionContext{
-		ID:      "stdio_session",
-		AuthCtx: cliAuthCtx,
-		AgentID: "stdio_agent",
+
+	var sessCtx *SessionContext
+	if apiKey != "" {
+		authCtx, agentID, err := m.AuthenticateToken(apiKey)
+		if err != nil {
+			return fmt.Errorf("stdio authentication failed: %w", err)
+		}
+		sessCtx = &SessionContext{
+			ID:      "stdio_session_" + uuid.New().String()[:8],
+			AuthCtx: authCtx,
+			AgentID: agentID,
+		}
+	} else {
+		// In production, reject unauthenticated stdio execution
+		if m.env == "production" {
+			return fmt.Errorf("authentication required: AOSPHERE_API_KEY must be provided for production stdio mode")
+		}
+		// In local development fallback, grant restricted RoleAgent (NEVER RoleOwner)
+		sessCtx = &SessionContext{
+			ID: "stdio_dev_session",
+			AuthCtx: &auth.AuthContext{
+				UserID:   "usr_dev_agent",
+				OrgID:    "org_default",
+				Email:    "agent@aosphere.local",
+				Name:     "stdio_dev_agent",
+				Role:     auth.RoleAgent, // Restricted: cannot manage users, orgs, or bypass approvals
+				IsAPIKey: true,
+			},
+			AgentID: "stdio_dev_agent",
+		}
 	}
 
 	for scanner.Scan() {
@@ -210,7 +242,12 @@ func (m *MCPServer) HandleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if origin := r.Header.Get("Origin"); origin != "" {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+	} else {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+	}
 
 	// Send endpoint event according to MCP SSE spec
 	endpointURL := fmt.Sprintf("/mcp/messages?sessionId=%s", sessionID)
@@ -231,7 +268,12 @@ func (m *MCPServer) HandleSSE(w http.ResponseWriter, r *http.Request) {
 
 // HandlePostMessage handles messages for active SSE sessions or direct JSON-RPC POST
 func (m *MCPServer) HandlePostMessage(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if origin := r.Header.Get("Origin"); origin != "" {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+	} else {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+	}
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
 
