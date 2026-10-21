@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  aosphere:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - AOSPHERE_ENV=production
+      - AOSPHERE_PORT=8080
+      - AOSPHERE_DB_PATH=/var/lib/aosphere/data/aosphere.db
+      - AOSPHERE_SEED=false
+      - AOSPHERE_LOG_LEVEL=info
+      - AOSPHERE_SESSION_SECRET=${AOSPHERE_SESSION_SECRET:-change_this_to_a_secure_random_key_in_production}
+    volumes:
+      - aosphere_data:/var/lib/aosphere/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/readyz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks:
+      - aosphere_internal
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      - DOMAIN=${DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      aosphere:
+        condition: service_healthy
+    networks:
+      - aosphere_internal
+
+volumes:
+  aosphere_data:
+    driver: local
+  caddy_data:
+    driver: local
+  caddy_config:
+    driver: local
+
+networks:
+  aosphere_internal:
+    driver: bridge

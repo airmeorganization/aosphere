@@ -10,6 +10,7 @@ import (
 	"aosphere/internal/backup"
 	"aosphere/internal/ledger"
 	"aosphere/internal/store"
+	"github.com/google/uuid"
 )
 
 // WorkflowService is the central business logic layer shared identically across REST API and MCP tools
@@ -67,7 +68,7 @@ func RecordOutboxEvent(ctx context.Context, tx *sql.Tx, orgID, eventType string,
 	if err != nil {
 		return err
 	}
-	id := fmt.Sprintf("evt_%d", time.Now().UnixNano())
+	id := fmt.Sprintf("evt_%d_%s", time.Now().UnixNano(), uuid.New().String()[:8])
 	_, err = tx.ExecContext(ctx, `INSERT INTO outbox_events (id, org_id, event_type, payload_json, status, created_at)
 		VALUES (?, ?, ?, ?, 'pending', ?)`, id, orgID, eventType, string(payloadBytes), time.Now())
 	return err

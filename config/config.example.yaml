@@ -1,0 +1,27 @@
+# AOSphere BOS Configuration Template
+# All fields can be overridden using environment variables (e.g. AOSPHERE_PORT, AOSPHERE_ENV)
+
+environment: "production" # "development", "staging", "production"
+port: 8080
+log_level: "info"         # "debug", "info", "warn", "error"
+
+database:
+  path: "/var/lib/aosphere/data/aosphere.db"
+  journal_mode: "WAL"
+  busy_timeout_ms: 10000
+  seed_starter_data: false # Must be false in production
+
+security:
+  session_secret: "CHANGE_ME_TO_A_CRYPTOGRAPHICALLY_RANDOM_32_BYTE_STRING"
+  cookie_secure: true
+  cors_allowed_origins:
+    - "https://app.aosphere.internal"
+
+timeouts:
+  read_seconds: 15
+  write_seconds: 60
+
+outbox_worker:
+  poll_interval_seconds: 1
+  max_retries: 5
+  batch_size: 50

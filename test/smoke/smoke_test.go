@@ -65,6 +65,12 @@ func TestSmoke_ServerBootstrapAndHealthChecks(t *testing.T) {
 	}
 	respV.Body.Close()
 
-	// 4. MCP Tools List via HTTP POST
+	// 4. Prometheus Metrics endpoint
+	respM, err := client.Get(ts.URL + "/metrics")
+	if err != nil || respM.StatusCode != http.StatusOK {
+		t.Fatalf("/metrics failed: err=%v, code=%d", err, respM.StatusCode)
+	}
+	respM.Body.Close()
+
 	_ = context.Background()
 }

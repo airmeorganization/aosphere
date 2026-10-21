@@ -1,0 +1,25 @@
+# AOSphere BOS - Development Configuration
+environment: "development"
+port: 8080
+log_level: "debug"
+
+database:
+  path: "data/aosphere.db"
+  journal_mode: "WAL"
+  busy_timeout_ms: 5000
+  seed_starter_data: true
+
+security:
+  session_secret: "dev_insecure_secret_for_local_development_only"
+  cookie_secure: false
+  cors_allowed_origins:
+    - "*"
+
+timeouts:
+  read_seconds: 30
+  write_seconds: 120
+
+outbox_worker:
+  poll_interval_seconds: 1
+  max_retries: 3
+  batch_size: 20

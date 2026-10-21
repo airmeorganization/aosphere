@@ -1,0 +1,44 @@
+# AOSphere BOS - Caddy Reverse Proxy Configuration
+# Automatic HTTPS, HTTP/2 & HTTP/3, and SSE streaming optimization
+
+{$DOMAIN:localhost} {
+    # Encode responses with zstd & gzip compression
+    encode zstd gzip
+
+    # Strict Production Security Headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'"
+    }
+
+    # SSE Streaming Endpoints (Disable response buffering for real-time AI & UI streams)
+    @streaming {
+        path /mcp/sse*
+        path /api/events*
+    }
+    reverse_proxy @streaming aosphere:8080 {
+        flush_interval -1
+        transport http {
+            keepalive 120s
+        }
+    }
+
+    # Standard API and Web UI traffic
+    reverse_proxy aosphere:8080 {
+        header_up Host {upstream_hostport}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Structured JSON access logs
+    log {
+        output stdout
+        format json
+    }
+}

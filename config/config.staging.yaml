@@ -1,0 +1,25 @@
+# AOSphere BOS - Staging Configuration
+environment: "staging"
+port: 8080
+log_level: "info"
+
+database:
+  path: "/data/aosphere_staging.db"
+  journal_mode: "WAL"
+  busy_timeout_ms: 10000
+  seed_starter_data: true # Staging allows test seed fixtures
+
+security:
+  session_secret: "${AOSPHERE_SESSION_SECRET}"
+  cookie_secure: true
+  cors_allowed_origins:
+    - "https://staging.aosphere.internal"
+
+timeouts:
+  read_seconds: 15
+  write_seconds: 60
+
+outbox_worker:
+  poll_interval_seconds: 1
+  max_retries: 5
+  batch_size: 50

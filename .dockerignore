@@ -1,0 +1,14 @@
+.git
+.github
+data
+*.db
+*.db-wal
+*.db-shm
+*.log
+coverage.out
+.DS_Store
+.idea
+.vscode
+.gemini
+data/tmp
+test/

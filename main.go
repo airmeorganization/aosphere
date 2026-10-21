@@ -94,10 +94,19 @@ func main() {
 	fileServer := http.FileServer(http.FS(webSubFS))
 	mux.Handle("/", fileServer)
 
-	// Apply Middlewares: RequestID -> CORS -> Authenticate -> Logging -> Panic Recovery
+	// 6. Start Durable Background Outbox Worker
+	workerCtx, cancelWorker := context.WithCancel(context.Background())
+	outboxDone := workflowSvc.StartOutboxWorker(workerCtx, service.DefaultOutboxWorkerConfig(), func(eventType, payload string) error {
+		appAPI.Broadcast(eventType, payload)
+		return nil
+	})
+
+	// Apply Middlewares: RequestID -> CORS -> Authenticate -> SecurityHeaders -> Metrics -> Logging -> Panic Recovery
 	var handler http.Handler = mux
 	handler = api.RecoveryMiddleware(logger)(handler)
 	handler = api.LoggingMiddleware(logger)(handler)
+	handler = api.MetricsMiddleware(handler)
+	handler = api.SecurityHeadersMiddleware(cfg.Env == config.EnvProduction)(handler)
 	handler = api.AuthenticateMiddleware(appStore)(handler)
 	handler = api.CORSMiddleware(handler)
 	handler = api.RequestIDMiddleware(handler)
@@ -122,6 +131,7 @@ func main() {
 		fmt.Printf("  • Web Interface:    http://localhost:%d\n", cfg.Port)
 		fmt.Printf("  • REST API:         http://localhost:%d/api\n", cfg.Port)
 		fmt.Printf("  • Health Probes:    http://localhost:%d/healthz , /readyz\n", cfg.Port)
+		fmt.Printf("  • Prometheus:       http://localhost:%d/metrics\n", cfg.Port)
 		fmt.Printf("  • MCP SSE Endpoint: http://localhost:%d/mcp/sse\n", cfg.Port)
 		fmt.Printf("  • Database Engine:  %s (SQLite WAL)\n", cfg.DBPath)
 		fmt.Printf("  • Seed Demo Data:   %t\n", cfg.SeedData)
@@ -135,11 +145,30 @@ func main() {
 	}()
 
 	<-stop
-	logger.Info("Shutting down AOSphere...")
+	logger.Info("Graceful shutdown initiated...")
+
+	// 1. Drain HTTP incoming requests
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		logger.Error("Server shutdown error", slog.Any("error", err))
+		logger.Error("Server HTTP drain error", slog.Any("error", err))
 	}
+
+	// 2. Stop and drain Outbox background worker
+	cancelWorker()
+	select {
+	case <-outboxDone:
+		logger.Info("Outbox worker stopped cleanly")
+	case <-time.After(3 * time.Second):
+		logger.Warn("Outbox worker shutdown timed out")
+	}
+
+	// 3. SQLite WAL Checkpoint (TRUNCATE mode flushes WAL into main DB file)
+	if _, err := database.Exec("PRAGMA wal_checkpoint(TRUNCATE);"); err != nil {
+		logger.Warn("SQLite WAL checkpoint on shutdown warning", slog.Any("error", err))
+	} else {
+		logger.Info("SQLite WAL checkpoint completed")
+	}
+
 	logger.Info("AOSphere exited cleanly.")
 }

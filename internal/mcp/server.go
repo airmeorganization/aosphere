@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"aosphere/internal/auth"
+	"aosphere/internal/metrics"
 	"aosphere/internal/service"
 	"aosphere/internal/store"
 	"github.com/google/uuid"
@@ -851,6 +852,13 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 		DurationMS:    durationMS,
 		CreatedAt:     startTime,
 	})
+
+	// Record in Prometheus metrics
+	statusMetric := "success"
+	if isErr {
+		statusMetric = "error"
+	}
+	metrics.Default().RecordAgentToolExecution(params.Name, statusMetric)
 
 	return &JSONRPCResponse{
 		JSONRPC: "2.0",

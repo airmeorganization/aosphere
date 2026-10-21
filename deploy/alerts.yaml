@@ -1,0 +1,47 @@
+groups:
+  - name: aosphere_operational_alerts
+    rules:
+      - alert: HighHTTPErrorRate
+        expr: (sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m]))) * 100 > 5
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AOSphere high HTTP 5xx error rate"
+          description: "Over 5% of HTTP requests returned 5xx errors in the last 5 minutes."
+
+      - alert: GeneralLedgerImbalance
+        expr: aosphere_general_ledger_imbalance_cents != 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Double-entry General Ledger Invariant Broken"
+          description: "Total debits do not equal total credits in general ledger. Immediate accounting audit required."
+
+      - alert: OutboxDeadLettersDetected
+        expr: aosphere_outbox_dead_letter_total > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Transactional outbox events moved to dead-letter queue"
+          description: "One or more events failed dispatch after maximum retries. Inspect outbox_events table."
+
+      - alert: HighPendingApprovalsQueue
+        expr: aosphere_pending_approvals_total > 20
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Human-in-the-loop approval backlog"
+          description: "More than 20 approval requests are waiting for human authorization for over 1 hour."
+
+      - alert: HighRequestLatency
+        expr: (sum(rate(http_request_duration_seconds_sum[5m])) / sum(rate(http_request_duration_seconds_count[5m]))) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AOSphere average request latency elevated"
+          description: "Average request latency exceeded 500ms over a 5 minute window."

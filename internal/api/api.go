@@ -10,6 +10,7 @@ import (
 
 	"aosphere/internal/auth"
 	"aosphere/internal/mcp"
+	"aosphere/internal/metrics"
 	"aosphere/internal/service"
 	"aosphere/internal/store"
 )
@@ -127,6 +128,27 @@ func writeJSON(w http.ResponseWriter, data interface{}) {
 }
 
 func (a *API) RegisterRoutes(mux *http.ServeMux) {
+	// 0. Observability & Prometheus Metrics
+	if a.store != nil && a.store.DB() != nil {
+		metrics.Default().RegisterDBMetrics(a.store.DB())
+		metrics.Default().RegisterGauge("aosphere_pending_approvals_total", func() float64 {
+			var count int
+			_ = a.store.DB().QueryRow("SELECT COUNT(*) FROM approvals WHERE status = 'pending'").Scan(&count)
+			return float64(count)
+		})
+		metrics.Default().RegisterGauge("aosphere_outbox_pending_total", func() float64 {
+			var count int
+			_ = a.store.DB().QueryRow("SELECT COUNT(*) FROM outbox_events WHERE status = 'pending'").Scan(&count)
+			return float64(count)
+		})
+		metrics.Default().RegisterGauge("aosphere_outbox_dead_letter_total", func() float64 {
+			var count int
+			_ = a.store.DB().QueryRow("SELECT COUNT(*) FROM outbox_events WHERE status = 'dead_letter'").Scan(&count)
+			return float64(count)
+		})
+	}
+	mux.HandleFunc("/metrics", metrics.Default().PrometheusHandler())
+
 	// Health & Diagnostics Endpoints
 	mux.HandleFunc("/healthz", a.HandleHealthz)
 	mux.HandleFunc("/readyz", a.HandleReadyz)

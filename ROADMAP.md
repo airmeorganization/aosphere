@@ -249,23 +249,23 @@ flowchart TD
     DB --> Backups["Encrypted backups"]
 ```
 
-### Operations Checklist (0/16)
-- [ ] Environment separation: Development, Staging, and Production configs.
-- [ ] Pinned CI/CD release builds and container packaging (minimal scratch/distroless Dockerfile).
-- [ ] Reverse proxy (Caddy / Nginx / Traefik) handling TLS termination and security headers.
-- [ ] SQLite WAL optimization: checkpoints, connection pooling (`MaxOpenConns(1)` for writes), monitoring.
-- [ ] Standardized liveness (`/healthz`) and readiness (`/readyz`) health checks.
-- [ ] Structured JSON logging with trace/request IDs and secret sanitization.
-- [ ] Prometheus metrics endpoint (`/metrics`): request latencies, error counts, DB stats.
-- [ ] Business metrics: pending approvals, agent tool failures, failed outbox jobs.
-- [ ] Alerting rules and escalation procedures.
-- [ ] Durable background worker queue with exponential backoff and dead-letter queues.
-- [ ] Graceful process shutdown handling `SIGTERM` / `SIGINT`.
-- [ ] Automated container and vulnerability scanning (Govulncheck / Dependabot).
-- [ ] Zero-downtime database migration strategy.
-- [ ] Disaster recovery playbook with target RTO (< 1 hour) and RPO (< 15 minutes).
-- [ ] Load and endurance testing.
-- [ ] Formal incident postmortem and runbook documentation.
+### Operations Checklist (16/16)
+- [x] Environment separation: Development, Staging, and Production configs (`config/config.dev.yaml`, `config/config.staging.yaml`, `config/config.prod.yaml`).
+- [x] Pinned CI/CD release builds and container packaging (minimal scratch/distroless Dockerfile, `.dockerignore`).
+- [x] Reverse proxy (Caddy / Nginx / Traefik) handling TLS termination and security headers (`deploy/Caddyfile`, `deploy/nginx.conf`, `deploy/docker-compose.yml`).
+- [x] SQLite WAL optimization: checkpoints, connection pooling (`MaxOpenConns(1)` for writes), monitoring (`internal/db/schema.go`, `main.go`).
+- [x] Standardized liveness (`/healthz`) and readiness (`/readyz`) health checks (`internal/api/health.go`).
+- [x] Structured JSON logging with trace/request IDs and secret sanitization (`internal/api/middleware.go`).
+- [x] Prometheus metrics endpoint (`/metrics`): request latencies, error counts, DB stats (`internal/metrics/metrics.go`).
+- [x] Business metrics: pending approvals, agent tool failures, failed outbox jobs (`internal/metrics/metrics.go`, `internal/api/api.go`, `internal/mcp/server.go`).
+- [x] Alerting rules and escalation procedures (`deploy/alerts.yaml`).
+- [x] Durable background worker queue with exponential backoff and dead-letter queues (`internal/service/outbox_worker.go`).
+- [x] Graceful process shutdown handling `SIGTERM` / `SIGINT` (`main.go`).
+- [x] Automated container and vulnerability scanning (Govulncheck / Dependabot in `.github/workflows/ci.yml`, `.github/dependabot.yml`).
+- [x] Zero-downtime database migration strategy (`docs/disaster-recovery.md`).
+- [x] Disaster recovery playbook with target RTO (< 1 hour) and RPO (< 15 minutes) (`docs/disaster-recovery.md`).
+- [x] Load and endurance testing (`test/benchmarks/benchmark_test.go`).
+- [x] Formal incident postmortem and runbook documentation (`docs/runbook.md`).
 
 ---
 
