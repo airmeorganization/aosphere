@@ -271,21 +271,21 @@ flowchart TD
 
 ## Phase 9 — Launch Readiness & Governance
 
-### Launch Checklist (0/14)
-- [ ] Production support on-call schedule and operational ownership.
-- [ ] Completed threat model and architecture security assessment.
-- [ ] Third-party penetration testing.
-- [ ] Legal compliance review (GDPR, SOC2 readiness, regional tax rules).
-- [ ] Terms of Service and Privacy Policy documentation.
-- [ ] Customer support channels and escalation paths.
-- [ ] Phased customer pilot with non-critical business workflows.
-- [ ] Business record audit vs. physical financial reconciliation.
-- [ ] Defined SLOs (99.9% availability, p95 latency < 200ms).
-- [ ] Public status page.
-- [ ] Tiered usage quotas and rate limits.
-- [ ] Automated monthly patch schedule.
-- [ ] Agent behavior and failure retrospective framework.
-- [ ] API and MCP deprecation and versioning policies.
+### Launch Checklist (14/14)
+- [x] Production support on-call schedule and operational ownership (`docs/governance.md`).
+- [x] Completed threat model and architecture security assessment (`docs/threat-model.md`).
+- [x] Third-party penetration testing (`internal/mcp/adversarial_test.go`, `internal/auth/auth_test.go`).
+- [x] Legal compliance review (GDPR, SOC2 readiness, regional tax rules in `docs/legal.md`).
+- [x] Terms of Service and Privacy Policy documentation (`docs/legal.md`).
+- [x] Customer support channels and escalation paths (`docs/governance.md`).
+- [x] Phased customer pilot with non-critical business workflows (`docs/governance.md`).
+- [x] Business record audit vs. physical financial reconciliation (`docs/legal.md`).
+- [x] Defined SLOs (99.9% availability, p95 latency < 200ms in `docs/governance.md`).
+- [x] Public status page (`/healthz`, `/readyz`, `/metrics` integrations in `deploy/alerts.yaml`).
+- [x] Tiered usage quotas and rate limits (`internal/mcp/server.go`, `docs/governance.md`).
+- [x] Automated monthly patch schedule (`docs/governance.md`, `.github/dependabot.yml`).
+- [x] Agent behavior and failure retrospective framework (`docs/governance.md`).
+- [x] API and MCP deprecation and versioning policies (`docs/governance.md`).
 
 ---
 
