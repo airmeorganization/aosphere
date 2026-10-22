@@ -8,6 +8,7 @@ import (
 	"runtime/debug"
 	"time"
 
+	"aosphere/internal/auth"
 	"aosphere/internal/metrics"
 	"github.com/google/uuid"
 )
@@ -151,16 +152,18 @@ func SecurityHeadersMiddleware(isProd bool) func(http.Handler) http.Handler {
 	}
 }
 
-// CORSMiddleware configures standard CORS headers with credentials and origin reflection
+// CORSMiddleware restricts CORS headers to explicit allowlisted origins
 func CORSMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if origin != "" {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
-			w.Header().Set("Vary", "Origin")
-		} else {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
+		allowed := auth.ApplyCORSHeaders(w, r)
+
+		if origin != "" && !allowed {
+			if r.Method == http.MethodOptions {
+				http.Error(w, "CORS origin forbidden", http.StatusForbidden)
+				return
+			}
+			// For non-OPTIONS requests with unauthorized origins, no CORS headers are granted
 		}
 
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")

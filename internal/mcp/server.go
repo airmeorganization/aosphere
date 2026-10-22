@@ -199,6 +199,20 @@ func (m *MCPServer) HandleStdio(ctx context.Context, apiKey string) error {
 
 // SSE Handler for web-connected AI agents (HTTP SSE)
 func (m *MCPServer) HandleSSE(w http.ResponseWriter, r *http.Request) {
+	if origin := r.Header.Get("Origin"); origin != "" {
+		if !auth.ApplyCORSHeaders(w, r) {
+			http.Error(w, "CORS origin forbidden", http.StatusForbidden)
+			return
+		}
+	}
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
@@ -242,12 +256,6 @@ func (m *MCPServer) HandleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	if origin := r.Header.Get("Origin"); origin != "" {
-		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
-	} else {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-	}
 
 	// Send endpoint event according to MCP SSE spec
 	endpointURL := fmt.Sprintf("/mcp/messages?sessionId=%s", sessionID)
@@ -269,10 +277,10 @@ func (m *MCPServer) HandleSSE(w http.ResponseWriter, r *http.Request) {
 // HandlePostMessage handles messages for active SSE sessions or direct JSON-RPC POST
 func (m *MCPServer) HandlePostMessage(w http.ResponseWriter, r *http.Request) {
 	if origin := r.Header.Get("Origin"); origin != "" {
-		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
-	} else {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if !auth.ApplyCORSHeaders(w, r) {
+			http.Error(w, "CORS origin forbidden", http.StatusForbidden)
+			return
+		}
 	}
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
@@ -335,34 +343,32 @@ func (m *MCPServer) HandlePostMessage(w http.ResponseWriter, r *http.Request) {
 	w.Write(respBytes)
 }
 
-// ProcessRequest executes the JSON-RPC request with default compatibility context
-func (m *MCPServer) ProcessRequest(req *JSONRPCRequest, agentID string) *JSONRPCResponse {
-	return m.ProcessRequestWithContext(req, &SessionContext{
-		ID:      "compat_" + agentID,
-		AgentID: agentID,
-		AuthCtx: &auth.AuthContext{
-			UserID:   "usr_admin",
-			OrgID:    "org_default",
-			Email:    agentID + "@aosphere.local",
-			Name:     agentID,
-			Role:     auth.RoleOwner,
-			IsAPIKey: true,
-		},
-	})
+// ProcessRequest executes the JSON-RPC request requiring an explicit authenticated session context.
+// Deprecated: Call ProcessRequestWithContext directly with an authenticated SessionContext.
+func (m *MCPServer) ProcessRequest(req *JSONRPCRequest, sessCtx *SessionContext) *JSONRPCResponse {
+	return m.ProcessRequestWithContext(req, sessCtx)
 }
 
 // ProcessRequestWithContext executes the JSON-RPC request enforcing RBAC and tenant scoping
 func (m *MCPServer) ProcessRequestWithContext(req *JSONRPCRequest, sessCtx *SessionContext) *JSONRPCResponse {
+	if req == nil {
+		return nil
+	}
+
 	// Notifications (no ID)
 	if req.ID == nil {
 		if req.Method == "notifications/initialized" {
-			log.Printf("MCP Client initialized: %s", sessCtx.AgentID)
+			agentID := "anonymous"
+			if sessCtx != nil {
+				agentID = sessCtx.AgentID
+			}
+			log.Printf("MCP Client initialized: %s", agentID)
 		}
 		return nil
 	}
 
-	switch req.Method {
-	case "initialize":
+	// 1. Handshake methods that do not require an authenticated session context
+	if req.Method == "initialize" {
 		return &JSONRPCResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,
@@ -379,7 +385,21 @@ func (m *MCPServer) ProcessRequestWithContext(req *JSONRPCRequest, sessCtx *Sess
 				},
 			},
 		}
+	}
 
+	// 2. Strict authentication enforcement for all operational methods
+	if sessCtx == nil || sessCtx.AuthCtx == nil {
+		return &JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error: &RPCError{
+				Code:    -32001,
+				Message: "Unauthorized: explicit authenticated session context required",
+			},
+		}
+	}
+
+	switch req.Method {
 	case "tools/list":
 		return &JSONRPCResponse{
 			JSONRPC: "2.0",
@@ -469,13 +489,16 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 		}
 	}
 
-	// Determine Tenant Org ID & Agent identity
-	orgID := "org_default"
-	agentID := "mcp_client"
-	if sessCtx != nil && sessCtx.AuthCtx != nil {
-		orgID = sessCtx.AuthCtx.OrgID
-		agentID = sessCtx.AgentID
+	// Determine Tenant Org ID & Agent identity from verified context
+	if sessCtx == nil || sessCtx.AuthCtx == nil {
+		return &JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error:   &RPCError{Code: -32001, Message: "Unauthorized: explicit authenticated session context required"},
+		}
 	}
+	orgID := sessCtx.AuthCtx.OrgID
+	agentID := sessCtx.AgentID
 
 	// 2. Rate Limiting and Concurrency Control
 	releaseSlot, err := m.rateLimiter.Acquire(agentID)
@@ -509,12 +532,8 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 	}
 
 	// 4. RBAC Capability Validation
-	if sessCtx == nil || sessCtx.AuthCtx == nil || !sessCtx.AuthCtx.Can(toolDef.RequiredPermission) {
-		role := "anonymous"
-		if sessCtx != nil && sessCtx.AuthCtx != nil {
-			role = string(sessCtx.AuthCtx.Role)
-		}
-
+	if !sessCtx.AuthCtx.Can(toolDef.RequiredPermission) {
+		role := string(sessCtx.AuthCtx.Role)
 		_ = m.store.LogAuditForOrg(orgID, "agent", agentID, "MCP_TOOL_FORBIDDEN", "tools", params.Name,
 			fmt.Sprintf("Forbidden: role %q lacks permission %q", role, toolDef.RequiredPermission), "{}")
 
@@ -958,10 +977,29 @@ func (m *MCPServer) handleResourceRead(req *JSONRPCRequest, sessCtx *SessionCont
 	}
 	_ = json.Unmarshal(req.Params, &params)
 
-	orgID := "org_default"
-	if sessCtx != nil && sessCtx.AuthCtx != nil {
-		orgID = sessCtx.AuthCtx.OrgID
+	if sessCtx == nil || sessCtx.AuthCtx == nil {
+		return &JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error: &RPCError{
+				Code:    -32001,
+				Message: "Unauthorized: explicit authenticated session context required",
+			},
+		}
 	}
+
+	if !sessCtx.AuthCtx.Can(auth.PermRead) {
+		return &JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error: &RPCError{
+				Code:    -32003,
+				Message: fmt.Sprintf("Forbidden: role %q lacks read permission", sessCtx.AuthCtx.Role),
+			},
+		}
+	}
+
+	orgID := sessCtx.AuthCtx.OrgID
 
 	var data interface{}
 	var err error

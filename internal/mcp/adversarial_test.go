@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -468,5 +470,82 @@ func TestAdversarial_CrossTenantResourceAndMutationIsolation(t *testing.T) {
 	_ = appStore.DB().QueryRow("SELECT nap_business_name, nap_address FROM local_listings WHERE id = 'list_victim_01'").Scan(&victimName, &victimAddress)
 	if victimName != "Victim Corp Official" || victimAddress != "123 Victim Way" {
 		t.Fatalf("CRITICAL SECURITY FAILURE: Victim listing overwritten by NAP sync! Name: %s, Address: %s", victimName, victimAddress)
+	}
+}
+
+func TestAdversarial_UnauthenticatedMCPRejection(t *testing.T) {
+	server, _, _, cleanup := setupTestMCPServer(t)
+	defer cleanup()
+
+	reqTool := &JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "tools/call",
+		Params:  json.RawMessage(`{"name":"erp_check_stock","arguments":{}}`),
+	}
+
+	// 1. Calling with nil SessionContext must fail with Unauthorized code -32001
+	respNilSess := server.ProcessRequestWithContext(reqTool, nil)
+	if respNilSess == nil || respNilSess.Error == nil || respNilSess.Error.Code != -32001 {
+		t.Fatalf("expected error code -32001 for nil session context, got: %+v", respNilSess)
+	}
+
+	// 2. Calling with nil AuthCtx inside SessionContext must fail with -32001
+	respNilAuth := server.ProcessRequestWithContext(reqTool, &SessionContext{ID: "sess_no_auth"})
+	if respNilAuth == nil || respNilAuth.Error == nil || respNilAuth.Error.Code != -32001 {
+		t.Fatalf("expected error code -32001 for session with nil AuthCtx, got: %+v", respNilAuth)
+	}
+
+	// 3. ProcessRequest compatibility wrapper delegates safely with context
+	authCtx := &auth.AuthContext{
+		UserID: "usr_agent",
+		OrgID:  "org_default",
+		Role:   auth.RoleAgent,
+	}
+	respProcess := server.ProcessRequest(reqTool, &SessionContext{
+		ID:      "sess_valid",
+		AuthCtx: authCtx,
+		AgentID: "valid_agent",
+	})
+	if respProcess == nil || respProcess.Error != nil {
+		t.Fatalf("expected success with explicit authenticated context, got error: %+v", respProcess)
+	}
+}
+
+func TestAdversarial_MCPCORSRejection(t *testing.T) {
+	server, _, _, cleanup := setupTestMCPServer(t)
+	defer cleanup()
+
+	// 1. MCP SSE with untrusted Origin -> 403 Forbidden
+	reqEvilSSE := httptest.NewRequest(http.MethodGet, "/mcp/sse", nil)
+	reqEvilSSE.Header.Set("Origin", "https://malicious.evil.com")
+	rrEvilSSE := httptest.NewRecorder()
+	server.HandleSSE(rrEvilSSE, reqEvilSSE)
+
+	if rrEvilSSE.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for untrusted MCP SSE origin, got %d", rrEvilSSE.Code)
+	}
+
+	// 2. MCP POST Message with untrusted Origin -> 403 Forbidden
+	reqEvilPost := httptest.NewRequest(http.MethodPost, "/mcp/messages", strings.NewReader(`{}`))
+	reqEvilPost.Header.Set("Origin", "https://malicious.evil.com")
+	rrEvilPost := httptest.NewRecorder()
+	server.HandlePostMessage(rrEvilPost, reqEvilPost)
+
+	if rrEvilPost.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for untrusted MCP POST origin, got %d", rrEvilPost.Code)
+	}
+
+	// 3. MCP OPTIONS preflight with allowed Origin -> 200 OK with CORS headers
+	reqAllowedOpt := httptest.NewRequest(http.MethodOptions, "/mcp/messages", nil)
+	reqAllowedOpt.Header.Set("Origin", "https://app.aosphere.io")
+	rrAllowedOpt := httptest.NewRecorder()
+	server.HandlePostMessage(rrAllowedOpt, reqAllowedOpt)
+
+	if rrAllowedOpt.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for allowed MCP preflight origin, got %d", rrAllowedOpt.Code)
+	}
+	if origin := rrAllowedOpt.Header().Get("Access-Control-Allow-Origin"); origin != "https://app.aosphere.io" {
+		t.Errorf("expected Access-Control-Allow-Origin: https://app.aosphere.io, got %s", origin)
 	}
 }

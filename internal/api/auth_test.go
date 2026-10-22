@@ -267,6 +267,32 @@ func TestCORSPolicyHardening(t *testing.T) {
 	if creds := rrGet.Header().Get("Access-Control-Allow-Credentials"); creds != "true" {
 		t.Errorf("expected Access-Control-Allow-Credentials: true on GET, got %s", creds)
 	}
+
+	// 3. Preflight OPTIONS with Untrusted Origin -> 403 Forbidden
+	reqEvilPreflight := httptest.NewRequest(http.MethodOptions, "/api/version", nil)
+	reqEvilPreflight.Header.Set("Origin", "https://attacker.evil.com")
+	rrEvilPreflight := httptest.NewRecorder()
+	handler.ServeHTTP(rrEvilPreflight, reqEvilPreflight)
+
+	if rrEvilPreflight.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for untrusted OPTIONS preflight, got %d", rrEvilPreflight.Code)
+	}
+	if origin := rrEvilPreflight.Header().Get("Access-Control-Allow-Origin"); origin != "" {
+		t.Errorf("expected empty Access-Control-Allow-Origin for untrusted origin, got %s", origin)
+	}
+
+	// 4. Regular GET with Untrusted Origin -> No CORS headers granted
+	reqEvilGet := httptest.NewRequest(http.MethodGet, "/api/version", nil)
+	reqEvilGet.Header.Set("Origin", "https://attacker.evil.com")
+	rrEvilGet := httptest.NewRecorder()
+	handler.ServeHTTP(rrEvilGet, reqEvilGet)
+
+	if origin := rrEvilGet.Header().Get("Access-Control-Allow-Origin"); origin != "" {
+		t.Errorf("expected no CORS origin for untrusted GET, got %s", origin)
+	}
+	if creds := rrEvilGet.Header().Get("Access-Control-Allow-Credentials"); creds != "" {
+		t.Errorf("expected no credentials header for untrusted GET, got %s", creds)
+	}
 }
 
 func TestTenantIsolatedSSE(t *testing.T) {

@@ -115,8 +115,10 @@ func (a *API) HandleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	if origin := r.Header.Get("Origin"); origin != "" {
-		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		if !auth.ApplyCORSHeaders(w, r) {
+			http.Error(w, "CORS origin forbidden", http.StatusForbidden)
+			return
+		}
 	}
 
 	msgChan := make(chan string, 32)

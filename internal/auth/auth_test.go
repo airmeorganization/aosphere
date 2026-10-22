@@ -104,3 +104,30 @@ func TestParseRole(t *testing.T) {
 		t.Error("expected error for invalid role 'superuser', got nil")
 	}
 }
+
+func TestCORSAllowlist(t *testing.T) {
+	defer ResetAllowedOrigins()
+
+	// Default origins include app.aosphere.io and localhost
+	if !IsOriginAllowed("https://app.aosphere.io") {
+		t.Error("expected https://app.aosphere.io to be allowed by default")
+	}
+	if !IsOriginAllowed("http://localhost:8080") {
+		t.Error("expected http://localhost:8080 to be allowed by default")
+	}
+	if IsOriginAllowed("https://attacker.evil.com") {
+		t.Error("expected untrusted origin to be denied")
+	}
+	if IsOriginAllowed("") {
+		t.Error("expected empty origin to return false")
+	}
+
+	// Custom override
+	SetAllowedOrigins([]string{"https://custom.portal.com"})
+	if !IsOriginAllowed("https://custom.portal.com") {
+		t.Error("expected custom origin to be allowed")
+	}
+	if IsOriginAllowed("https://app.aosphere.io") {
+		t.Error("expected previous default origin to be disallowed after custom override")
+	}
+}
