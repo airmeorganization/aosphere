@@ -413,11 +413,11 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 
 	// CRM
 	mux.HandleFunc("/api/customers", func(w http.ResponseWriter, r *http.Request) {
-		_, ok := a.requireAuth(w, r, auth.PermRead)
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
 		if !ok {
 			return
 		}
-		custs, err := a.store.GetCustomers()
+		custs, err := a.store.GetCustomersForOrg(authCtx.OrgID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -446,7 +446,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			if authCtx.IsAPIKey {
 				actorType = "agent"
 			}
-			deal, err := a.store.CreateDeal(req.Title, req.CustomerID, req.Value, req.Stage, 60, req.CloseDate, actorType, authCtx.UserID)
+			deal, err := a.store.CreateDealForOrg(authCtx.OrgID, req.Title, req.CustomerID, req.Value, req.Stage, 60, req.CloseDate, actorType, authCtx.UserID)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -455,11 +455,11 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			writeJSON(w, deal)
 			return
 		}
-		_, ok := a.requireAuth(w, r, auth.PermRead)
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
 		if !ok {
 			return
 		}
-		deals, err := a.store.GetDeals()
+		deals, err := a.store.GetDealsForOrg(authCtx.OrgID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -488,7 +488,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 		if authCtx.IsAPIKey {
 			actorType = "agent"
 		}
-		if err := a.store.UpdateDealStage(req.DealID, req.Stage, actorType, authCtx.UserID); err != nil {
+		if err := a.store.UpdateDealStageForOrg(authCtx.OrgID, req.DealID, req.Stage, actorType, authCtx.UserID); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -644,11 +644,11 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("/api/financial-summary", func(w http.ResponseWriter, r *http.Request) {
-		_, ok := a.requireAuth(w, r, auth.PermRead)
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
 		if !ok {
 			return
 		}
-		summary, err := a.store.GetFinancialSummary()
+		summary, err := a.store.GetFinancialSummaryForOrg(authCtx.OrgID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -670,11 +670,11 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("/api/expenses", func(w http.ResponseWriter, r *http.Request) {
-		_, ok := a.requireAuth(w, r, auth.PermRead)
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
 		if !ok {
 			return
 		}
-		exps, err := a.store.GetExpenses()
+		exps, err := a.store.GetExpensesForOrg(authCtx.OrgID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -710,11 +710,11 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			writeJSON(w, emp)
 			return
 		}
-		_, ok := a.requireAuth(w, r, auth.PermRead)
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
 		if !ok {
 			return
 		}
-		emps, err := a.store.GetEmployees()
+		emps, err := a.store.GetEmployeesForOrg(authCtx.OrgID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -785,11 +785,11 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("/api/shifts", func(w http.ResponseWriter, r *http.Request) {
-		_, ok := a.requireAuth(w, r, auth.PermRead)
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
 		if !ok {
 			return
 		}
-		shifts, err := a.store.GetShifts()
+		shifts, err := a.store.GetShiftsForOrg(authCtx.OrgID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -818,7 +818,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 		if authCtx.IsAPIKey {
 			actorType = "agent"
 		}
-		if err := a.store.UpdateShiftStatus(req.ShiftID, req.Status, actorType, authCtx.UserID); err != nil {
+		if err := a.store.UpdateShiftStatusForOrg(authCtx.OrgID, req.ShiftID, req.Status, actorType, authCtx.UserID); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -827,11 +827,11 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("/api/tasks", func(w http.ResponseWriter, r *http.Request) {
-		_, ok := a.requireAuth(w, r, auth.PermRead)
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
 		if !ok {
 			return
 		}
-		tasks, err := a.store.GetTasks()
+		tasks, err := a.store.GetTasksForOrg(authCtx.OrgID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -860,7 +860,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 		if authCtx.IsAPIKey {
 			actorType = "agent"
 		}
-		if err := a.store.UpdateTaskStatus(req.TaskID, req.Status, actorType, authCtx.UserID); err != nil {
+		if err := a.store.UpdateTaskStatusForOrg(authCtx.OrgID, req.TaskID, req.Status, actorType, authCtx.UserID); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -870,11 +870,11 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 
 	// DIGITAL PRESENCE & REPUTATION
 	mux.HandleFunc("/api/listings", func(w http.ResponseWriter, r *http.Request) {
-		_, ok := a.requireAuth(w, r, auth.PermRead)
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
 		if !ok {
 			return
 		}
-		listings, err := a.store.GetListings()
+		listings, err := a.store.GetListingsForOrg(authCtx.OrgID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -905,7 +905,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 		if authCtx.IsAPIKey {
 			actorType = "agent"
 		}
-		if err := a.store.SyncNAP(req.BusinessName, req.Address, req.Phone, req.Website, actorType, authCtx.UserID); err != nil {
+		if err := a.store.SyncNAPForOrg(authCtx.OrgID, req.BusinessName, req.Address, req.Phone, req.Website, actorType, authCtx.UserID); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -914,11 +914,11 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("/api/reviews", func(w http.ResponseWriter, r *http.Request) {
-		_, ok := a.requireAuth(w, r, auth.PermRead)
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
 		if !ok {
 			return
 		}
-		revs, err := a.store.GetReviews()
+		revs, err := a.store.GetReviewsForOrg(authCtx.OrgID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -952,7 +952,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 		if authCtx.IsAPIKey {
 			actorType = "agent"
 		}
-		if err := a.store.ReplyReview(req.ReviewID, req.ReplyText, status, actorType, authCtx.UserID); err != nil {
+		if err := a.store.ReplyReviewForOrg(authCtx.OrgID, req.ReviewID, req.ReplyText, status, actorType, authCtx.UserID); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

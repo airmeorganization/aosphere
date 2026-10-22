@@ -123,18 +123,25 @@ func (s *Store) GetApprovalsForOrg(orgID, status string) ([]db.Approval, error) 
 }
 
 func (s *Store) DecideApproval(id, decision, decidedBy string) error {
+	return s.DecideApprovalForOrg("org_default", id, decision, decidedBy)
+}
+
+func (s *Store) DecideApprovalForOrg(orgID, id, decision, decidedBy string) error {
+	if orgID == "" {
+		orgID = "org_default"
+	}
 	now := time.Now()
-	res, err := s.db.Exec(`UPDATE approvals SET status = ?, decided_by = ?, decided_at = ? WHERE id = ?`,
-		decision, decidedBy, now, id)
+	res, err := s.db.Exec(`UPDATE approvals SET status = ?, decided_by = ?, decided_at = ? WHERE id = ? AND org_id = ?`,
+		decision, decidedBy, now, id, orgID)
 	if err != nil {
 		return err
 	}
 	rows, _ := res.RowsAffected()
 	if rows == 0 {
-		return fmt.Errorf("approval %s not found", id)
+		return fmt.Errorf("approval %s not found in org %s", id, orgID)
 	}
 
-	_ = s.LogAudit("human", decidedBy, "DECIDE_APPROVAL", "approvals", id, fmt.Sprintf("Decision: %s", decision), "{}")
+	_ = s.LogAuditForOrg(orgID, "human", decidedBy, "DECIDE_APPROVAL", "approvals", id, fmt.Sprintf("Decision: %s", decision), "{}")
 	return nil
 }
 
@@ -323,6 +330,13 @@ func (s *Store) GetPurchaseOrdersForOrg(orgID string) ([]db.PurchaseOrder, error
 }
 
 func (s *Store) CreatePurchaseOrder(supplierID string, itemsJSON string, total float64, actorType, actorID, notes string) (*db.PurchaseOrder, error) {
+	return s.CreatePurchaseOrderForOrg("org_default", supplierID, itemsJSON, total, actorType, actorID, notes)
+}
+
+func (s *Store) CreatePurchaseOrderForOrg(orgID, supplierID string, itemsJSON string, total float64, actorType, actorID, notes string) (*db.PurchaseOrder, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
 	id := "po_" + uuid.New().String()[:8]
 	poNum := fmt.Sprintf("PO-%d", time.Now().Unix())
 	status := "ordered"
@@ -330,18 +344,19 @@ func (s *Store) CreatePurchaseOrder(supplierID string, itemsJSON string, total f
 		status = "pending_approval"
 	}
 
-	_, err := s.db.Exec(`INSERT INTO purchase_orders (id, po_number, supplier_id, status, total_amount, items_json, created_by_type, actor_id, notes)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, poNum, supplierID, status, total, itemsJSON, actorType, actorID, notes)
+	_, err := s.db.Exec(`INSERT INTO purchase_orders (id, org_id, po_number, supplier_id, status, total_amount, items_json, created_by_type, actor_id, notes)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, orgID, poNum, supplierID, status, total, itemsJSON, actorType, actorID, notes)
 	if err != nil {
 		return nil, err
 	}
 
-	_ = s.LogAudit(actorType, actorID, "CREATE_PURCHASE_ORDER", "purchase_orders", id,
+	_ = s.LogAuditForOrg(orgID, actorType, actorID, "CREATE_PURCHASE_ORDER", "purchase_orders", id,
 		fmt.Sprintf("Created PO %s total $%.2f (status: %s)", poNum, total, status), itemsJSON)
 
 	return &db.PurchaseOrder{
 		ID:            id,
+		OrgID:         orgID,
 		PONumber:      poNum,
 		SupplierID:    supplierID,
 		Status:        status,
@@ -356,7 +371,14 @@ func (s *Store) CreatePurchaseOrder(supplierID string, itemsJSON string, total f
 // ----------------- CRM & SALES -----------------
 
 func (s *Store) GetCustomers() ([]db.Customer, error) {
-	rows, err := s.db.Query(`SELECT id, name, company, email, phone, status, lifetime_value, tags, created_at FROM customers ORDER BY lifetime_value DESC`)
+	return s.GetCustomersForOrg("org_default")
+}
+
+func (s *Store) GetCustomersForOrg(orgID string) ([]db.Customer, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	rows, err := s.db.Query(`SELECT id, org_id, name, COALESCE(company, ''), COALESCE(email, ''), COALESCE(phone, ''), COALESCE(status, 'active'), lifetime_value, COALESCE(tags, '[]'), created_at FROM customers WHERE org_id = ? ORDER BY lifetime_value DESC`, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -365,7 +387,7 @@ func (s *Store) GetCustomers() ([]db.Customer, error) {
 	var list []db.Customer
 	for rows.Next() {
 		var c db.Customer
-		if err := rows.Scan(&c.ID, &c.Name, &c.Company, &c.Email, &c.Phone, &c.Status, &c.LifetimeValue, &c.Tags, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.OrgID, &c.Name, &c.Company, &c.Email, &c.Phone, &c.Status, &c.LifetimeValue, &c.Tags, &c.CreatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, c)
@@ -373,11 +395,44 @@ func (s *Store) GetCustomers() ([]db.Customer, error) {
 	return list, nil
 }
 
+func (s *Store) CreateCustomerForOrg(orgID, name, company, email, phone, status string, ltv float64, tags string) (*db.Customer, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	id := "cust_" + uuid.New().String()[:8]
+	now := time.Now()
+	_, err := s.db.Exec(`INSERT INTO customers (id, org_id, name, company, email, phone, status, lifetime_value, tags, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, orgID, name, company, email, phone, status, ltv, tags, now)
+	if err != nil {
+		return nil, err
+	}
+	return &db.Customer{
+		ID:            id,
+		OrgID:         orgID,
+		Name:          name,
+		Company:       company,
+		Email:         email,
+		Phone:         phone,
+		Status:        status,
+		LifetimeValue: ltv,
+		Tags:          tags,
+		CreatedAt:     now,
+	}, nil
+}
+
 func (s *Store) GetDeals() ([]db.Deal, error) {
-	rows, err := s.db.Query(`SELECT d.id, d.title, d.customer_id, COALESCE(c.name, '') as customer_name,
-		COALESCE(c.company, '') as customer_company, d.value, d.stage, d.probability, d.expected_close_date, d.created_at
+	return s.GetDealsForOrg("org_default")
+}
+
+func (s *Store) GetDealsForOrg(orgID string) ([]db.Deal, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	rows, err := s.db.Query(`SELECT d.id, d.org_id, d.title, d.customer_id, COALESCE(c.name, '') as customer_name,
+		COALESCE(c.company, '') as customer_company, d.value, d.stage, d.probability, COALESCE(d.expected_close_date, ''), d.created_at
 		FROM deals d LEFT JOIN customers c ON d.customer_id = c.id
-		ORDER BY d.created_at DESC`)
+		WHERE d.org_id = ?
+		ORDER BY d.created_at DESC`, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -386,7 +441,7 @@ func (s *Store) GetDeals() ([]db.Deal, error) {
 	var list []db.Deal
 	for rows.Next() {
 		var d db.Deal
-		if err := rows.Scan(&d.ID, &d.Title, &d.CustomerID, &d.CustomerName, &d.CustomerCompany, &d.Value, &d.Stage, &d.Probability, &d.ExpectedCloseDate, &d.CreatedAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.OrgID, &d.Title, &d.CustomerID, &d.CustomerName, &d.CustomerCompany, &d.Value, &d.Stage, &d.Probability, &d.ExpectedCloseDate, &d.CreatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, d)
@@ -395,31 +450,46 @@ func (s *Store) GetDeals() ([]db.Deal, error) {
 }
 
 func (s *Store) UpdateDealStage(dealID, stage, actorType, actorID string) error {
-	res, err := s.db.Exec(`UPDATE deals SET stage = ? WHERE id = ?`, stage, dealID)
+	return s.UpdateDealStageForOrg("org_default", dealID, stage, actorType, actorID)
+}
+
+func (s *Store) UpdateDealStageForOrg(orgID, dealID, stage, actorType, actorID string) error {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	res, err := s.db.Exec(`UPDATE deals SET stage = ? WHERE id = ? AND org_id = ?`, stage, dealID, orgID)
 	if err != nil {
 		return err
 	}
 	rows, _ := res.RowsAffected()
 	if rows == 0 {
-		return fmt.Errorf("deal %s not found", dealID)
+		return fmt.Errorf("deal %s not found in org %s", dealID, orgID)
 	}
 
-	_ = s.LogAudit(actorType, actorID, "UPDATE_DEAL_STAGE", "deals", dealID, fmt.Sprintf("Stage moved to: %s", stage), "{}")
+	_ = s.LogAuditForOrg(orgID, actorType, actorID, "UPDATE_DEAL_STAGE", "deals", dealID, fmt.Sprintf("Stage moved to: %s", stage), "{}")
 	return nil
 }
 
 func (s *Store) CreateDeal(title, customerID string, value float64, stage string, prob int, closeDate, actorType, actorID string) (*db.Deal, error) {
+	return s.CreateDealForOrg("org_default", title, customerID, value, stage, prob, closeDate, actorType, actorID)
+}
+
+func (s *Store) CreateDealForOrg(orgID, title, customerID string, value float64, stage string, prob int, closeDate, actorType, actorID string) (*db.Deal, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
 	id := "deal_" + uuid.New().String()[:8]
-	_, err := s.db.Exec(`INSERT INTO deals (id, title, customer_id, value, stage, probability, expected_close_date)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`, id, title, customerID, value, stage, prob, closeDate)
+	_, err := s.db.Exec(`INSERT INTO deals (id, org_id, title, customer_id, value, stage, probability, expected_close_date)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, id, orgID, title, customerID, value, stage, prob, closeDate)
 	if err != nil {
 		return nil, err
 	}
 
-	_ = s.LogAudit(actorType, actorID, "CREATE_DEAL", "deals", id, fmt.Sprintf("Created deal '%s' ($%.2f)", title, value), "{}")
+	_ = s.LogAuditForOrg(orgID, actorType, actorID, "CREATE_DEAL", "deals", id, fmt.Sprintf("Created deal '%s' ($%.2f)", title, value), "{}")
 
 	return &db.Deal{
 		ID:                id,
+		OrgID:             orgID,
 		Title:             title,
 		CustomerID:        customerID,
 		Value:             value,
@@ -463,23 +533,31 @@ func (s *Store) GetInvoicesForOrg(orgID string) ([]db.Invoice, error) {
 }
 
 func (s *Store) CreateInvoice(customerID string, itemsJSON string, subtotal, tax float64, dueDate, recurring, actorType, actorID string) (*db.Invoice, error) {
+	return s.CreateInvoiceForOrg("org_default", customerID, itemsJSON, subtotal, tax, dueDate, recurring, actorType, actorID)
+}
+
+func (s *Store) CreateInvoiceForOrg(orgID, customerID string, itemsJSON string, subtotal, tax float64, dueDate, recurring, actorType, actorID string) (*db.Invoice, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
 	id := "inv_" + uuid.New().String()[:8]
 	invNum := fmt.Sprintf("INV-%d", time.Now().Unix())
 	total := subtotal + tax
 	now := time.Now().Format("2006-01-02")
 
-	_, err := s.db.Exec(`INSERT INTO invoices (id, invoice_number, customer_id, status, issue_date, due_date, subtotal, tax_amount, total_amount, recurring_frequency, items_json)
-		VALUES (?, ?, ?, 'sent', ?, ?, ?, ?, ?, ?, ?)`,
-		id, invNum, customerID, now, dueDate, subtotal, tax, total, recurring, itemsJSON)
+	_, err := s.db.Exec(`INSERT INTO invoices (id, org_id, invoice_number, customer_id, status, issue_date, due_date, subtotal, tax_amount, total_amount, recurring_frequency, items_json)
+		VALUES (?, ?, ?, ?, 'sent', ?, ?, ?, ?, ?, ?, ?)`,
+		id, orgID, invNum, customerID, now, dueDate, subtotal, tax, total, recurring, itemsJSON)
 	if err != nil {
 		return nil, err
 	}
 
-	_ = s.LogAudit(actorType, actorID, "CREATE_INVOICE", "invoices", id,
+	_ = s.LogAuditForOrg(orgID, actorType, actorID, "CREATE_INVOICE", "invoices", id,
 		fmt.Sprintf("Created invoice %s for total $%.2f", invNum, total), itemsJSON)
 
 	return &db.Invoice{
 		ID:                 id,
+		OrgID:              orgID,
 		InvoiceNumber:      invNum,
 		CustomerID:         customerID,
 		Status:             "sent",
@@ -494,7 +572,14 @@ func (s *Store) CreateInvoice(customerID string, itemsJSON string, subtotal, tax
 }
 
 func (s *Store) GetExpenses() ([]db.Expense, error) {
-	rows, err := s.db.Query(`SELECT id, category, amount, vendor, description, date, created_at FROM expenses ORDER BY date DESC`)
+	return s.GetExpensesForOrg("org_default")
+}
+
+func (s *Store) GetExpensesForOrg(orgID string) ([]db.Expense, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	rows, err := s.db.Query(`SELECT id, org_id, category, amount, COALESCE(vendor, ''), COALESCE(description, ''), date, created_at FROM expenses WHERE org_id = ? ORDER BY date DESC`, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -503,7 +588,7 @@ func (s *Store) GetExpenses() ([]db.Expense, error) {
 	var list []db.Expense
 	for rows.Next() {
 		var e db.Expense
-		if err := rows.Scan(&e.ID, &e.Category, &e.Amount, &e.Vendor, &e.Description, &e.Date, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.OrgID, &e.Category, &e.Amount, &e.Vendor, &e.Description, &e.Date, &e.CreatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, e)
@@ -511,19 +596,49 @@ func (s *Store) GetExpenses() ([]db.Expense, error) {
 	return list, nil
 }
 
+func (s *Store) CreateExpenseForOrg(orgID, category string, amount float64, vendor, description, date string) (*db.Expense, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	id := "exp_" + uuid.New().String()[:8]
+	now := time.Now()
+	_, err := s.db.Exec(`INSERT INTO expenses (id, org_id, category, amount, vendor, description, date, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, id, orgID, category, amount, vendor, description, date, now)
+	if err != nil {
+		return nil, err
+	}
+	return &db.Expense{
+		ID:          id,
+		OrgID:       orgID,
+		Category:    category,
+		Amount:      amount,
+		Vendor:      vendor,
+		Description: description,
+		Date:        date,
+		CreatedAt:   now,
+	}, nil
+}
+
 func (s *Store) GetFinancialSummary() (*db.FinancialSummary, error) {
+	return s.GetFinancialSummaryForOrg("org_default")
+}
+
+func (s *Store) GetFinancialSummaryForOrg(orgID string) (*db.FinancialSummary, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
 	var summary db.FinancialSummary
 
-	// Revenue from paid invoices
-	_ = s.db.QueryRow(`SELECT COALESCE(SUM(total_amount), 0), COUNT(*) FROM invoices WHERE status = 'paid'`).
+	// Revenue from paid invoices scoped to org
+	_ = s.db.QueryRow(`SELECT COALESCE(SUM(total_amount), 0), COUNT(*) FROM invoices WHERE org_id = ? AND status = 'paid'`, orgID).
 		Scan(&summary.TotalRevenue, &summary.PaidCount)
 
-	// Unpaid / pending invoices
-	_ = s.db.QueryRow(`SELECT COALESCE(SUM(total_amount), 0), COUNT(*) FROM invoices WHERE status != 'paid'`).
+	// Unpaid / pending invoices scoped to org
+	_ = s.db.QueryRow(`SELECT COALESCE(SUM(total_amount), 0), COUNT(*) FROM invoices WHERE org_id = ? AND status != 'paid'`, orgID).
 		Scan(&summary.UnpaidTotal, &summary.PendingCount)
 
-	// Expenses
-	_ = s.db.QueryRow(`SELECT COALESCE(SUM(amount), 0) FROM expenses`).Scan(&summary.TotalExpense)
+	// Expenses scoped to org
+	_ = s.db.QueryRow(`SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE org_id = ?`, orgID).Scan(&summary.TotalExpense)
 
 	summary.NetProfit = summary.TotalRevenue - summary.TotalExpense
 	return &summary, nil
@@ -532,7 +647,14 @@ func (s *Store) GetFinancialSummary() (*db.FinancialSummary, error) {
 // ----------------- HRMS & WORKPLACE -----------------
 
 func (s *Store) GetEmployees() ([]db.Employee, error) {
-	rows, err := s.db.Query(`SELECT id, name, role, department, hourly_rate, status, email, phone, hired_at, created_at FROM employees ORDER BY name ASC`)
+	return s.GetEmployeesForOrg("org_default")
+}
+
+func (s *Store) GetEmployeesForOrg(orgID string) ([]db.Employee, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	rows, err := s.db.Query(`SELECT id, org_id, name, role, department, hourly_rate, status, COALESCE(email, ''), COALESCE(phone, ''), COALESCE(hired_at, ''), created_at FROM employees WHERE org_id = ? ORDER BY name ASC`, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -541,7 +663,7 @@ func (s *Store) GetEmployees() ([]db.Employee, error) {
 	var list []db.Employee
 	for rows.Next() {
 		var emp db.Employee
-		if err := rows.Scan(&emp.ID, &emp.Name, &emp.Role, &emp.Department, &emp.HourlyRate, &emp.Status, &emp.Email, &emp.Phone, &emp.HiredAt, &emp.CreatedAt); err != nil {
+		if err := rows.Scan(&emp.ID, &emp.OrgID, &emp.Name, &emp.Role, &emp.Department, &emp.HourlyRate, &emp.Status, &emp.Email, &emp.Phone, &emp.HiredAt, &emp.CreatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, emp)
@@ -601,12 +723,19 @@ func (s *Store) GetTimesheetsForOrg(orgID string) ([]db.Timesheet, error) {
 	return list, nil
 }
 
-
 func (s *Store) GetShifts() ([]db.Shift, error) {
-	rows, err := s.db.Query(`SELECT sh.id, sh.employee_id, COALESCE(e.name, '') as employee_name,
-		sh.shift_date, sh.start_time, sh.end_time, sh.station, sh.status, sh.created_at
+	return s.GetShiftsForOrg("org_default")
+}
+
+func (s *Store) GetShiftsForOrg(orgID string) ([]db.Shift, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	rows, err := s.db.Query(`SELECT sh.id, sh.org_id, sh.employee_id, COALESCE(e.name, '') as employee_name,
+		sh.shift_date, sh.start_time, sh.end_time, COALESCE(sh.station, ''), sh.status, sh.created_at
 		FROM shifts sh LEFT JOIN employees e ON sh.employee_id = e.id
-		ORDER BY sh.shift_date DESC, sh.start_time ASC`)
+		WHERE sh.org_id = ?
+		ORDER BY sh.shift_date DESC, sh.start_time ASC`, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -615,7 +744,7 @@ func (s *Store) GetShifts() ([]db.Shift, error) {
 	var list []db.Shift
 	for rows.Next() {
 		var sh db.Shift
-		if err := rows.Scan(&sh.ID, &sh.EmployeeID, &sh.EmployeeName, &sh.ShiftDate, &sh.StartTime, &sh.EndTime, &sh.Station, &sh.Status, &sh.CreatedAt); err != nil {
+		if err := rows.Scan(&sh.ID, &sh.OrgID, &sh.EmployeeID, &sh.EmployeeName, &sh.ShiftDate, &sh.StartTime, &sh.EndTime, &sh.Station, &sh.Status, &sh.CreatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, sh)
@@ -624,19 +753,38 @@ func (s *Store) GetShifts() ([]db.Shift, error) {
 }
 
 func (s *Store) UpdateShiftStatus(shiftID, status, actorType, actorID string) error {
-	_, err := s.db.Exec(`UPDATE shifts SET status = ? WHERE id = ?`, status, shiftID)
+	return s.UpdateShiftStatusForOrg("org_default", shiftID, status, actorType, actorID)
+}
+
+func (s *Store) UpdateShiftStatusForOrg(orgID, shiftID, status, actorType, actorID string) error {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	res, err := s.db.Exec(`UPDATE shifts SET status = ? WHERE id = ? AND org_id = ?`, status, shiftID, orgID)
 	if err != nil {
 		return err
 	}
-	_ = s.LogAudit(actorType, actorID, "UPDATE_SHIFT", "shifts", shiftID, fmt.Sprintf("Status updated to %s", status), "{}")
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("shift %s not found in org %s", shiftID, orgID)
+	}
+	_ = s.LogAuditForOrg(orgID, actorType, actorID, "UPDATE_SHIFT", "shifts", shiftID, fmt.Sprintf("Status updated to %s", status), "{}")
 	return nil
 }
 
 func (s *Store) GetTasks() ([]db.Task, error) {
-	rows, err := s.db.Query(`SELECT t.id, t.title, t.description, t.project_name, t.assignee_id,
-		COALESCE(e.name, 'Unassigned') as assignee_name, t.priority, t.status, t.due_date, t.created_at
+	return s.GetTasksForOrg("org_default")
+}
+
+func (s *Store) GetTasksForOrg(orgID string) ([]db.Task, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	rows, err := s.db.Query(`SELECT t.id, t.org_id, t.title, COALESCE(t.description, ''), t.project_name, COALESCE(t.assignee_id, ''),
+		COALESCE(e.name, 'Unassigned') as assignee_name, t.priority, t.status, COALESCE(t.due_date, ''), t.created_at
 		FROM tasks t LEFT JOIN employees e ON t.assignee_id = e.id
-		ORDER BY t.created_at DESC`)
+		WHERE t.org_id = ?
+		ORDER BY t.created_at DESC`, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -645,7 +793,7 @@ func (s *Store) GetTasks() ([]db.Task, error) {
 	var list []db.Task
 	for rows.Next() {
 		var t db.Task
-		if err := rows.Scan(&t.ID, &t.Title, &t.Description, &t.ProjectName, &t.AssigneeID, &t.AssigneeName, &t.Priority, &t.Status, &t.DueDate, &t.CreatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.OrgID, &t.Title, &t.Description, &t.ProjectName, &t.AssigneeID, &t.AssigneeName, &t.Priority, &t.Status, &t.DueDate, &t.CreatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, t)
@@ -654,18 +802,36 @@ func (s *Store) GetTasks() ([]db.Task, error) {
 }
 
 func (s *Store) UpdateTaskStatus(taskID, status, actorType, actorID string) error {
-	_, err := s.db.Exec(`UPDATE tasks SET status = ? WHERE id = ?`, status, taskID)
+	return s.UpdateTaskStatusForOrg("org_default", taskID, status, actorType, actorID)
+}
+
+func (s *Store) UpdateTaskStatusForOrg(orgID, taskID, status, actorType, actorID string) error {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	res, err := s.db.Exec(`UPDATE tasks SET status = ? WHERE id = ? AND org_id = ?`, status, taskID, orgID)
 	if err != nil {
 		return err
 	}
-	_ = s.LogAudit(actorType, actorID, "UPDATE_TASK", "tasks", taskID, fmt.Sprintf("Status set to %s", status), "{}")
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("task %s not found in org %s", taskID, orgID)
+	}
+	_ = s.LogAuditForOrg(orgID, actorType, actorID, "UPDATE_TASK", "tasks", taskID, fmt.Sprintf("Status set to %s", status), "{}")
 	return nil
 }
 
 // ----------------- DIGITAL PRESENCE & REPUTATION -----------------
 
 func (s *Store) GetListings() ([]db.LocalListing, error) {
-	rows, err := s.db.Query(`SELECT id, directory, nap_business_name, nap_address, nap_phone, nap_website, sync_status, last_synced_at FROM local_listings ORDER BY directory ASC`)
+	return s.GetListingsForOrg("org_default")
+}
+
+func (s *Store) GetListingsForOrg(orgID string) ([]db.LocalListing, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	rows, err := s.db.Query(`SELECT id, org_id, directory, COALESCE(nap_business_name, ''), COALESCE(nap_address, ''), COALESCE(nap_phone, ''), COALESCE(nap_website, ''), sync_status, last_synced_at FROM local_listings WHERE org_id = ? ORDER BY directory ASC`, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -674,7 +840,7 @@ func (s *Store) GetListings() ([]db.LocalListing, error) {
 	var list []db.LocalListing
 	for rows.Next() {
 		var l db.LocalListing
-		if err := rows.Scan(&l.ID, &l.Directory, &l.NAPBusinessName, &l.NAPAddress, &l.NAPPhone, &l.NAPWebsite, &l.SyncStatus, &l.LastSyncedAt); err != nil {
+		if err := rows.Scan(&l.ID, &l.OrgID, &l.Directory, &l.NAPBusinessName, &l.NAPAddress, &l.NAPPhone, &l.NAPWebsite, &l.SyncStatus, &l.LastSyncedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, l)
@@ -683,19 +849,33 @@ func (s *Store) GetListings() ([]db.LocalListing, error) {
 }
 
 func (s *Store) SyncNAP(businessName, address, phone, website, actorType, actorID string) error {
+	return s.SyncNAPForOrg("org_default", businessName, address, phone, website, actorType, actorID)
+}
+
+func (s *Store) SyncNAPForOrg(orgID, businessName, address, phone, website, actorType, actorID string) error {
+	if orgID == "" {
+		orgID = "org_default"
+	}
 	now := time.Now()
-	_, err := s.db.Exec(`UPDATE local_listings SET nap_business_name = ?, nap_address = ?, nap_phone = ?, nap_website = ?, sync_status = 'synced', last_synced_at = ?`,
-		businessName, address, phone, website, now)
+	_, err := s.db.Exec(`UPDATE local_listings SET nap_business_name = ?, nap_address = ?, nap_phone = ?, nap_website = ?, sync_status = 'synced', last_synced_at = ? WHERE org_id = ?`,
+		businessName, address, phone, website, now, orgID)
 	if err != nil {
 		return err
 	}
-	_ = s.LogAudit(actorType, actorID, "SYNC_NAP_DATA", "local_listings", "all",
+	_ = s.LogAuditForOrg(orgID, actorType, actorID, "SYNC_NAP_DATA", "local_listings", "all",
 		fmt.Sprintf("Synchronized NAP info across all directories: %s | %s", businessName, phone), "{}")
 	return nil
 }
 
 func (s *Store) GetReviews() ([]db.Review, error) {
-	rows, err := s.db.Query(`SELECT id, platform, author_name, rating, review_text, sentiment, reply_text, reply_status, created_at FROM reviews ORDER BY created_at DESC`)
+	return s.GetReviewsForOrg("org_default")
+}
+
+func (s *Store) GetReviewsForOrg(orgID string) ([]db.Review, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	rows, err := s.db.Query(`SELECT id, org_id, platform, author_name, rating, review_text, sentiment, COALESCE(reply_text, ''), reply_status, created_at FROM reviews WHERE org_id = ? ORDER BY created_at DESC`, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -704,7 +884,7 @@ func (s *Store) GetReviews() ([]db.Review, error) {
 	var list []db.Review
 	for rows.Next() {
 		var r db.Review
-		if err := rows.Scan(&r.ID, &r.Platform, &r.AuthorName, &r.Rating, &r.ReviewText, &r.Sentiment, &r.ReplyText, &r.ReplyStatus, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.OrgID, &r.Platform, &r.AuthorName, &r.Rating, &r.ReviewText, &r.Sentiment, &r.ReplyText, &r.ReplyStatus, &r.CreatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, r)
@@ -713,10 +893,21 @@ func (s *Store) GetReviews() ([]db.Review, error) {
 }
 
 func (s *Store) ReplyReview(reviewID, replyText, status, actorType, actorID string) error {
-	_, err := s.db.Exec(`UPDATE reviews SET reply_text = ?, reply_status = ? WHERE id = ?`, replyText, status, reviewID)
+	return s.ReplyReviewForOrg("org_default", reviewID, replyText, status, actorType, actorID)
+}
+
+func (s *Store) ReplyReviewForOrg(orgID, reviewID, replyText, status, actorType, actorID string) error {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	res, err := s.db.Exec(`UPDATE reviews SET reply_text = ?, reply_status = ? WHERE id = ? AND org_id = ?`, replyText, status, reviewID, orgID)
 	if err != nil {
 		return err
 	}
-	_ = s.LogAudit(actorType, actorID, "REPLY_REVIEW", "reviews", reviewID, fmt.Sprintf("Reply status: %s", status), replyText)
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("review %s not found in org %s", reviewID, orgID)
+	}
+	_ = s.LogAuditForOrg(orgID, actorType, actorID, "REPLY_REVIEW", "reviews", reviewID, fmt.Sprintf("Reply status: %s", status), replyText)
 	return nil
 }

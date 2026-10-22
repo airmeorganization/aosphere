@@ -259,7 +259,7 @@ func (s *WorkflowService) ConvertDealToInvoice(ctx context.Context, orgID, dealI
 	if authCtx != nil {
 		actor = authCtx.UserID
 	}
-	_ = s.store.UpdateDealStage(dealID, "won", "human", actor)
+	_ = s.store.UpdateDealStageForOrg(orgID, dealID, "won", "human", actor)
 
 	// Create in-app notification
 	_ = s.CreateNotification(ctx, orgID, "Deal Converted to Invoice",

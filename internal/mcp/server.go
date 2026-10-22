@@ -663,7 +663,7 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 	case "crm_manage_deal":
 		dealID, _ := params.Arguments["deal_id"].(string)
 		stage, _ := params.Arguments["stage"].(string)
-		err := m.store.UpdateDealStage(dealID, stage, "agent", agentID)
+		err := m.store.UpdateDealStageForOrg(orgID, dealID, stage, "agent", agentID)
 		if err != nil {
 			textResult = fmt.Sprintf("Error updating deal: %v", err)
 			isErr = true
@@ -672,7 +672,7 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 		}
 
 	case "fin_get_summary":
-		summary, err := m.store.GetFinancialSummary()
+		summary, err := m.store.GetFinancialSummaryForOrg(orgID)
 		if err != nil {
 			textResult = fmt.Sprintf("Error getting financial summary: %v", err)
 			isErr = true
@@ -725,7 +725,7 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 		addr, _ := params.Arguments["address"].(string)
 		phone, _ := params.Arguments["phone"].(string)
 		web, _ := params.Arguments["website"].(string)
-		err := m.store.SyncNAP(bName, addr, phone, web, "agent", agentID)
+		err := m.store.SyncNAPForOrg(orgID, bName, addr, phone, web, "agent", agentID)
 		if err != nil {
 			textResult = fmt.Sprintf("Error syncing NAP: %v", err)
 			isErr = true
@@ -736,7 +736,7 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 	case "reputation_draft_reply":
 		revID, _ := params.Arguments["review_id"].(string)
 		reply, _ := params.Arguments["reply_text"].(string)
-		err := m.store.ReplyReview(revID, reply, "drafted_by_agent", "agent", agentID)
+		err := m.store.ReplyReviewForOrg(orgID, revID, reply, "drafted_by_agent", "agent", agentID)
 		if err != nil {
 			textResult = fmt.Sprintf("Error drafting reply: %v", err)
 			isErr = true
@@ -970,11 +970,11 @@ func (m *MCPServer) handleResourceRead(req *JSONRPCRequest, sessCtx *SessionCont
 	case "res://erp/inventory":
 		data, err = m.store.GetSKUsForOrg(orgID, false)
 	case "res://crm/pipeline":
-		data, err = m.store.GetDeals()
+		data, err = m.store.GetDealsForOrg(orgID)
 	case "res://financial/summary":
-		data, err = m.store.GetFinancialSummary()
+		data, err = m.store.GetFinancialSummaryForOrg(orgID)
 	case "res://reputation/feed":
-		data, err = m.store.GetReviews()
+		data, err = m.store.GetReviewsForOrg(orgID)
 	case "res://ledger/trial-balance":
 		data, err = m.service.TrialBalance(context.Background(), orgID)
 	default:
