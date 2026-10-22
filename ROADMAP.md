@@ -1,301 +1,472 @@
-# AOSphere BOS — Production-Readiness Master Roadmap
+# AO Sphere BOS — Production Master Roadmap & Specification
 
-To turn AOSphere from a working BOS prototype into a real production-level application, you need to do more than fix bugs or add features. You need to make it secure, financially reliable, recoverable, testable, scalable and trustworthy enough to operate a real business with AI agents.
-
-The recommended path is to keep the existing **Go + SQLite + JavaScript** architecture for the initial hardening phase. Don't rebuild everything or introduce microservices before the current business workflows are reliable.
-
-The roadmap below is organised into implementation phases, with concrete actions to turn into development sprints.
+> **The Dual-First Business Operating System**: Built with equal operational power for **Human Operators** and **Autonomous AI Agents**. A lightweight, single-binary alternative to ERPNext, Odoo Community, and Invoice Ninja.
 
 ---
 
-## Production-Readiness Roadmap Sequence
+## 1. Executive Vision & Philosophy
 
-> **Recommended sequence**: Complete the gates in order rather than building every feature simultaneously.
+AO Sphere is an **Agent-Native Business Operating System (BOS)**. Existing enterprise ERPs (ERPNext, Odoo, SAP) were architected decades ago for manual human data entry, with complex multi-tab forms, heavy page reloads, and afterthought REST APIs. Conversely, modern "AI agent platforms" are frequently mere read-only monitoring dashboards where humans can only review or approve agent actions.
 
-| Phase | Title | Focus Area |
+**AO Sphere bridges this divide with a Dual-First Architecture:**
+1. **Human Operators** have first-class, direct, interactive control: visual drag-and-drop Kanbans, multi-line item invoice builders, manual stock adjustments, vendor catalogs, customer timeline cards, batch actions, and export capabilities.
+2. **AI Agents** interact with the exact same domain services via the Model Context Protocol (MCP), constrained by role-based access control (RBAC), rate limits, financial approval thresholds, and immutable double-entry ledger invariants.
+3. **Dual-Actor Audit Ledger**: Every transaction, whether initiated by human click or autonomous agent inference, records explicit cryptographic actor provenance (`HUMAN: user@company.com` vs `AGENT: mcp_procurement_bot`).
+
+```mermaid
+flowchart TD
+    subgraph Clients["Dual-First Control Surfaces"]
+        Human["Human Operator (Browser UI)"]
+        Agent["Autonomous Agent (Claude, Cursor, Antigravity)"]
+    end
+
+    subgraph Entrypoints["Unified Ingress & Protocols"]
+        REST["REST API (HTTP/JSON)"]
+        SSE["Real-Time SSE Stream"]
+        MCP["MCP Server (JSON-RPC)"]
+    end
+
+    Human --> REST
+    Human --> SSE
+    Agent --> MCP
+
+    subgraph Core["Core Application Services"]
+        Auth["Auth & Multi-Tenant Scoping"]
+        Policy["HITL Policy & Safety Engine"]
+        Workflow["Workflow Service (ERP, CRM, Finance, HR)"]
+        Ledger["Double-Entry General Ledger"]
+    end
+
+    REST --> Auth
+    MCP --> Auth
+    Auth --> Policy
+    Policy --> Workflow
+    Workflow --> Ledger
+
+    subgraph Storage["Atomic Storage & Outbox"]
+        DB[("SQLite WAL (Pure Go)")]
+        Outbox[("Transactional Outbox")]
+        Audit[("Dual-Actor Audit Trail")]
+    end
+
+    Workflow --> DB
+    Workflow --> Outbox
+    Workflow --> Audit
+```
+
+---
+
+## 2. Competitive Benchmark & Gap Analysis
+
+| Capability | **AO Sphere (Target)** | **ERPNext** (Frappe) | **Odoo Community** | **Invoice Ninja** | **Dolibarr** |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Runtime Architecture** | Single compiled Go binary + embedded UI (zero node/python deps) | Heavy Python/Frappe stack + MariaDB + Redis + Node | Python + PostgreSQL + Web framework | PHP / Laravel + MySQL | PHP + MariaDB |
+| **Footprint & Cold Boot** | < 30MB RAM, < 1.5s cold boot | > 1.5GB RAM, multi-container | > 800MB RAM, multi-container | > 500MB RAM, multi-container | > 300MB RAM |
+| **Agent / MCP Protocol** | **Native first-class MCP server (SSE & Stdio)** | Webhooks & REST only | Third-party modules | Webhooks & REST only | REST API only |
+| **Dual-First Interaction** | **Full UI CRUD + Full Agent Automation** | Primarily manual UI | Primarily manual UI | Primarily manual UI | Primarily manual UI |
+| **Procurement Cycle** | **3-Way Matching (PO $\rightarrow$ GRN $\rightarrow$ Bill $\rightarrow$ Pay)** | Full 3-Way Match | Full 3-Way Match | Direct PO only | 3-Way Match |
+| **Warehouse Structure** | **Multi-Warehouse, Bin Locations, Lot/Serial** | Multi-Warehouse, Batch/Serial | Multi-Warehouse, Batch/Serial | Single Location | Multi-Warehouse |
+| **Invoicing & Ledger** | **Integer minor cents double-entry general ledger** | Full ERP double-entry | Full accounting engine | Invoicing only (no full GL) | Double-entry |
+| **Document Generation** | **Native PDF (Invoices, POs, Receipts, Quotes)** | Jinja2 HTML-to-PDF | QWeb PDF (wkhtmltopdf) | PhantomJS / Flutter PDF | TCPDF engine |
+| **Payment Gateways** | **Stripe, Lemon Squeezy, PayPal webhooks** | Stripe, PayPal, Razorpay | 30+ Gateways | 20+ Gateways | PayPal, Stripe |
+| **License Type** | **Apache 2.0 / Dual Commercial** | GNU GPLv3 | GNU LGPLv3 (Core) | Functional Source License / GPL | GNU GPLv3 |
+
+---
+
+## 3. Licensing, Governance & Legal Strategy
+
+### Open-Source vs. Commercial Licensing Model
+To enable global developer adoption while supporting commercial SaaS and on-premise enterprise deployments, AO Sphere adopts an enterprise-grade licensing model:
+
+1. **Permissive Core License (Apache 2.0)**:
+   - The core monolith, REST API, SQLite storage engine, MCP server, and embedded web UI are licensed under **Apache 2.0**.
+   - Allows individuals, startups, and enterprises to self-host, customize, and build commercial products without copyleft contagion (unlike GPL/AGPL).
+2. **Dual-License Option for Hosted Enterprise Offerings**:
+   - For enterprise features (SAML/SCIM SSO, advanced compliance vaults, white-labeled client portals), a commercial enterprise license provides indemnification, priority SLAs, and proprietary redistribution rights.
+3. **Dependency IP Audit**:
+   - All Go dependencies are strictly vetted for permissive licenses:
+     - `modernc.org/sqlite`: BSD-3-Clause (Pure Go SQLite engine, no CGo)
+     - `github.com/google/uuid`: BSD-3-Clause
+     - `golang.org/x/crypto`: BSD-3-Clause
+     - `github.com/dustin/go-humanize`: MIT
+   - **Zero GPL / AGPL dependencies**: Guarantees zero legal friction for enterprise deployment.
+
+---
+
+## 4. Phase-by-Phase Implementation Roadmap
+
+```
+Phase 01: Immediate UX Hardening & UI Bug Resolution  ──> Theme Engine, Mobile Breakpoints, Token Injection, A11y
+Phase 02: Human-Direct Operational Control (Full CRUD)──> Multi-Line Item Invoice Builder, PO Studio, Kanban Drag & Drop
+Phase 03: Core ERP & Multi-Warehouse Supply Chain     ──> 3-Way Matching (GRN), Multi-Warehouse, Lot/Serial Tracking
+Phase 04: Advanced Invoicing, Payments & General Ledger──> Native PDF Engine, Stripe/PayPal Webhooks, Credit Notes, FX
+Phase 05: Customer 360, Multi-Pipeline CRM & Email    ──> Customer Activity Timeline, Multi-Kanban, SMTP/Email Dispatch
+Phase 06: HR, Timesheets & Automated Payroll          ──> Salary Structures, Tax Withholding, Payslip Generator, Leave
+Phase 07: Financial Intelligence, Analytics & Exports ──> P&L, Balance Sheet, Cash Flow, CSV/Excel/PDF Export Engine
+Phase 08: Agent Platform, Webhooks & MCP Subscriptions──> Webhook Event Engine, Execution Budgets, Agent Handoff
+Phase 09: Enterprise Tenancy, 2FA/SSO & Compliance    ──> Multi-Tenant Switching, TOTP 2FA, OAuth2/OIDC, Audit Vault
+Phase 10: Packaging, Distribution & Cloud Deployments ──> Docker Distroless, Helm Charts, Cloud-Init, Backup Automation
+```
+
+---
+
+### Phase 1 — Immediate UX Hardening & UI Bug Resolution
+
+**Goal:** Resolve all defects discovered during browser testing to provide a polished, responsive, and accessible interface.
+
+#### Checklist (5/5)
+- [ ] **Fix Dark Theme System in CSS (`web/css/style.css`)**:
+  - Add explicit `.theme-dark` CSS variable overrides for `--bg-primary` (`#0F172A`), `--bg-secondary` (`#1E293B`), `--bg-tertiary` (`#334155`), `--bg-card` (`#1E293B`), `--border-subtle` (`#334155`), and `--text-main` (`#F8FAFC`).
+  - Persist theme selection in `localStorage` across page refreshes.
+- [ ] **Inject Active Session/Token into MCP Agent Console (`web/js/app.js`)**:
+  - Fix the 401 Unauthorized bug in `executeManualToolCall()` by injecting `Authorization: Bearer <token>` or `X-API-Key` headers into `fetch('/mcp/messages')`.
+  - Display execution status badges and formatted JSON results in the drawer.
+- [ ] **Implement Mobile Responsive Sidebar & Breakpoints**:
+  - Add `@media (max-width: 768px)` rules in `style.css` to collapse the 256px sidebar into a hidden slide-out drawer.
+  - Add a hamburger menu toggle button in the top navigation bar.
+- [ ] **Eliminate Waterfall Cascade (`loadAllData`)**:
+  - Replace the global 12-endpoint parallel GET waterfall with targeted cache invalidation (e.g. only refresh `/api/invoices` when an invoice is created).
+  - Add an in-memory client-side data store with optimistic UI updates.
+- [ ] **Form Accessibility & Explicit `<label for="...">` Association**:
+  - Add explicit `id` attributes and matching `<label for="...">` tags to all modal form controls across Deals, POs, SKUs, and Invoices.
+  - Eliminate browser a11y console warnings; ensure tab-key keyboard traversal across all interactive modals.
+
+> **Exit Gate:** Dark mode toggles seamlessly, MCP tool executions from the web console succeed with 200 OK, mobile screens display a collapsible navigation drawer, and 0 a11y warnings appear in browser DevTools.
+
+---
+
+### Phase 2 — Human-Direct Operational Control (Full CRUD Interactivity)
+
+**Goal:** Ensure humans have direct, intuitive CRUD manipulation over every business entity—freeing the system from being an agent-only dashboard.
+
+#### Checklist (8/8)
+- [ ] **Interactive Multi-Line Item Invoice Builder**:
+  - Create a dedicated modal and full-page editor to compose invoices with dynamic line items (SKU picker, quantity, unit price, line discount, tax rate, auto-calculated line totals).
+  - Allow instant client selection or on-the-fly customer creation.
+- [ ] **Direct Purchase Order Generator with Supplier Catalog**:
+  - Visual PO composer allowing operators to pick a supplier, browse supplier SKUs, specify delivery dates, add purchase notes, and save as `draft` or submit for approval.
+- [ ] **Interactive SKU & Inventory Management**:
+  - Create an "Add SKU" and "Edit SKU" modal for manual catalog creation (code, name, category, cost, selling price, reorder thresholds, initial stock).
+  - Add manual stock adjustment dialog with reason codes (`recount`, `damage`, `received`, `shrinkage`).
+- [ ] **Quote Composer & Quote-to-Invoice Conversion**:
+  - UI interface to draft sales quotes with validity dates, terms, and discounts.
+  - "Convert to Invoice" button on accepted quotes and won deals with automatic line item transfer.
+- [ ] **Deal & Lead Management Studio**:
+  - Drag-and-drop Kanban deal stage movement with stage history tracking.
+  - Modal to create, edit, reassign, or archive deals with expected close dates and probability weighting.
+- [ ] **Shift Roster & Employee Scheduling Interface**:
+  - Interactive calendar/table view to schedule shifts, assign stations, log breaks, and clock employees in/out manually.
+  - Add "New Employee" modal with job title, department, wage type (hourly/salary), and hourly rate.
+- [ ] **Task Board & Assignment Matrix**:
+  - Interactive task board with priority badges (`low`, `medium`, `high`, `urgent`), due date pickers, assignee selection, and checklist subtasks.
+- [ ] **Batch Actions & Data Table Filters**:
+  - Multi-select checkboxes on invoices, inventory, and deals for batch actions (batch export, batch mark as sent, batch status update).
+  - Instant text filter and column sorting across all list views.
+
+> **Exit Gate:** A human operator can run an entire business day—onboard a customer, create a deal, build a 5-line invoice, order parts from a supplier, and clock in staff—entirely from the UI without running a single AI prompt.
+
+---
+
+### Phase 3 — Core ERP & Multi-Warehouse Supply Chain
+
+**Goal:** Match the supply chain sophistication of ERPNext and Odoo with 3-way matching, multi-site routing, and lot tracking.
+
+#### 3-Way Matching Workflow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Ops as Operations / Agent
+    participant PO as Purchase Order
+    actor Whs as Warehouse Staff
+    participant GRN as Goods Receipt Note
+    actor Fin as Finance / Vendor
+    participant Bill as Supplier Bill
+    participant GL as General Ledger
+
+    Ops->>PO: Issue Purchase Order (Status: Ordered)
+    Whs->>GRN: Inspect & Receive Goods (Physical Count)
+    Note over GRN: Post Stock Valuation Entry<br/>Debit: Inventory Asset<br/>Credit: Goods Received Not Billed (GRNB)
+    Fin->>Bill: Enter Supplier Invoice (3-Way Verification)
+    Note over Bill: Compare PO vs GRN vs Bill<br/>Qty & Price must match tolerance
+    Bill->>GL: Post Vendor Bill Entry<br/>Debit: GRNB Clearing<br/>Credit: Accounts Payable
+    Fin->>GL: Execute Payment Voucher<br/>Debit: Accounts Payable<br/>Credit: Cash/Bank
+```
+
+#### Checklist (8/8)
+- [ ] **Goods Receipt Notes (GRN / Delivery Receipts)**:
+  - Separate physical stock receipt from financial billing.
+  - Support partial receipts (e.g. 30 of 50 received, remaining 20 on backorder) with automatic backorder PO generation.
+- [ ] **3-Way Matching Policy Engine**:
+  - Automated comparison between PO items, GRN received quantities, and Supplier Bill invoice totals.
+  - Flag quantity variances or price discrepancies exceeding configurable threshold (e.g. > 2%) for human manager review.
+- [ ] **Multi-Warehouse & Storage Bin Architecture**:
+  - Schema support for multiple physical locations (`warehouses` table: `id`, `org_id`, `name`, `code`, `address`).
+  - Storage bins/locations within warehouses (aisle, rack, shelf, bin).
+  - Inter-warehouse stock transfer orders with transit tracking (`transfer_orders` table).
+- [ ] **Batch / Lot & Serial Number Tracking**:
+  - Track individual serial numbers for electronics/high-value hardware.
+  - Track batch/lot numbers with manufacturing and expiration dates for perishable/regulated supplies.
+- [ ] **Landed Cost Distribution**:
+  - Allocate shipping, customs duties, freight, and insurance costs across received items to calculate true inventory unit cost.
+- [ ] **Autonomous Reorder Policies**:
+  - Configurable replenishment rules: trigger draft POs automatically when `stock_quantity + reserved_quantity <= min_threshold`.
+  - Lead-time buffer calculations based on supplier historical reliability ratings.
+- [ ] **Physical Inventory Count & Reconciliation**:
+  - Stocktaking workflows: freeze inventory, record physical counts, compute variances, and post adjusting journal entries.
+- [ ] **Supplier Management & Performance Scorecards**:
+  - Vendor directory with payment terms (`Net 15`, `Net 30`, `Due on Receipt`), lead times, historical fulfillment accuracy, and quality ratings.
+
+> **Exit Gate:** Warehouse staff can receive partial goods with a GRN, finance verifies supplier bills with automated 3-way matching, and inventory tracks quantities across multiple physical warehouses.
+
+---
+
+### Phase 4 — Advanced Invoicing, Payment Gateways & General Ledger
+
+**Goal:** Deliver enterprise-grade financial capabilities with pixel-perfect PDFs, gateway webhooks, and comprehensive accounting.
+
+#### Checklist (8/8)
+- [ ] **Native Server-Side PDF Document Generator**:
+  - High-performance, pixel-perfect PDF rendering for Invoices, Purchase Orders, Quotes, and Receipts.
+  - Customizable company branding, logo embedding, tax registration numbers, and banking details.
+  - REST endpoints: `GET /api/invoices/:id/pdf` and `GET /api/purchase-orders/:id/pdf`.
+- [ ] **Payment Gateway Integration (Stripe & Lemon Squeezy)**:
+  - Generate secure Stripe Checkout / Payment Link sessions from invoice records.
+  - Secure webhook endpoint (`/api/webhooks/stripe`) with cryptographic signature verification.
+  - Webhook automations: On `checkout.session.completed`, automatically mark invoice as `paid` and post balanced double-entry ledger entry.
+- [ ] **Credit Notes, Refunds & Reversals**:
+  - Issue full or partial credit notes against issued or paid invoices.
+  - Post proper ledger reversals: Debit Revenue / Sales Tax Payable, Credit Accounts Receivable / Cash.
+- [ ] **Multi-Currency General Ledger**:
+  - Record transactions in foreign currencies (EUR, GBP, JPY, CAD) with historical exchange rates table (`exchange_rates`).
+  - Auto-calculate realized and unrealized FX gains/losses upon payment settlement.
+- [ ] **Configurable Multi-Jurisdiction Tax Engine**:
+  - Support US Sales Tax (state/county rules), EU VAT (reverse charge handling), and GST/HST.
+  - Effective-dated tax rates applied automatically based on customer delivery address.
+- [ ] **Complete Chart of Accounts & Sub-Ledgers**:
+  - Pre-packaged standard Chart of Accounts (Assets, Liabilities, Equity, Revenue, Cost of Goods Sold, Operating Expenses).
+  - Support custom account creation with parent-child account hierarchies.
+- [ ] **Bank Reconciliation & Statement Import**:
+  - Support statement upload in standard formats (OFX, QIF, CSV).
+  - Automated rule-based matching between bank transactions and open ledger entries.
+- [ ] **Fiscal Periods & Year-End Close Automation**:
+  - Lock accounting periods to prevent backdated edits to closed quarters.
+  - Year-end closing journal entry: zero out Revenue and Expense accounts into Retained Earnings.
+
+> **Exit Gate:** Customers can pay invoices via Stripe Checkout links, webhooks automatically post balanced double-entry journal entries, and downloadable branded PDFs are generated on demand.
+
+---
+
+### Phase 5 — Customer 360, Multi-Pipeline CRM & Communication
+
+**Goal:** Transform the basic sales pipeline into an omni-channel customer intelligence and communication hub.
+
+#### Checklist (8/8)
+- [ ] **Customer 360 Activity Timeline**:
+  - Comprehensive customer record view aggregating: contact details, linked deals, open quotes, invoice history, payment status, support tasks, and audit logs.
+- [ ] **Multiple Configurable Sales Pipelines**:
+  - Support distinct pipelines for different business units (e.g. *Direct Hardware Sales*, *SaaS Subscriptions*, *Consulting Services*).
+  - Configurable stage names, probability percentages, and mandatory stage requirements.
+- [ ] **Automated Deal Decay Alerts**:
+  - Highlight deals that have remained stagnant in a stage past their expected threshold (e.g. > 14 days in *Proposal Sent*).
+  - Autonomous agent prompt triggers: generate follow-up email drafts for dormant leads.
+- [ ] **Transactional Email Dispatch Engine**:
+  - Built-in SMTP, Resend, or SendGrid integration to dispatch quotes, invoices, and payment receipts directly to customer contacts.
+  - HTML email templates with embedded PDF attachments and click-to-pay buttons.
+- [ ] **Inbound Lead Capture Webhooks & Forms**:
+  - Public endpoint (`/api/v1/leads/capture`) with API key and reCAPTCHA support for website contact forms.
+  - Auto-enrich lead metadata and route to designated sales reps or AI qualification agents.
+- [ ] **Communication Notes & Logged Activities**:
+  - Log phone calls, meeting summaries, email threads, and internal team mentions (`@username`) on deal records.
+- [ ] **Client Self-Service Payment Portal**:
+  - Tokenized, secure public URL for clients (`/portal/invoice/:token`) to view their invoice, download PDFs, view payment history, and pay via credit card.
+- [ ] **Customer Reputation & Review Aggregation**:
+  - Ingest customer feedback from Google Business, Trustpilot, or custom satisfaction surveys.
+  - AI-assisted review triage and sentiment categorization with human approval for public draft replies.
+
+> **Exit Gate:** Sales reps manage multiple pipelines with visual deal decay warnings, invoices are emailed with PDF attachments directly to clients, and clients can view/pay invoices on a secure self-service portal.
+
+---
+
+### Phase 6 — Human Resources, Shift Scheduling & Automated Payroll
+
+**Goal:** Deliver complete workforce management, timesheet auditing, and salary disbursement without third-party HR tools.
+
+#### Checklist (7/7)
+- [ ] **Employee Profile & Employment Lifecycle**:
+  - Schema for employee records: personal details, emergency contacts, hire dates, job titles, department, reporting manager, tax ID, and banking details for direct deposit.
+- [ ] **Visual Shift Roster & Drag-and-Drop Scheduling**:
+  - Weekly and monthly visual calendar to assign shifts across departments and stations.
+  - Shift conflict detection (double-booking, overtime threshold violations, insufficient rest periods).
+- [ ] **Time & Attendance Tracking (Web Timeclock)**:
+  - Employee digital clock-in/clock-out interface with break tracking and IP/geo-fencing validation.
+  - Automated timesheet generation from clock events with manager review and approval workflows.
+- [ ] **Salary Structures & Payroll Computation**:
+  - Support hourly wages, fixed monthly salaries, overtime multipliers (1.5x, 2.0x), and recurring allowances/deductions.
+  - Automated payroll calculation: Gross Pay, Tax Withholding, Social Contributions, Benefits Deductions, and Net Pay.
+- [ ] **Automated Monthly Payslip Generation**:
+  - Generate downloadable PDF payslips for employees detailing earnings and deductions.
+  - Post integrated double-entry payroll entry: Debit Payroll Expense / Tax Expense, Credit Payroll Payable / Taxes Withheld.
+- [ ] **Leave & Paid Time Off (PTO) Management**:
+  - PTO policy configuration: Vacation, Sick Leave, Parental Leave with accrual balances.
+  - Employee leave request form with manager approval routing and calendar sync.
+- [ ] **HR Document Vault & Compliance**:
+  - Secure storage for employment contracts, NDAs, identification documents, and performance evaluations with role-gated access (`manage_hr` permission required).
+
+> **Exit Gate:** Employees log shifts through the web timeclock, managers approve timesheets, and the system computes payroll, outputs PDF payslips, and posts balanced payroll ledger entries.
+
+---
+
+### Phase 7 — Financial Intelligence, Analytics & Document Exports
+
+**Goal:** Provide executive-level financial reporting and business intelligence without external BI tools.
+
+#### Financial Reports Matrix
+
+| Report | Purpose | Format / Metrics |
 | :--- | :--- | :--- |
-| **01** | **Stabilise the codebase** | Canonical runtime, architecture documentation, reproducible builds, config system. |
-| **02** | **Secure the application** | Authentication, authorization (RBAC), sessions, secrets, network boundaries. |
-| **03** | **Protect business operations** | Approvals, validation, transactions, idempotency, and auditability. |
-| **04** | **Make data trustworthy** | Double-entry ledger, migrations, integrity constraints, backups, and recovery. |
-| **05** | **Build a reliable agent platform** | MCP permissions, tool contracts, execution tracking, and guardrails. |
-| **06** | **Finish product workflows** | Complete UI states, error handling, external integrations, and user management. |
-| **07** | **Test and observe everything** | Automated testing, CI/CD, structured logs, metrics, alerts, and security checks. |
-| **08** | **Deploy and operate** | Production infrastructure, incident response, restore drills, and release gates. |
-| **09** | **Launch readiness** | Threat modeling, penetration testing, compliance, SLA/SLO definition. |
+| **Profit & Loss (P&L)** | Operational performance over time period | Revenue $-$ COGS $=$ Gross Profit $-$ OPEX $=$ Net Profit |
+| **Balance Sheet** | Point-in-time financial position | Assets $=$ Liabilities $+$ Equity ($\sum \text{Debits} == \sum \text{Credits}$) |
+| **Cash Flow Statement** | Cash liquidity tracking | Operating Cashflow, Investing Cashflow, Financing Cashflow |
+| **Trial Balance** | Real-time general ledger debit/credit verification | Unadjusted and Adjusted Trial Balance per account |
+| **Aged Receivables (A/R)** | Overdue invoice aging breakdown | Current, 1–30 Days, 31–60 Days, 61–90 Days, 90+ Days |
+| **Inventory Valuation** | True value of on-hand inventory | FIFO / Weighted Average Cost $\times$ Available Stock |
+
+#### Checklist (6/6)
+- [ ] **Dynamic Financial Statement Generator**:
+  - Standardized financial reporting engine calculating real-time P&L, Balance Sheet, and Cash Flow over arbitrary date ranges (`/api/reports/pnl`, `/api/reports/balance-sheet`).
+- [ ] **Aged Accounts Receivable & Payable (A/R & A/P) Reports**:
+  - Visual aging buckets with drill-down links to delinquent customer invoices and upcoming supplier payment deadlines.
+- [ ] **Inventory Turnover & Stock Valuation Reports**:
+  - Calculate stock turnover ratios, days sales of inventory (DSI), and dead-stock alerts for SKUs with zero movement in > 90 days.
+- [ ] **Sales Velocity & Pipeline Analytics**:
+  - Win/loss ratios, average deal size, sales cycle duration, and rep conversion metrics.
+- [ ] **Universal CSV, Excel & PDF Export Engine**:
+  - Streamlined data export across all tables with column selection, date filtering, and clean spreadsheet formatting.
+- [ ] **Executive Dashboard & KPI Cards**:
+  - Real-time widgets on dashboard: Monthly Recurring Revenue (MRR), Gross Margin %, Cash Runway, Open Purchase Commitments, and Pending Approvals.
+
+> **Exit Gate:** Executives can generate standard P&L and Balance Sheet reports verified against double-entry ledger entries, export clean spreadsheets, and track real-time aging receivables.
 
 ---
 
-## Phase 1 — Stabilise the Codebase
+### Phase 8 — Autonomous MCP Agent Platform & Webhooks
 
-**Goal:** Establish one predictable application that every developer can build, test, and run.
+**Goal:** Turn MCP from a request/response toolset into a comprehensive autonomous agent orchestration platform.
 
-### Implementation Checklist (10/10)
-- [x] **Choose Go as canonical runtime**: Formally adopt Go as the single production runtime and deprecate or re-purpose `aosphere_server.py`.
-- [x] **Resolve runtime discrepancies**: Synchronize any features present in Python into Go, eliminating divergence.
-- [x] **Pin Go toolchain & dependencies**: Lock supported Go version (e.g. Go 1.22+ / 1.23) and ensure `go.mod` / `go.sum` reproducibility.
-- [x] **Define deployment targets & setup**: Document Windows, Linux, and macOS local development and production targets.
-- [x] **Document architecture**: Environment variables, database locations, API routes, and MCP transports (Stdio & SSE).
-- [x] **Unified configuration system**: Implement clean config management (flags + environment variables + defaults) for dev, test, and prod.
-- [x] **Separate demo/seed data**: Prevent production startup from reseeding demo records; provide explicit seed commands.
-- [x] **Consistent error handling & logging**: Add structured JSON logging (slog), unique request IDs, and `/healthz` / `/readyz` endpoints.
-- [x] **Versioned API contracts**: Define `/api/v1` routes and backwards-compatibility rules.
-- [x] **Coding standards & CI baseline**: Establish linters (`golangci-lint`), automated test pipelines, and PR checks.
+#### Checklist (7/7)
+- [ ] **Outbox-Driven Webhook Subscriptions for External Agents**:
+  - Allow external AI agents (Claude Desktop, custom agent daemons) to register webhook URLs to receive real-time business events (`po.created`, `invoice.overdue`, `deal.won`, `stock.low`).
+  - Webhooks include HMAC-SHA256 signature verification and automatic retry with exponential backoff.
+- [ ] **Per-Agent Execution Budgets & Rate Quotas**:
+  - Granular limits per API key: max tool calls per minute, max execution cost/tokens, and concurrent execution slot caps.
+  - Reject runaway agent tool loops with clear error code `-32029 (Rate Limit Exceeded)`.
+- [ ] **Human-Agent Handoff & Escalation Workflows**:
+  - When an agent encounters ambiguous inputs or negative sentiment reviews, automatically generate an approval/review ticket for human intervention.
+  - Seamless handoff comments and execution trace context visible in the UI Approval Drawer.
+- [ ] **Agent Execution Replay & Step Debugger**:
+  - Web UI viewer to inspect historical agent runs (`agent_executions` table): tool name, input arguments, execution duration, database mutations, and return payloads.
+- [ ] **Context Injection & Semantic Memory Scoping**:
+  - Automatically provide agents with pertinent context prompts (company profile, active currency, standard tax rate, supplier lead times) without polluting tool parameters.
+- [ ] **Dynamic MCP Tool Registry & Schema Introspection**:
+  - Programmatic introspection endpoint exposing tool definitions, JSON schemas, safety categories, and required RBAC permissions.
+- [ ] **Prompt Injection Defense & Input Sanitization**:
+  - Continuous validation on external strings (customer reviews, email replies, web listings) to neutralize prompt injection and jailbreak payloads before reaching agents.
 
-> **Exit Gate**: A new developer can clone the repository, configure it, run automated tests, and start the application using documented commands.
-
----
-
-## Phase 2 — Build Real Security
-
-**Goal:** Nobody can access business information or perform actions merely by knowing an endpoint or guessing an ID.
-
-### Security Checklist (13/13)
-- [x] Implement user registration, login, logout, account recovery, and secure session management.
-- [x] Choose an identity provider or implement reviewed authentication (avoid custom cryptography).
-- [x] Add role-based access control (RBAC) for Owner, Admin, Finance, Operations, HR, Employee, and Read-Only.
-- [x] Add multi-tenant / business-entity isolation to all records and database queries.
-- [x] Enforce permissions strictly in the backend, not just in UI presentation.
-- [x] Authenticate MCP clients and apply granular permissions per tool.
-- [x] Protect approvals, payroll, financial entries, and inventory movements with explicit high-impact permissions.
-- [x] Configure HTTPS/TLS, secure HTTP-only cookies, strict CORS, CSRF defense, and safe binding addresses.
-- [x] Validate all inputs: request size limits, rate limits, timeouts, and pagination controls.
-- [x] Store secrets in environment-specific secret stores; zero credentials in git.
-- [x] Implement secure password/passkey handling via standard hashing (Argon2id/bcrypt).
-- [x] Add account revocation, session expiration, suspicious-login alerts, and audit logging.
-- [x] Define privacy policies, data retention, export, and deletion workflows.
-
-> **Exit Gate**: Unauthenticated and unauthorised requests are rejected by the backend, and automated tests prove tenant isolation.
+> **Exit Gate:** External agents receive signed webhooks for business events, operate within strict rate and token budgets, and hand off edge cases to human operators with full audit context.
 
 ---
 
-## Phase 3 — Make Business Workflows Safe and Transactional
+### Phase 9 — Enterprise Multi-Tenancy, Auth & Compliance
 
-**Goal:** AOSphere must never report that an action succeeded when the actual business operation failed.
+**Goal:** Provide rock-solid enterprise multi-tenancy, authentication protocols, and regulatory compliance.
 
-### Action Execution Lifecycle
+#### Checklist (8/8)
+- [ ] **Multi-Company / Multi-Tenant Switching UI**:
+  - Top navigation tenant switcher allowing users with multi-org permissions to switch active business entities with zero data leakage.
+  - Strict tenant scoping on every SQL query (`WHERE org_id = ?`) and mutation verification.
+- [ ] **Self-Service User Invitation & Password Reset**:
+  - Tokenized email invite links for new employees with role pre-assignment.
+  - Secure cryptographic password reset flow with 15-minute token expiry.
+- [ ] **Two-Factor Authentication (2FA / TOTP)**:
+  - Standard RFC 6238 TOTP support (Google Authenticator, 1Password) with QR code setup and emergency recovery codes.
+- [ ] **OAuth2 / OIDC & SAML Single Sign-On (SSO)**:
+  - Support enterprise identity providers (Google Workspace, Microsoft Entra ID / Azure AD, Okta) for corporate login.
+- [ ] **Granular Custom Role Builder**:
+  - Beyond standard roles (Admin, Finance, HR), allow administrators to compose custom permission sets tailored to specific organizational workflows.
+- [ ] **Immutable Security Audit Vault**:
+  - Write-only audit log storage with SHA-256 chain hashing to detect any unauthorized database tampering.
+- [ ] **GDPR & Privacy Compliance Suite**:
+  - Automated "Export My Data" package generation and "Right to be Forgotten" account anonymization routines.
+- [ ] **SOC2 Type II Readiness Controls**:
+  - Automated session invalidation after inactivity (30 minutes), password complexity enforcement, and quarterly access review reports.
 
-```mermaid
-flowchart TD
-    A[User or agent requests action] --> B[Authenticate identity]
-    B --> C[Check role and business scope]
-    C --> D[Validate input and business rules]
-    D --> E{Human approval required?}
-    E -- Yes --> F[Persist pending approval]
-    F --> G[Authorised human reviews exact action]
-    G --> H{Approved?}
-    H -- No --> I[Record rejection]
-    H -- Yes --> J[Execute action idempotently]
-    E -- No --> J
-    J --> K{Execution succeeded?}
-    K -- Yes --> L[Commit state and audit event]
-    K -- No --> M[Record failure and recover state]
-    L --> N[Notify caller and publish event]
-    M --> N
-```
-
-### Workflow Checklist (16/16)
-- [x] Create a central application-service layer used identically by REST endpoints and MCP tools.
-- [x] Implement one central policy engine for financial thresholds, approvals, roles, and prohibited actions.
-- [x] Define deterministic state machines for purchase orders, invoices, deals, tasks, shifts, and approvals.
-- [x] Link every approval to the exact action, payload hash, entity, and version being approved.
-- [x] Implement explicit approval lifecycle states: `pending` → `approved`/`rejected` → `executing` → `completed`/`failed`.
-- [x] Ensure approval decisions are atomic and conditional on remaining in `pending` state.
-- [x] Add idempotency keys (`Idempotency-Key` header / parameter) to all write operations.
-- [x] Explicit handling for rejection, cancellation, and error paths without orphaned side effects.
-- [x] Calculate all PO totals, line items, discounts, and taxes strictly on the server.
-- [x] Validate referenced entities (supplier, customer, SKU, employee) before transaction commit.
-- [x] Prevent duplicate purchase orders and automatic reorders.
-- [x] Enforce database transactions (`BEGIN...COMMIT`) across all multi-record writes.
-- [x] Optimistic concurrency control (version checks) to prevent race conditions and lost updates.
-- [x] Bounded retry policies for transient errors without duplicate external side effects.
-- [x] Reconciliation background jobs detecting mismatched approvals, orders, and executions.
-- [x] Clear delineation between autonomous agent actions vs. actions requiring human confirmation.
-
-> **Exit Gate**: Every high-impact action has enforceable permissions, validated inputs, a defined state transition, durable audit trails, and a safe retry/failure path.
+> **Exit Gate:** Multi-company operators can switch organizations with a single click, 2FA/SSO protects all logins, and immutable audit logs guarantee tamper-evident compliance.
 
 ---
 
-## Phase 4 — Make Data and Financial Records Trustworthy
+### Phase 10 — Packaging, Distribution & Cloud Deployments
 
-**Goal:** The business database must remain correct under concurrent requests, crashes, and retries.
+**Goal:** Make deployment as simple as a single command while providing rock-solid disaster recovery and automated updates.
 
-### Data & Finance Checklist (16/16)
-- [x] Versioned database migrations with upgrade and rollback scripts (`internal/db/migration.go`).
-- [x] Enforce foreign keys, unique constraints, check constraints, and indexes.
-- [x] Tenant/business-entity ownership on every table (`org_id` scoped).
-- [x] Store money in integer minor units (cents math in `internal/finance/money.go`)—never binary floating point.
-- [x] Explicit currency codes, exchange rates, and half-up rounding rules.
-- [x] Configurable, effective-dated tax calculation rules.
-- [x] Proper double-entry general ledger with debits == credits invariant (`internal/ledger/ledger.go`).
-- [x] Chart of accounts, journal entries, posting rules, accounting periods, and reversals.
-- [x] Linked audit trails connecting invoices, payments, credit notes, and ledger entries.
-- [x] Sequential, collision-free invoice and PO numbering (`internal/finance/sequence.go`).
-- [x] Formal financial states: `draft`, `issued`, `paid`, `overdue`, `cancelled`, `reversed`.
-- [x] Inventory reservations, real-time available stock, movement logs, and physical counts.
-- [x] Atomic transactional outbox for event publishing (`outbox_events`).
-- [x] Automated, encrypted daily backups with point-in-time recovery (`internal/backup/backup.go`).
-- [x] Regular automated restore verification drills (`PRAGMA integrity_check`).
-- [x] Data-at-rest encryption and strict database connection boundaries.
+#### Checklist (8/8)
+- [ ] **Minimal Distroless / Scratch Docker Container**:
+  - Multi-stage Dockerfile producing a tiny (< 25MB), zero-dependency, non-root Linux container.
+- [ ] **Docker Compose Production Bundle**:
+  - Ready-to-deploy `docker-compose.yml` incorporating Caddy (automatic Let's Encrypt TLS reverse proxy), AO Sphere monolith, and automated backup sidecar.
+- [ ] **One-Click Cloud Deployments**:
+  - Deployment templates for Railway, Fly.io, Render, and Hetzner cloud-init scripts.
+- [ ] **Kubernetes Helm Chart**:
+  - Production Helm chart with StatefulSet/PersistentVolumeClaim for SQLite WAL storage, HorizontalPodAutoscaler, and Ingress routing.
+- [ ] **Automated Encrypted Cloud Backups**:
+  - Native S3/R2 backup integration: scheduled daily encrypted database snapshots uploaded directly to customer cloud storage.
+- [ ] **Zero-Downtime Rolling Update & Migration Strategy**:
+  - Automated schema migration on container boot inside an idempotent serialized transaction.
+- [ ] **Health Monitoring & Auto-Restart Runbooks**:
+  - Integrated Prometheus `/metrics` and health endpoints (`/healthz`, `/readyz`) hooked into container restart policies.
+- [ ] **Native CLI Binary Distribution**:
+  - GitHub Releases publishing cross-compiled static binaries for Linux (amd64, arm64), macOS (Apple Silicon, Intel), and Windows.
 
-> **Exit Gate**: All money is represented in integer cents; every financial event posts a balanced double-entry journal entry ($\sum \text{Debits} == \sum \text{Credits}$); sequential IDs never collide; backups are taken online and verified without human intervention.
-
----
-
-## Phase 5 — Turn MCP into a Reliable Agent Platform
-
-**Goal:** Agents should be capable of useful work without being able to bypass the BOS's business rules.
-
-### Agent Platform Checklist (15/15)
-- [x] Comprehensive MCP registry detailing tools, resources, prompts, permissions, and side effects (`internal/mcp/registry.go`).
-- [x] Strongly typed JSON schemas for all tool inputs and outputs.
-- [x] Route all agent tool calls directly through the core application services (`WorkflowService`).
-- [x] Per-tool and per-entity permission enforcement.
-- [x] Clear categorization: Read-only, Reversible mutations, High-impact mutations.
-- [x] Durable execution IDs, idempotency keys, execution deadlines (30s context timeout), and cancellation tokens.
-- [x] Persistent agent run history: tool inputs, results, execution duration, and error traces (`agent_executions` table).
-- [x] Treat all external inputs (reviews, emails, web content) as untrusted; guard against prompt injection (`SanitizePromptInput`).
-- [x] Enforce factual validation; prevent hallucinated IDs or fabricated financial amounts.
-- [x] Context isolation: prevent agents from accessing keys or cross-tenant records via arguments.
-- [x] Rate limits, token/cost budgets, and concurrency controls for agent actions (`internal/mcp/ratelimit.go`).
-- [x] Approval escalation, timeouts, human handoff, and an emergency global kill switch (`internal/mcp/guard.go`, `/api/admin/kill-switch`).
-- [x] Reliable event streaming with reconnect buffers and message replay (`Last-Event-ID` outbox replay in `/api/events`).
-- [x] Versioned MCP tool contracts with integration tests (`internal/mcp/server_test.go`).
-- [x] Automated adversarial testing suite simulating rogue agent tool executions (`internal/mcp/adversarial_test.go`).
-
-> **Exit Gate**: Agents cannot bypass business rules or permissions applied to humans; all agent actions are traceable, stoppable, and safe to retry.
+> **Exit Gate:** A business can deploy AO Sphere to a production server with automatic HTTPS in under 3 minutes using `docker compose up -d` or run a standalone native binary.
 
 ---
 
-## Phase 6 — Finish the Actual Business Product
-
-**Goal:** Deliver full business lifecycles across core modules, not merely basic CRUD tables.
-
-### Product Completeness Checklist (15/15)
-- [x] Organization onboarding, company profile, and initial setup wizard (`company_profiles` table, `service.GetCompanyProfile`, `/api/organization`).
-- [x] Team management, invitations, departments, and granular employee access (`internal/store/store.go` CreateEmployee, `/api/employees` POST with `manage_hr` RBAC).
-- [x] ERP Lifecycles: PO creation → Supplier approval → Goods receipt → Supplier invoice → Payment (`service.PayPurchaseOrder`, debit AP / credit Cash ledger posting).
-- [x] CRM Lifecycles: Lead capture → Deal stages → Quote generation → Order conversion → Invoicing (`service.GenerateQuote`, `service.ConvertDealToInvoice`, `crm_convert_deal` MCP tool).
-- [x] Finance Lifecycles: Invoicing → Delivery → Payment capture → Bank reconciliation → Reporting (Double-entry ledger, P&L, trial balance, `/api/invoices/pay`, `/api/purchase-orders/pay`).
-- [x] HR Lifecycles: Attendance, time-off requests, manager approvals, timesheets, payroll lock (`service.ApproveTimesheet`, `service.LockPayroll`, `hr_lock_payroll` MCP tool).
-- [x] Task Management: Assignment, priorities, dependencies, audit logs, completion sign-off (`/api/tasks`, `/api/tasks/status`, `audit_logs`).
-- [x] Document repository: Access controls, version tracking, and retention rules (`service.ListDocuments`, `service.CreateDocument`, `service.DeleteDocument`, `/api/documents`).
-- [x] Global search across records with permission-aware filtering and CSV/PDF export (`service.GlobalSearch`, `/api/search`, `service.ExportCSV`, `/api/export`).
-- [x] Notification engine: In-app badges, email/webhook alerts, and notification preferences (`notifications` table, `service.ListNotifications`, `/api/notifications`).
-- [x] Complete UI states: Loading skeletons, empty states, validation errors, conflict dialogs (`web/index.html`, `web/js/app.js`).
-- [x] Full accessibility (WCAG 2.1 AA compliant keyboard navigation and semantic HTML).
-- [x] Activity timelines and business-level audit log viewers in the UI (`web/js/app.js` timeline and `/api/audit-logs`).
-- [x] Verified external integrations with real provider credentials and error handling (`local_listings` NAP synchronization, MCP SSE transport).
-- [x] Localization: Multi-currency, time zones, date formats, and regional tax settings (`company_profiles` currency, timezone, tax_rate).
-
-
----
-
-## Phase 7 — Build a Complete Automated Testing System
-
-**Goal:** Changes must never silently break business policies or previously working workflows.
-
-### Regression Scenarios Matrix
-
-| Scenario | Required Invariant / Outcome |
-| :--- | :--- |
-| High-value PO created by Agent | Remains in `pending` state until authorized human approves |
-| Concurrent approvals on same PO | Exactly one approval commits; second receives conflict error |
-| Incorrect math / tax submitted | Server rejects request before writing to database |
-| Network retry on invoice generation | Idempotency key prevents duplicate invoice and double billing |
-| Inventory reorder threshold reached | Exactly one active reorder created; subsequent triggers de-duplicated |
-| Cross-tenant ID query or mutation | Returns HTTP 403 / 404; zero data leaked |
-| DB write fails during multi-step operation | Full transaction rollback; zero orphaned records |
-| External webhook / API timeout | Graceful retry via outbox; operation marked pending, not failed |
-| Malicious input in review / note | Sanitized or encoded; zero XSS execution |
-| Prompt injection in input text | Sanitized; agent tools reject unauthorized operations |
-
-### Testing Checklist (15/15)
-- [x] Unit tests for business calculations, state transitions, and tax/accounting policies (`internal/finance`, `internal/ledger`, `internal/service`).
-- [x] Repository tests using isolated SQLite in-memory or temporary databases (`internal/store/store_test.go`, `internal/db/schema_test.go`).
-- [x] REST API integration tests covering status codes, validation, and permissions (`internal/api/api_test.go`, `internal/api/workflow_test.go`).
-- [x] MCP protocol tests validating JSON-RPC schemas, tools, and error payloads (`internal/mcp/server_test.go`).
-- [x] Full end-to-end workflow integration tests (`test/e2e/e2e_test.go`).
-- [x] Concurrency and race condition testing (`test/concurrency/race_test.go` with `-race`).
-- [x] Invariant property tests (accounting debits=credits balance, inventory conservation in `test/concurrency/race_test.go`).
-- [x] Security testing: Injection, auth bypass, tenant leakage, parameter tampering (`internal/auth`, `internal/mcp`).
-- [x] Database migration rollback and upgrade validation tests (`internal/db/migration_test.go`).
-- [x] Automated backup restore verification tests (`internal/backup/backup_test.go`).
-- [x] Deterministic testing clock and reproducible test seed fixtures (`db.SeedStarterData`).
-- [x] Performance benchmarks and load tests under concurrent SSE and API traffic (`test/benchmarks/benchmark_test.go`).
-- [x] CI pipeline (`.github/workflows/ci.yml`) running lint, build, test with coverage.
-- [x] Branch protection rules requiring CI pass and PR reviews on `main`.
-- [x] Staging automated smoke test suite (`test/smoke/smoke_test.go`).
-
----
-
-## Phase 8 — Production Infrastructure, Monitoring & Operations
-
-### Production Architecture
-
-```mermaid
-flowchart TD
-    Client["Browser and authorised MCP clients"] --> Ingress["HTTPS ingress"]
-    Ingress --> Auth["Authentication and access control"]
-    Auth --> Adapters["Go REST and MCP adapters"]
-    Adapters --> Services["Shared application services"]
-    Services --> Policy["Policy and approval engine"]
-    Services --> DB[("Transactional database")]
-    Services --> Outbox[("Transactional outbox")]
-    Outbox --> Workers["Background workers"]
-    Workers --> ExtAPIs["External provider APIs"]
-    Services --> Audit[("Audit and execution history")]
-    Services --> Obs["Logs, metrics and tracing"]
-    DB --> Backups["Encrypted backups"]
-```
-
-### Operations Checklist (16/16)
-- [x] Environment separation: Development, Staging, and Production configs (`config/config.dev.yaml`, `config/config.staging.yaml`, `config/config.prod.yaml`).
-- [x] Pinned CI/CD release builds and container packaging (minimal scratch/distroless Dockerfile, `.dockerignore`).
-- [x] Reverse proxy (Caddy / Nginx / Traefik) handling TLS termination and security headers (`deploy/Caddyfile`, `deploy/nginx.conf`, `deploy/docker-compose.yml`).
-- [x] SQLite WAL optimization: checkpoints, connection pooling (`MaxOpenConns(1)` for writes), monitoring (`internal/db/schema.go`, `main.go`).
-- [x] Standardized liveness (`/healthz`) and readiness (`/readyz`) health checks (`internal/api/health.go`).
-- [x] Structured JSON logging with trace/request IDs and secret sanitization (`internal/api/middleware.go`).
-- [x] Prometheus metrics endpoint (`/metrics`): request latencies, error counts, DB stats (`internal/metrics/metrics.go`).
-- [x] Business metrics: pending approvals, agent tool failures, failed outbox jobs (`internal/metrics/metrics.go`, `internal/api/api.go`, `internal/mcp/server.go`).
-- [x] Alerting rules and escalation procedures (`deploy/alerts.yaml`).
-- [x] Durable background worker queue with exponential backoff and dead-letter queues (`internal/service/outbox_worker.go`).
-- [x] Graceful process shutdown handling `SIGTERM` / `SIGINT` (`main.go`).
-- [x] Automated container and vulnerability scanning (Govulncheck / Dependabot in `.github/workflows/ci.yml`, `.github/dependabot.yml`).
-- [x] Zero-downtime database migration strategy (`docs/disaster-recovery.md`).
-- [x] Disaster recovery playbook with target RTO (< 1 hour) and RPO (< 15 minutes) (`docs/disaster-recovery.md`).
-- [x] Load and endurance testing (`test/benchmarks/benchmark_test.go`).
-- [x] Formal incident postmortem and runbook documentation (`docs/runbook.md`).
-
----
-
-## Phase 9 — Launch Readiness & Governance
-
-### Launch Checklist (14/14)
-- [x] Production support on-call schedule and operational ownership (`docs/governance.md`).
-- [x] Completed threat model and architecture security assessment (`docs/threat-model.md`).
-- [x] Third-party penetration testing (`internal/mcp/adversarial_test.go`, `internal/auth/auth_test.go`).
-- [x] Legal compliance review (GDPR, SOC2 readiness, regional tax rules in `docs/legal.md`).
-- [x] Terms of Service and Privacy Policy documentation (`docs/legal.md`).
-- [x] Customer support channels and escalation paths (`docs/governance.md`).
-- [x] Phased customer pilot with non-critical business workflows (`docs/governance.md`).
-- [x] Business record audit vs. physical financial reconciliation (`docs/legal.md`).
-- [x] Defined SLOs (99.9% availability, p95 latency < 200ms in `docs/governance.md`).
-- [x] Public status page (`/healthz`, `/readyz`, `/metrics` integrations in `deploy/alerts.yaml`).
-- [x] Tiered usage quotas and rate limits (`internal/mcp/server.go`, `docs/governance.md`).
-- [x] Automated monthly patch schedule (`docs/governance.md`, `.github/dependabot.yml`).
-- [x] Agent behavior and failure retrospective framework (`docs/governance.md`).
-- [x] API and MCP deprecation and versioning policies (`docs/governance.md`).
-
----
-
-## Recommended Sprint Breakdown
+## 5. Implementation Roadmap Matrix
 
 ```
-Sprint 1: Stability   ──> Canonical Go runtime, configuration, health checks, baseline CI
-Sprint 2: Security    ──> Auth, RBAC, tenant isolation, secure sessions, input sanitization
-Sprint 3: Integrity   ──> Service layer, policy engine, approvals, idempotency, transactions
-Sprint 4: Data        ──> Migrations, double-entry ledger, inventory constraints, backups
-Sprint 5: Reliability ──> MCP tool contracts, durable jobs, agent execution logging, guardrails
-Sprint 6: Release     ──> Product workflows, automated regression tests, deployment setup
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                             AO SPHERE MASTER ROADMAP                             │
+├─────────┬───────────────────────────────────────┬────────────┬───────────────────┤
+│ Phase   │ Focus Domain                          │ Priority   │ Target Outcome    │
+├─────────┼───────────────────────────────────────┼────────────┼───────────────────┤
+│ Phase 01│ Immediate UX & Bug Hardening          │ Urgent     │ Zero browser bugs │
+│ Phase 02│ Human-Direct Operations (Full CRUD)   │ High       │ Dual-first parity │
+│ Phase 03│ 3-Way Matching & Multi-Warehouse ERP  │ Critical   │ Enterprise supply │
+│ Phase 04│ Invoicing, PDF, Stripe & General GL   │ Critical   │ Complete finance  │
+│ Phase 05│ Customer 360, CRM & Communications   │ High       │ Omni-channel sales│
+│ Phase 06│ HR Roster, Timesheets & Payroll       │ Medium     │ Unified workforce │
+│ Phase 07│ Financial Statements & Analytics      │ High       │ Executive insights│
+│ Phase 08│ Autonomous Agent Platform & Webhooks  │ Critical   │ True AI autonomy  │
+│ Phase 09│ Multi-Tenancy, 2FA/SSO & Compliance   │ High       │ Enterprise-ready  │
+│ Phase 10│ Packaging, Docker & Cloud Deployments │ High       │ 1-click launch    │
+└─────────┴───────────────────────────────────────┴────────────┴───────────────────┘
 ```
+
+---
+
+## 6. Next Immediate Steps (Sprint Execution)
+
+To immediately resolve the gaps identified during browser testing, development should proceed in the following sprint order:
+
+1. **Sprint 1 (Phase 1 Fixes)**:
+   - Add `.theme-dark` CSS variable overrides in `web/css/style.css` so Dark Mode actually transforms the UI.
+   - Inject session token in `web/js/app.js` `executeManualToolCall()` to eliminate the 401 Unauthorized agent drawer error.
+   - Add responsive `@media` drawer to collapse sidebar on screens $< 768px$.
+   - Replace `loadAllData()` waterfall with granular entity reload.
+   - Add `<label for="...">` associations to all modal forms.
+2. **Sprint 2 (Phase 2 Full CRUD)**:
+   - Implement the interactive multi-line item invoice builder and quote-to-invoice UI button.
+   - Add SKU creation modal and direct PO generation form.
+3. **Sprint 3 (Phase 3 & 4 Core Invariants)**:
+   - Implement Goods Receipt Notes (GRN) and 3-way matching in `service` and `store`.
+   - Implement native PDF rendering for Invoices and Purchase Orders.

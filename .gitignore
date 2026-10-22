@@ -10,11 +10,13 @@ aosphere
 data/*.db
 data/*.db-shm
 data/*.db-wal
+data/*.bak
 data/tmp/
 data/backups/
 *.db
 *.db-shm
 *.db-wal
+*.bak
 
 # OS and Editor files
 .DS_Store
