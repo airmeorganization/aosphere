@@ -465,6 +465,250 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 		writeJSON(w, po)
 	})
 
+	// SUPPLY CHAIN & MULTI-WAREHOUSE
+	mux.HandleFunc("/api/warehouses", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			authCtx, ok := a.requireAuth(w, r, auth.PermManageInventory)
+			if !ok {
+				return
+			}
+			var req struct {
+				Name    string `json:"name"`
+				Code    string `json:"code"`
+				Address string `json:"address"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.Code) == "" {
+				http.Error(w, "name and code are required", http.StatusBadRequest)
+				return
+			}
+			actorType := "human"
+			if authCtx.IsAPIKey {
+				actorType = "agent"
+			}
+			wh, err := a.store.CreateWarehouseForOrg(authCtx.OrgID, req.Name, req.Code, req.Address, actorType, authCtx.UserID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			a.BroadcastForOrg(authCtx.OrgID, "warehouse_created", fmt.Sprintf("{\"id\":\"%s\",\"code\":\"%s\"}", wh.ID, wh.Code))
+			w.WriteHeader(http.StatusCreated)
+			writeJSON(w, wh)
+			return
+		}
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		whs, err := a.store.GetWarehousesForOrg(authCtx.OrgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, whs)
+	})
+
+	mux.HandleFunc("/api/warehouse-stocks", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		stocks, err := a.store.GetWarehouseStocksForOrg(authCtx.OrgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, stocks)
+	})
+
+	mux.HandleFunc("/api/grns", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			authCtx, ok := a.requireAuth(w, r, auth.PermManageInventory)
+			if !ok {
+				return
+			}
+			var req service.ReceiveGRNRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			idempKey := r.Header.Get("Idempotency-Key")
+			res, err := a.service.ReceiveGoodsReceiptNote(r.Context(), authCtx.OrgID, req, authCtx, idempKey)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			a.BroadcastForOrg(authCtx.OrgID, "grn_received", fmt.Sprintf("{\"grn_number\":\"%s\",\"po_number\":\"%s\"}", res.GRN.GRNNumber, res.PurchaseOrder.PONumber))
+			w.WriteHeader(http.StatusCreated)
+			writeJSON(w, res)
+			return
+		}
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		grns, err := a.store.GetGRNsForOrg(authCtx.OrgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, grns)
+	})
+
+	mux.HandleFunc("/api/supplier-bills", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			authCtx, ok := a.requireAuth(w, r, auth.PermManageFinance)
+			if !ok {
+				return
+			}
+			var req struct {
+				SupplierID string  `json:"supplier_id"`
+				POID       string  `json:"po_id"`
+				Amount     float64 `json:"amount"`
+				ItemsJSON  string  `json:"items_json"`
+				Notes      string  `json:"notes"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if req.SupplierID == "" || req.Amount <= 0 {
+				http.Error(w, "supplier_id and positive amount are required", http.StatusBadRequest)
+				return
+			}
+			actorType := "human"
+			if authCtx.IsAPIKey {
+				actorType = "agent"
+			}
+			bill, err := a.store.CreateSupplierBillForOrg(authCtx.OrgID, req.SupplierID, req.POID, req.Amount, req.ItemsJSON, req.Notes, actorType, authCtx.UserID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			a.BroadcastForOrg(authCtx.OrgID, "supplier_bill_created", fmt.Sprintf("{\"bill_number\":\"%s\"}", bill.BillNumber))
+			w.WriteHeader(http.StatusCreated)
+			writeJSON(w, bill)
+			return
+		}
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		bills, err := a.store.GetSupplierBillsForOrg(authCtx.OrgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, bills)
+	})
+
+	mux.HandleFunc("/api/supplier-bills/match", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		authCtx, ok := a.requireAuth(w, r, auth.PermManageFinance)
+		if !ok {
+			return
+		}
+		var req struct {
+			BillID string `json:"bill_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		res, err := a.service.PerformThreeWayMatch(r.Context(), authCtx.OrgID, req.BillID, authCtx)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		a.BroadcastForOrg(authCtx.OrgID, "bill_matched", fmt.Sprintf("{\"bill_id\":\"%s\",\"status\":\"%s\"}", req.BillID, res.Status))
+		writeJSON(w, res)
+	})
+
+	mux.HandleFunc("/api/stock-transfers", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			authCtx, ok := a.requireAuth(w, r, auth.PermManageInventory)
+			if !ok {
+				return
+			}
+			var req service.CreateStockTransferRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			xfer, err := a.service.TransferStock(r.Context(), authCtx.OrgID, req, authCtx)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			a.BroadcastForOrg(authCtx.OrgID, "stock_transferred", fmt.Sprintf("{\"transfer_number\":\"%s\"}", xfer.TransferNumber))
+			w.WriteHeader(http.StatusCreated)
+			writeJSON(w, xfer)
+			return
+		}
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		xfers, err := a.store.GetStockTransfersForOrg(authCtx.OrgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, xfers)
+	})
+
+	mux.HandleFunc("/api/batch-lots", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			authCtx, ok := a.requireAuth(w, r, auth.PermManageInventory)
+			if !ok {
+				return
+			}
+			var req struct {
+				SKUID       string `json:"sku_id"`
+				BatchNumber string `json:"batch_number"`
+				ExpiryDate  string `json:"expiry_date"`
+				Quantity    int    `json:"quantity"`
+				WarehouseID string `json:"warehouse_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if req.SKUID == "" || req.BatchNumber == "" || req.Quantity <= 0 {
+				http.Error(w, "sku_id, batch_number, and quantity > 0 are required", http.StatusBadRequest)
+				return
+			}
+			actorType := "human"
+			if authCtx.IsAPIKey {
+				actorType = "agent"
+			}
+			lot, err := a.store.CreateBatchLotForOrg(authCtx.OrgID, req.SKUID, req.BatchNumber, req.ExpiryDate, req.Quantity, req.WarehouseID, actorType, authCtx.UserID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			writeJSON(w, lot)
+			return
+		}
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		lots, err := a.store.GetBatchLotsForOrg(authCtx.OrgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, lots)
+	})
+
 	// CRM
 	mux.HandleFunc("/api/customers", func(w http.ResponseWriter, r *http.Request) {
 		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
@@ -755,12 +999,21 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			emp, err := a.store.CreateEmployee(authCtx.OrgID, req.Name, req.Role, req.Department, req.Email, req.Phone, req.HourlyRate)
+			if strings.TrimSpace(req.Name) == "" {
+				http.Error(w, "name is required", http.StatusBadRequest)
+				return
+			}
+			actorType := "human"
+			if authCtx.IsAPIKey {
+				actorType = "agent"
+			}
+			emp, err := a.store.CreateEmployeeForOrg(authCtx.OrgID, req.Name, req.Role, req.Department, req.Email, req.Phone, req.HourlyRate, actorType, authCtx.UserID)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 			a.BroadcastForOrg(authCtx.OrgID, "employee_added", fmt.Sprintf("{\"id\":\"%s\",\"name\":\"%s\"}", emp.ID, emp.Name))
+			w.WriteHeader(http.StatusCreated)
 			writeJSON(w, emp)
 			return
 		}
@@ -839,6 +1092,41 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("/api/shifts", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			authCtx, ok := a.requireAuth(w, r, auth.PermManageHR)
+			if !ok {
+				return
+			}
+			var req struct {
+				EmployeeID string `json:"employee_id"`
+				ShiftDate  string `json:"shift_date"`
+				StartTime  string `json:"start_time"`
+				EndTime    string `json:"end_time"`
+				Station    string `json:"station"`
+				Status     string `json:"status"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if strings.TrimSpace(req.ShiftDate) == "" {
+				http.Error(w, "shift_date is required", http.StatusBadRequest)
+				return
+			}
+			actorType := "human"
+			if authCtx.IsAPIKey {
+				actorType = "agent"
+			}
+			shf, err := a.store.CreateShiftForOrg(authCtx.OrgID, req.EmployeeID, req.ShiftDate, req.StartTime, req.EndTime, req.Station, req.Status, actorType, authCtx.UserID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			a.BroadcastForOrg(authCtx.OrgID, "shift_created", fmt.Sprintf("{\"id\":\"%s\",\"shift_date\":\"%s\"}", shf.ID, shf.ShiftDate))
+			w.WriteHeader(http.StatusCreated)
+			writeJSON(w, shf)
+			return
+		}
 		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
 		if !ok {
 			return
@@ -881,6 +1169,42 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	})
 
 	mux.HandleFunc("/api/tasks", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+			if !ok {
+				return
+			}
+			var req struct {
+				Title       string `json:"title"`
+				Description string `json:"description"`
+				ProjectName string `json:"project_name"`
+				AssigneeID  string `json:"assignee_id"`
+				Priority    string `json:"priority"`
+				Status      string `json:"status"`
+				DueDate     string `json:"due_date"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if strings.TrimSpace(req.Title) == "" {
+				http.Error(w, "title is required", http.StatusBadRequest)
+				return
+			}
+			actorType := "human"
+			if authCtx.IsAPIKey {
+				actorType = "agent"
+			}
+			tsk, err := a.store.CreateTaskForOrg(authCtx.OrgID, req.Title, req.Description, req.ProjectName, req.AssigneeID, req.Priority, req.DueDate, req.Status, actorType, authCtx.UserID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			a.BroadcastForOrg(authCtx.OrgID, "task_created", fmt.Sprintf("{\"id\":\"%s\",\"title\":\"%s\"}", tsk.ID, tsk.Title))
+			w.WriteHeader(http.StatusCreated)
+			writeJSON(w, tsk)
+			return
+		}
 		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
 		if !ok {
 			return

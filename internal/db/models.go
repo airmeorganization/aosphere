@@ -292,3 +292,91 @@ type Timesheet struct {
 	CreatedAt     time.Time `json:"created_at"`
 }
 
+// ----------------- SUPPLY CHAIN & MULTI-WAREHOUSE MODELS -----------------
+
+type Warehouse struct {
+	ID        string    `json:"id"`
+	OrgID     string    `json:"org_id"`
+	Name      string    `json:"name"`
+	Code      string    `json:"code"`
+	Address   string    `json:"address"`
+	IsActive  bool      `json:"is_active"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type WarehouseStock struct {
+	ID               string    `json:"id"`
+	OrgID            string    `json:"org_id"`
+	WarehouseID      string    `json:"warehouse_id"`
+	WarehouseName    string    `json:"warehouse_name,omitempty"`
+	WarehouseCode    string    `json:"warehouse_code,omitempty"`
+	SKUID            string    `json:"sku_id"`
+	SKUCode          string    `json:"sku_code,omitempty"`
+	SKUName          string    `json:"sku_name,omitempty"`
+	StockQuantity    int       `json:"stock_quantity"`
+	ReservedQuantity int       `json:"reserved_quantity"`
+	BinLocation      string    `json:"bin_location"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+type GoodsReceiptNote struct {
+	ID            string    `json:"id"`
+	OrgID         string    `json:"org_id"`
+	GRNNumber     string    `json:"grn_number"`
+	POID          string    `json:"po_id"`
+	PONumber      string    `json:"po_number,omitempty"`
+	WarehouseID   string    `json:"warehouse_id"`
+	WarehouseName string    `json:"warehouse_name,omitempty"`
+	ReceivedBy    string    `json:"received_by"`
+	Status        string    `json:"status"` // completed, cancelled
+	ItemsJSON     string    `json:"items_json"`
+	Notes         string    `json:"notes"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+type SupplierBill struct {
+	ID           string    `json:"id"`
+	OrgID        string    `json:"org_id"`
+	BillNumber   string    `json:"bill_number"`
+	SupplierID   string    `json:"supplier_id"`
+	SupplierName string    `json:"supplier_name,omitempty"`
+	POID         string    `json:"po_id"`
+	PONumber     string    `json:"po_number,omitempty"`
+	Amount       float64   `json:"amount"`
+	Status       string    `json:"status"`       // open, paid, void
+	MatchStatus  string    `json:"match_status"` // pending, matched, discrepancy_price, discrepancy_qty, unreceived
+	ItemsJSON    string    `json:"items_json"`
+	Notes        string    `json:"notes"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+type StockTransfer struct {
+	ID                string    `json:"id"`
+	OrgID             string    `json:"org_id"`
+	TransferNumber    string    `json:"transfer_number"`
+	FromWarehouseID   string    `json:"from_warehouse_id"`
+	FromWarehouseName string    `json:"from_warehouse_name,omitempty"`
+	ToWarehouseID     string    `json:"to_warehouse_id"`
+	ToWarehouseName   string    `json:"to_warehouse_name,omitempty"`
+	Status            string    `json:"status"` // completed, in_transit, cancelled
+	ItemsJSON         string    `json:"items_json"`
+	Notes             string    `json:"notes"`
+	CreatedBy         string    `json:"created_by"`
+	CreatedAt         time.Time `json:"created_at"`
+}
+
+type BatchLot struct {
+	ID            string    `json:"id"`
+	OrgID         string    `json:"org_id"`
+	SKUID         string    `json:"sku_id"`
+	SKUCode       string    `json:"sku_code,omitempty"`
+	SKUName       string    `json:"sku_name,omitempty"`
+	BatchNumber   string    `json:"batch_number"`
+	ExpiryDate    string    `json:"expiry_date"`
+	Quantity      int       `json:"quantity"`
+	WarehouseID   string    `json:"warehouse_id"`
+	WarehouseName string    `json:"warehouse_name,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+

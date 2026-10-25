@@ -5,12 +5,21 @@
 
 const app = {
   activeTab: 'dashboard',
+  activeERPSubTab: 'skus',
+  activeFinanceSubTab: 'invoices',
   drawerTab: 'stream',
   theme: 'light',
   apiKey: localStorage.getItem('aosphere_api_key') || 'ao_sk_agent_default_token_12345',
   data: {
     skus: [],
     suppliers: [],
+    purchaseOrders: [],
+    warehouses: [],
+    warehouseStocks: [],
+    grns: [],
+    supplierBills: [],
+    stockTransfers: [],
+    batchLots: [],
     deals: [],
     invoices: [],
     expenses: [],
@@ -119,21 +128,28 @@ const app = {
       };
 
       const eventEntityMap = {
-        stock_updated: ['skus', 'summary'],
+        stock_updated: ['skus', 'summary', 'warehouseStocks'],
         sku_created: ['skus'],
-        po_created: ['skus', 'approvals', 'summary'],
-        po_received: ['skus', 'summary'],
-        po_paid: ['summary'],
+        po_created: ['skus', 'purchaseOrders', 'approvals', 'summary'],
+        po_received: ['skus', 'purchaseOrders', 'summary', 'warehouseStocks'],
+        po_paid: ['purchaseOrders', 'summary'],
         deal_created: ['deals', 'summary'],
         deal_stage_changed: ['deals', 'summary'],
         deal_converted: ['deals', 'invoices', 'summary'],
         quote_generated: ['deals'],
         invoice_created: ['invoices', 'summary'],
         shift_updated: ['shifts'],
+        shift_created: ['shifts'],
         task_updated: ['tasks'],
+        task_created: ['tasks'],
+        employee_created: ['employees'],
+        grn_received: ['grns', 'warehouseStocks', 'skus', 'purchaseOrders', 'summary'],
+        stock_transferred: ['warehouseStocks', 'stockTransfers', 'skus'],
+        supplier_bill_created: ['supplierBills', 'summary'],
+        three_way_matched: ['supplierBills', 'approvals', 'summary'],
         nap_synced: ['listings'],
         review_replied: ['reviews'],
-        approval_decided: ['approvals', 'skus'],
+        approval_decided: ['approvals', 'skus', 'purchaseOrders', 'supplierBills'],
         approval_required: ['approvals']
       };
 
@@ -157,6 +173,13 @@ const app = {
     const endpoints = {
       skus: '/api/skus',
       suppliers: '/api/suppliers',
+      purchaseOrders: '/api/purchase-orders',
+      warehouses: '/api/warehouses',
+      warehouseStocks: '/api/warehouse-stocks',
+      grns: '/api/grns',
+      supplierBills: '/api/supplier-bills',
+      stockTransfers: '/api/stock-transfers',
+      batchLots: '/api/batch-lots',
       deals: '/api/deals',
       invoices: '/api/invoices',
       summary: '/api/financial-summary',
@@ -185,9 +208,36 @@ const app = {
   // ---------------- Full Data Loading (Boot) ----------------
   async loadAllData() {
     try {
-      const [skus, suppliers, deals, invoices, summary, employees, shifts, tasks, listings, reviews, approvals, auditLogs] = await Promise.all([
+      const [
+        skus,
+        suppliers,
+        purchaseOrders,
+        warehouses,
+        warehouseStocks,
+        grns,
+        supplierBills,
+        stockTransfers,
+        batchLots,
+        deals,
+        invoices,
+        summary,
+        employees,
+        shifts,
+        tasks,
+        listings,
+        reviews,
+        approvals,
+        auditLogs
+      ] = await Promise.all([
         fetch('/api/skus').then(r => r.json()).catch(() => []),
         fetch('/api/suppliers').then(r => r.json()).catch(() => []),
+        fetch('/api/purchase-orders').then(r => r.json()).catch(() => []),
+        fetch('/api/warehouses').then(r => r.json()).catch(() => []),
+        fetch('/api/warehouse-stocks').then(r => r.json()).catch(() => []),
+        fetch('/api/grns').then(r => r.json()).catch(() => []),
+        fetch('/api/supplier-bills').then(r => r.json()).catch(() => []),
+        fetch('/api/stock-transfers').then(r => r.json()).catch(() => []),
+        fetch('/api/batch-lots').then(r => r.json()).catch(() => []),
         fetch('/api/deals').then(r => r.json()).catch(() => []),
         fetch('/api/invoices').then(r => r.json()).catch(() => []),
         fetch('/api/financial-summary').then(r => r.json()).catch(() => null),
@@ -202,6 +252,13 @@ const app = {
 
       this.data.skus = skus;
       this.data.suppliers = suppliers;
+      this.data.purchaseOrders = purchaseOrders;
+      this.data.warehouses = warehouses;
+      this.data.warehouseStocks = warehouseStocks;
+      this.data.grns = grns;
+      this.data.supplierBills = supplierBills;
+      this.data.stockTransfers = stockTransfers;
+      this.data.batchLots = batchLots;
       this.data.deals = deals;
       this.data.invoices = invoices;
       this.data.summary = summary;
@@ -220,6 +277,41 @@ const app = {
     } catch (err) {
       console.error('Error loading platform data:', err);
     }
+  },
+
+  // ---------------- Sub-Tab & Filter Utilities ----------------
+  setERPSubTab(subTab) {
+    this.activeERPSubTab = subTab;
+    this.render();
+  },
+
+  setFinanceSubTab(subTab) {
+    this.activeFinanceSubTab = subTab;
+    this.render();
+  },
+
+  filterTable(tableId, query) {
+    const q = (query || '').toLowerCase().trim();
+    const table = document.getElementById(tableId);
+    if (!table) return;
+    const tbody = table.querySelector('tbody');
+    if (!tbody) return;
+    const rows = tbody.querySelectorAll('tr');
+    rows.forEach(r => {
+      const text = r.textContent.toLowerCase();
+      r.style.display = text.includes(q) ? '' : 'none';
+    });
+  },
+
+  filterCards(containerId, cardClass, query) {
+    const q = (query || '').toLowerCase().trim();
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    const cards = container.querySelectorAll('.' + cardClass);
+    cards.forEach(c => {
+      const text = c.textContent.toLowerCase();
+      c.style.display = text.includes(q) ? '' : 'none';
+    });
   },
 
   updateBadges() {
@@ -465,83 +557,356 @@ const app = {
     `;
   },
 
-  // ---------------- Module 2: ERP & Inventory ----------------
+  // ---------------- Module 2: ERP & Multi-Warehouse Supply Chain ----------------
   renderERP() {
+    const subTab = this.activeERPSubTab || 'skus';
+
+    let actionButtons = '';
+    if (subTab === 'skus') {
+      actionButtons = `
+        <button class="btn-press btn btn-secondary" onclick="app.openNewSKUModal()">
+          <i data-lucide="package-plus" class="w-4 h-4 text-brand-blue"></i> Add SKU
+        </button>
+        <button class="btn-press btn btn-primary" onclick="app.openNewPOModal()">
+          <i data-lucide="plus" class="w-4 h-4"></i> New Purchase Order
+        </button>
+      `;
+    } else if (subTab === 'pos') {
+      actionButtons = `
+        <button class="btn-press btn btn-primary" onclick="app.openNewPOModal()">
+          <i data-lucide="plus" class="w-4 h-4"></i> New Purchase Order
+        </button>
+      `;
+    } else if (subTab === 'warehouses') {
+      actionButtons = `
+        <button class="btn-press btn btn-secondary" onclick="app.openNewWarehouseModal()">
+          <i data-lucide="building" class="w-4 h-4 text-brand-blue"></i> Add Warehouse
+        </button>
+        <button class="btn-press btn btn-primary" onclick="app.openStockTransferModal()">
+          <i data-lucide="arrow-left-right" class="w-4 h-4"></i> Transfer Stock
+        </button>
+      `;
+    } else if (subTab === 'grns') {
+      actionButtons = `
+        <button class="btn-press btn btn-primary" onclick="app.openReceiveGRNModal()">
+          <i data-lucide="package-check" class="w-4 h-4"></i> Receive Goods (GRN)
+        </button>
+      `;
+    }
+
+    let subTabContent = '';
+    if (subTab === 'skus') {
+      subTabContent = `
+        <div class="table-container mockup-item">
+          <div class="table-filter-bar">
+            <input type="text" class="table-filter-input" placeholder="Search SKUs by name, code, category..." oninput="app.filterTable('skus-table', this.value)">
+            <span class="text-[12px] text-slate-400 font-medium">Catalog items: <strong>${this.data.skus.length}</strong></span>
+          </div>
+          <table class="data-table" id="skus-table">
+            <thead>
+              <tr>
+                <th>Product</th>
+                <th>SKU Code</th>
+                <th>Category</th>
+                <th>Stock Level</th>
+                <th>Min Threshold</th>
+                <th>Unit Cost</th>
+                <th>Selling Price</th>
+                <th>Supplier</th>
+                <th>Quick Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${this.data.skus.map(item => {
+                const isLow = item.stock_quantity <= item.min_threshold;
+                const isOut = item.stock_quantity === 0;
+                return `
+                  <tr>
+                    <td>
+                      <div class="flex items-center gap-3">
+                        <div class="w-9 h-9 rounded-xl ${isLow ? 'bg-amber-50 text-amber-600' : 'bg-blue-50 text-brand-blue'} flex items-center justify-center shrink-0">
+                          <i data-lucide="package" class="w-4 h-4"></i>
+                        </div>
+                        <span class="font-bold text-brand-textMain text-[14px]">${item.name}</span>
+                      </div>
+                    </td>
+                    <td><span class="mono-code">${item.code}</span></td>
+                    <td><span class="badge" style="background:#F1F5F9; color:#475569;">${item.category}</span></td>
+                    <td>
+                      <div style="display:flex; align-items:center; gap:8px;">
+                        <span style="font-weight:800; font-size:14px; ${isLow ? 'color:#D97706' : 'color:#0F172A'}">${item.stock_quantity}</span>
+                        ${isOut ? '<span class="bg-red-100 text-red-700 text-[11px] font-bold px-2 py-0.5 rounded-md">Out of Stock</span>' :
+                          isLow ? '<span class="bg-amber-100 text-amber-700 text-[11px] font-bold px-2 py-0.5 rounded-md">Low Stock</span>' :
+                          '<span class="bg-emerald-100 text-emerald-700 text-[11px] font-bold px-2 py-0.5 rounded-md">In Stock</span>'}
+                      </div>
+                    </td>
+                    <td class="font-medium text-slate-500">${item.min_threshold}</td>
+                    <td class="font-semibold text-slate-700">$${item.unit_cost.toFixed(2)}</td>
+                    <td class="font-bold text-brand-blue">$${item.selling_price.toFixed(2)}</td>
+                    <td class="text-slate-500 font-medium">${item.supplier_name || 'Direct'}</td>
+                    <td>
+                      <div style="display:flex; gap:6px;">
+                        <button class="btn-press btn btn-secondary btn-sm" onclick="app.quickAdjustStock('${item.id}', 10, 'Received restock batch')">+10</button>
+                        <button class="btn-press btn btn-secondary btn-sm" onclick="app.quickAdjustStock('${item.id}', -5, 'Order fulfillment test')">-5</button>
+                        <button class="btn-press btn btn-secondary btn-sm" onclick="app.openStockModal('${item.id}', '${item.code}', ${item.stock_quantity})">Custom</button>
+                      </div>
+                    </td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    } else if (subTab === 'pos') {
+      subTabContent = `
+        <div class="table-container mockup-item">
+          <div class="table-filter-bar">
+            <input type="text" class="table-filter-input" placeholder="Search purchase orders by supplier, status..." oninput="app.filterTable('pos-table', this.value)">
+            <span class="text-[12px] text-slate-400 font-medium">Orders: <strong>${this.data.purchaseOrders.length}</strong></span>
+          </div>
+          <table class="data-table" id="pos-table">
+            <thead>
+              <tr>
+                <th>PO ID</th>
+                <th>Supplier</th>
+                <th>Total Value</th>
+                <th>Status</th>
+                <th>Notes</th>
+                <th>Created</th>
+                <th>Receipt Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${this.data.purchaseOrders.length === 0 ? `<tr><td colspan="7" class="text-center py-6 text-slate-400">No purchase orders created yet. Click "+ New Purchase Order" to issue one.</td></tr>` :
+                this.data.purchaseOrders.map(po => {
+                  const sup = (this.data.suppliers || []).find(s => s.id === po.supplier_id) || { name: 'Direct Supplier' };
+                  const isReceivable = po.status === 'ordered' || po.status === 'partially_received' || po.status === 'approved';
+                  return `
+                    <tr>
+                      <td><span class="mono-code">${po.id}</span></td>
+                      <td><strong>${sup.name}</strong></td>
+                      <td><strong style="color:#059669; font-size:14px;">$${po.total.toLocaleString('en-US', { minimumFractionDigits: 2 })}</strong></td>
+                      <td>
+                        <span class="badge" style="background:${
+                          po.status === 'received' ? '#ECFDF5' :
+                          po.status === 'partially_received' ? '#EFF6FF' :
+                          po.status === 'ordered' ? '#FEF3C7' :
+                          po.status === 'approved' ? '#F0FDF4' : '#F1F5F9'
+                        }; color:${
+                          po.status === 'received' ? '#047857' :
+                          po.status === 'partially_received' ? '#1D4ED8' :
+                          po.status === 'ordered' ? '#B45309' :
+                          po.status === 'approved' ? '#15803D' : '#475569'
+                        };">
+                          ${po.status.replace('_', ' ').toUpperCase()}
+                        </span>
+                      </td>
+                      <td class="text-slate-500 font-medium">${po.notes || '—'}</td>
+                      <td class="text-slate-400 font-mono text-[12px]">${new Date(po.created_at).toLocaleDateString()}</td>
+                      <td>
+                        ${isReceivable ? `
+                          <button class="btn-press btn btn-primary btn-sm" onclick="app.openReceiveGRNModal('${po.id}')">
+                            <i data-lucide="package-check" class="w-3.5 h-3.5"></i> Receive GRN
+                          </button>
+                        ` : po.status === 'received' ? `
+                          <span class="badge badge-matched"><i data-lucide="check" class="w-3 h-3 inline"></i> Received</span>
+                        ` : `
+                          <span class="badge badge-pending">${po.status}</span>
+                        `}
+                      </td>
+                    </tr>
+                  `;
+                }).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    } else if (subTab === 'warehouses') {
+      subTabContent = `
+        <!-- Warehouse Cards Grid -->
+        <div class="stats-grid mb-6">
+          ${this.data.warehouses.map(wh => {
+            const stocksInWH = (this.data.warehouseStocks || []).filter(ws => ws.warehouse_id === wh.id);
+            const totalUnits = stocksInWH.reduce((sum, s) => sum + s.available_qty, 0);
+            return `
+              <div class="stat-card mockup-item">
+                <div class="flex justify-between items-start mb-2">
+                  <div>
+                    <span class="mono-code text-[11px] font-bold text-brand-blue">${wh.code}</span>
+                    <h3 class="font-extrabold text-[16px] text-slate-800 mt-0.5">${wh.name}</h3>
+                  </div>
+                  <div class="w-9 h-9 rounded-xl bg-blue-50 text-brand-blue flex items-center justify-center">
+                    <i data-lucide="building" class="w-4 h-4"></i>
+                  </div>
+                </div>
+                <div class="text-[12.5px] text-slate-500 mb-3">${wh.location} • <span class="text-slate-400">${wh.description || 'Fulfillment center'}</span></div>
+                <div class="flex items-center justify-between pt-3 border-t border-slate-100">
+                  <span class="text-[12px] font-medium text-slate-500">Holdings: <strong>${stocksInWH.length} SKUs</strong></span>
+                  <span class="text-[13px] font-bold text-emerald-600">${totalUnits.toLocaleString()} units</span>
+                </div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+
+        <!-- Multi-Warehouse Stock Breakdown -->
+        <div class="table-container mockup-item mb-6">
+          <div class="table-filter-bar">
+            <input type="text" class="table-filter-input" placeholder="Search stock by warehouse, SKU, bin..." oninput="app.filterTable('wh-stocks-table', this.value)">
+            <span class="text-[12px] text-slate-400 font-medium">Warehouse stock allocations: <strong>${this.data.warehouseStocks.length}</strong></span>
+          </div>
+          <table class="data-table" id="wh-stocks-table">
+            <thead>
+              <tr>
+                <th>Warehouse</th>
+                <th>SKU Code</th>
+                <th>Bin Location</th>
+                <th>Available Units</th>
+                <th>Reserved Units</th>
+                <th>Last Updated</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${this.data.warehouseStocks.length === 0 ? `<tr><td colspan="7" class="text-center py-6 text-slate-400">No warehouse stock allocations yet. Stock will appear when GRNs or transfers occur.</td></tr>` :
+                this.data.warehouseStocks.map(ws => {
+                  const wh = (this.data.warehouses || []).find(w => w.id === ws.warehouse_id) || { name: ws.warehouse_id, code: '' };
+                  return `
+                    <tr>
+                      <td><strong>${wh.name}</strong> <span class="mono-code text-[11px]">${wh.code}</span></td>
+                      <td><span class="mono-code font-bold text-brand-blue">${ws.sku_code}</span></td>
+                      <td><span class="badge" style="background:#F1F5F9; color:#475569;">${ws.bin_location || 'A-01-01'}</span></td>
+                      <td><strong style="font-size:14px; color:${ws.available_qty > 0 ? '#059669' : '#DC2626'};">${ws.available_qty}</strong></td>
+                      <td class="text-slate-500 font-medium">${ws.reserved_qty}</td>
+                      <td class="text-slate-400 font-mono text-[12px]">${new Date(ws.updated_at).toLocaleDateString()}</td>
+                      <td>
+                        <button class="btn-press btn btn-secondary btn-sm" onclick="app.openStockTransferModal('${ws.warehouse_id}', '${ws.sku_code}')">
+                          Transfer
+                        </button>
+                      </td>
+                    </tr>
+                  `;
+                }).join('')}
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Stock Transfers History -->
+        <div class="table-container mockup-item">
+          <div style="padding:16px 20px; font-weight:800; font-size:15px; border-bottom:1px solid #F1F5F9; display:flex; justify-content:space-between; align-items:center;">
+            <span>Inter-Warehouse Stock Transfers</span>
+            <span class="text-[12px] text-slate-400 font-medium">Recorded: ${this.data.stockTransfers.length}</span>
+          </div>
+          <table class="data-table" id="wh-transfers-table">
+            <thead>
+              <tr>
+                <th>Transfer #</th>
+                <th>Source Warehouse</th>
+                <th>Destination Warehouse</th>
+                <th>SKU Code</th>
+                <th>Quantity</th>
+                <th>Status</th>
+                <th>Reason</th>
+                <th>Date</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${this.data.stockTransfers.length === 0 ? `<tr><td colspan="8" class="text-center py-6 text-slate-400">No stock transfers executed yet. Click "Transfer Stock" above to move inventory between hubs.</td></tr>` :
+                this.data.stockTransfers.map(tr => {
+                  const srcWH = (this.data.warehouses || []).find(w => w.id === tr.from_warehouse_id) || { name: tr.from_warehouse_id };
+                  const dstWH = (this.data.warehouses || []).find(w => w.id === tr.to_warehouse_id) || { name: tr.to_warehouse_id };
+                  return `
+                    <tr>
+                      <td><span class="mono-code">${tr.transfer_number}</span></td>
+                      <td>${srcWH.name}</td>
+                      <td>${dstWH.name}</td>
+                      <td><span class="mono-code font-bold text-brand-blue">${tr.sku_code}</span></td>
+                      <td><strong style="color:#2563EB;">${tr.quantity}</strong></td>
+                      <td><span class="badge badge-matched">${tr.status.toUpperCase()}</span></td>
+                      <td class="text-slate-500 font-medium">${tr.reason || 'Balancing'}</td>
+                      <td class="text-slate-400 font-mono text-[12px]">${new Date(tr.created_at).toLocaleDateString()}</td>
+                    </tr>
+                  `;
+                }).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    } else if (subTab === 'grns') {
+      subTabContent = `
+        <div class="table-container mockup-item">
+          <div class="table-filter-bar">
+            <input type="text" class="table-filter-input" placeholder="Search GRN #, PO #, inspector..." oninput="app.filterTable('grns-table', this.value)">
+            <span class="text-[12px] text-slate-400 font-medium">Receipt Notes: <strong>${this.data.grns.length}</strong></span>
+          </div>
+          <table class="data-table" id="grns-table">
+            <thead>
+              <tr>
+                <th>GRN Number</th>
+                <th>Purchase Order</th>
+                <th>Destination Warehouse</th>
+                <th>Received Date</th>
+                <th>Inspector / Agent</th>
+                <th>Tracking / Carrier</th>
+                <th>Status</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${this.data.grns.length === 0 ? `<tr><td colspan="8" class="text-center py-6 text-slate-400">No Goods Receipt Notes recorded yet. Receive items from approved purchase orders.</td></tr>` :
+                this.data.grns.map(g => {
+                  const wh = (this.data.warehouses || []).find(w => w.id === g.warehouse_id) || { name: g.warehouse_id };
+                  return `
+                    <tr>
+                      <td><span class="mono-code font-bold text-brand-blue">${g.grn_number}</span></td>
+                      <td><span class="mono-code">${g.po_id}</span></td>
+                      <td><strong>${wh.name}</strong></td>
+                      <td class="text-slate-500">${g.received_date}</td>
+                      <td class="font-medium text-slate-700">${g.inspector_name || 'Autonomous Agent'}</td>
+                      <td class="text-slate-500 font-mono text-[12px]">${g.carrier_tracking || '—'}</td>
+                      <td><span class="badge badge-matched">${g.status.toUpperCase()}</span></td>
+                      <td class="text-slate-500 font-medium">${g.notes || '—'}</td>
+                    </tr>
+                  `;
+                }).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
     return `
       <div class="page-header">
         <div>
           <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-100 text-brand-blue text-[11px] font-bold uppercase tracking-widest mb-3">
-            <i data-lucide="network" class="w-3.5 h-3.5"></i> Core Infrastructure
+            <i data-lucide="network" class="w-3.5 h-3.5"></i> Core Infrastructure & Supply Chain
           </div>
           <h1 class="page-title">Enterprise Resource Planning</h1>
-          <p class="page-sub">Centralize supply chain, SKU inventories, and automated threshold reorder triggers.</p>
+          <p class="page-sub">Centralize multi-warehouse supply chain, physical Goods Receipt Notes (GRN), and reorder workflows.</p>
         </div>
         <div class="page-actions">
-          <button class="btn-press btn btn-secondary" onclick="app.openNewSKUModal()">
-            <i data-lucide="package-plus" class="w-4 h-4 text-brand-blue"></i> Add SKU
-          </button>
-          <button class="btn-press btn btn-primary" onclick="app.openNewPOModal()">
-            <i data-lucide="plus" class="w-4 h-4"></i> New Purchase Order
-          </button>
+          ${actionButtons}
         </div>
       </div>
 
-      <div class="table-container mockup-item">
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Product</th>
-              <th>SKU Code</th>
-              <th>Category</th>
-              <th>Stock Level</th>
-              <th>Min Threshold</th>
-              <th>Unit Cost</th>
-              <th>Selling Price</th>
-              <th>Supplier</th>
-              <th>Quick Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${this.data.skus.map(item => {
-              const isLow = item.stock_quantity <= item.min_threshold;
-              const isOut = item.stock_quantity === 0;
-              return `
-                <tr>
-                  <td>
-                    <div class="flex items-center gap-3">
-                      <div class="w-9 h-9 rounded-xl ${isLow ? 'bg-amber-50 text-amber-600' : 'bg-blue-50 text-brand-blue'} flex items-center justify-center shrink-0">
-                        <i data-lucide="package" class="w-4 h-4"></i>
-                      </div>
-                      <span class="font-bold text-brand-textMain text-[14px]">${item.name}</span>
-                    </div>
-                  </td>
-                  <td><span class="mono-code">${item.code}</span></td>
-                  <td><span class="badge" style="background:#F1F5F9; color:#475569;">${item.category}</span></td>
-                  <td>
-                    <div style="display:flex; align-items:center; gap:8px;">
-                      <span style="font-weight:800; font-size:14px; ${isLow ? 'color:#D97706' : 'color:#0F172A'}">${item.stock_quantity}</span>
-                      ${isOut ? '<span class="bg-red-100 text-red-700 text-[11px] font-bold px-2 py-0.5 rounded-md">Out of Stock</span>' :
-                        isLow ? '<span class="bg-amber-100 text-amber-700 text-[11px] font-bold px-2 py-0.5 rounded-md">Low Stock</span>' :
-                        '<span class="bg-emerald-100 text-emerald-700 text-[11px] font-bold px-2 py-0.5 rounded-md">In Stock</span>'}
-                    </div>
-                  </td>
-                  <td class="font-medium text-slate-500">${item.min_threshold}</td>
-                  <td class="font-semibold text-slate-700">$${item.unit_cost.toFixed(2)}</td>
-                  <td class="font-bold text-brand-blue">$${item.selling_price.toFixed(2)}</td>
-                  <td class="text-slate-500 font-medium">${item.supplier_name || 'Direct'}</td>
-                  <td>
-                    <div style="display:flex; gap:6px;">
-                      <button class="btn-press btn btn-secondary btn-sm" onclick="app.quickAdjustStock('${item.id}', 10, 'Received restock batch')">+10</button>
-                      <button class="btn-press btn btn-secondary btn-sm" onclick="app.quickAdjustStock('${item.id}', -5, 'Order fulfillment test')">-5</button>
-                      <button class="btn-press btn btn-secondary btn-sm" onclick="app.openStockModal('${item.id}', '${item.code}', ${item.stock_quantity})">Custom</button>
-                    </div>
-                  </td>
-                </tr>
-              `;
-            }).join('')}
-          </tbody>
-        </table>
+      <!-- Subnav navigation bar -->
+      <div class="subnav-bar">
+        <button class="subnav-pill ${subTab === 'skus' ? 'active' : ''}" onclick="app.setERPSubTab('skus')">
+          <i data-lucide="package" class="w-4 h-4"></i> SKUs & Catalog (${this.data.skus.length})
+        </button>
+        <button class="subnav-pill ${subTab === 'pos' ? 'active' : ''}" onclick="app.setERPSubTab('pos')">
+          <i data-lucide="file-text" class="w-4 h-4"></i> Purchase Orders (${this.data.purchaseOrders.length})
+        </button>
+        <button class="subnav-pill ${subTab === 'warehouses' ? 'active' : ''}" onclick="app.setERPSubTab('warehouses')">
+          <i data-lucide="building" class="w-4 h-4"></i> Warehouses & Multi-Site (${this.data.warehouses.length})
+        </button>
+        <button class="subnav-pill ${subTab === 'grns' ? 'active' : ''}" onclick="app.setERPSubTab('grns')">
+          <i data-lucide="package-check" class="w-4 h-4"></i> Goods Receipt Notes (${this.data.grns.length})
+        </button>
       </div>
+
+      ${subTabContent}
     `;
   },
 
@@ -647,9 +1012,184 @@ const app = {
     });
   },
 
-  // ---------------- Module 4: Finance & Invoicing ----------------
+  // ---------------- Module 4: Finance, Invoicing & 3-Way Match ----------------
   renderFinance() {
     const s = this.data.summary || { total_revenue: 0, total_expense: 0, net_profit: 0, unpaid_total: 0 };
+    const subTab = this.activeFinanceSubTab || 'invoices';
+
+    let actionButton = '';
+    if (subTab === 'invoices') {
+      actionButton = `
+        <button class="btn-press btn btn-primary" onclick="app.openNewInvoiceModal()">
+          <i data-lucide="plus" class="w-4 h-4"></i> Create Invoice
+        </button>
+      `;
+    } else {
+      actionButton = `
+        <button class="btn-press btn btn-primary" onclick="app.openNewSupplierBillModal()">
+          <i data-lucide="plus" class="w-4 h-4"></i> Add Supplier Bill
+        </button>
+      `;
+    }
+
+    let subTabContent = '';
+    if (subTab === 'invoices') {
+      subTabContent = `
+        <div class="stats-grid">
+          <div class="stat-card mockup-item">
+            <div class="flex justify-between items-start mb-2">
+              <div class="stat-title">Cash Revenue</div>
+              <div class="w-10 h-10 bg-blue-50 rounded-xl flex items-center justify-center">
+                <i data-lucide="trending-up" class="w-5 h-5 text-brand-blue"></i>
+              </div>
+            </div>
+            <div class="stat-value">$${s.total_revenue.toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
+            <div class="stat-trend trend-up">✓ Collected</div>
+          </div>
+
+          <div class="stat-card mockup-item">
+            <div class="flex justify-between items-start mb-2">
+              <div class="stat-title">Operating Expenses</div>
+              <div class="w-10 h-10 bg-purple-50 rounded-xl flex items-center justify-center">
+                <i data-lucide="pie-chart" class="w-5 h-5 text-purple-600"></i>
+              </div>
+            </div>
+            <div class="stat-value">$${s.total_expense.toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
+            <div class="stat-trend text-slate-500 font-medium">Procurement & Operations</div>
+          </div>
+
+          <div class="stat-card mockup-item">
+            <div class="flex justify-between items-start mb-2">
+              <div class="stat-title">Net Profit (P&L)</div>
+              <div class="w-10 h-10 bg-emerald-50 rounded-xl flex items-center justify-center">
+                <i data-lucide="check" class="w-5 h-5 text-emerald-500"></i>
+              </div>
+            </div>
+            <div class="stat-value" style="color:#059669;">$${s.net_profit.toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
+            <div class="stat-trend trend-up">P&L Margin: Healthy</div>
+          </div>
+
+          <div class="stat-card mockup-item">
+            <div class="flex justify-between items-start mb-2">
+              <div class="stat-title">Pending Receivables</div>
+              <div class="w-10 h-10 bg-amber-50 rounded-xl flex items-center justify-center">
+                <i data-lucide="clock" class="w-5 h-5 text-amber-500"></i>
+              </div>
+            </div>
+            <div class="stat-value" style="color:#D97706;">$${s.unpaid_total.toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
+            <div class="stat-trend trend-amber">Uncollected Due</div>
+          </div>
+        </div>
+
+        <div class="table-container mockup-item">
+          <div class="table-filter-bar">
+            <input type="text" class="table-filter-input" placeholder="Search invoices by customer, number..." oninput="app.filterTable('invoices-table', this.value)">
+            <span class="text-[12px] text-slate-400 font-medium">Invoices: <strong>${this.data.invoices.length}</strong></span>
+          </div>
+          <table class="data-table" id="invoices-table">
+            <thead>
+              <tr>
+                <th>Invoice #</th>
+                <th>Customer</th>
+                <th>Issue Date</th>
+                <th>Due Date</th>
+                <th>Subtotal</th>
+                <th>Tax (8%)</th>
+                <th>Total Amount</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${this.data.invoices.map(inv => `
+                <tr>
+                  <td><span class="mono-code">${inv.invoice_number}</span></td>
+                  <td><strong>${inv.customer_name || 'Client'}</strong></td>
+                  <td class="text-slate-500">${inv.issue_date}</td>
+                  <td class="text-slate-500">${inv.due_date}</td>
+                  <td class="font-medium">$${inv.subtotal.toFixed(2)}</td>
+                  <td class="text-slate-400">$${inv.tax_amount.toFixed(2)}</td>
+                  <td><strong style="color:#059669; font-size:14px;">$${inv.total_amount.toFixed(2)}</strong></td>
+                  <td>
+                    <span class="badge" style="background:${inv.status === 'paid' ? '#ECFDF5' : '#FEF3C7'}; color:${inv.status === 'paid' ? '#047857' : '#B45309'}; border:1px solid ${inv.status === 'paid' ? '#A7F3D0' : '#FDE68A'};">
+                      ${inv.status.toUpperCase()}
+                    </span>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    } else if (subTab === 'bills') {
+      subTabContent = `
+        <!-- 3-Way Match Explanatory Banner -->
+        <div style="background:#EFF6FF; border:1px solid #BFDBFE; border-radius:16px; padding:18px 22px; margin-bottom:20px; display:flex; align-items:flex-start; gap:16px;">
+          <div class="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center shrink-0 shadow-sm">
+            <i data-lucide="scale" class="w-5 h-5"></i>
+          </div>
+          <div>
+            <h3 class="font-bold text-[15px] text-blue-950 mb-1">Automated 3-Way Reconciliation Engine</h3>
+            <p class="text-[13px] text-blue-800 leading-relaxed">
+              Every vendor bill is verified across three independent sources: the authorized <strong>Purchase Order contract price</strong>, the warehouse's physical <strong>Goods Receipt Note (GRN) received count</strong>, and the <strong>Supplier Bill total</strong>. Price discrepancies (&gt; $50) or quantity shortfalls route directly to the <strong>Human-in-the-Loop Approval Inbox</strong>.
+            </p>
+          </div>
+        </div>
+
+        <div class="table-container mockup-item">
+          <div class="table-filter-bar">
+            <input type="text" class="table-filter-input" placeholder="Search bills by bill #, supplier, PO..." oninput="app.filterTable('bills-table', this.value)">
+            <span class="text-[12px] text-slate-400 font-medium">Supplier Bills: <strong>${this.data.supplierBills.length}</strong></span>
+          </div>
+          <table class="data-table" id="bills-table">
+            <thead>
+              <tr>
+                <th>Bill Number</th>
+                <th>Supplier</th>
+                <th>Purchase Order</th>
+                <th>GRN Reference</th>
+                <th>Billed Total</th>
+                <th>Due Date</th>
+                <th>3-Way Match Status</th>
+                <th>Verification Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${this.data.supplierBills.length === 0 ? `<tr><td colspan="8" class="text-center py-6 text-slate-400">No supplier bills recorded yet. Click "+ Add Supplier Bill" to enter a vendor invoice.</td></tr>` :
+                this.data.supplierBills.map(b => {
+                  const sup = (this.data.suppliers || []).find(s => s.id === b.supplier_id) || { name: 'Supplier' };
+                  let badge = '';
+                  if (b.match_status === 'matched') {
+                    badge = `<span class="badge badge-matched"><i data-lucide="check-circle" class="w-3.5 h-3.5 inline"></i> MATCHED</span>`;
+                  } else if (b.match_status === 'price_variance') {
+                    badge = `<span class="badge badge-variance-price"><i data-lucide="alert-triangle" class="w-3.5 h-3.5 inline"></i> PRICE VARIANCE</span>`;
+                  } else if (b.match_status === 'qty_variance') {
+                    badge = `<span class="badge badge-variance-qty"><i data-lucide="alert-circle" class="w-3.5 h-3.5 inline"></i> QTY SHORTFALL</span>`;
+                  } else {
+                    badge = `<span class="badge badge-pending">PENDING AUDIT</span>`;
+                  }
+                  return `
+                    <tr>
+                      <td><span class="mono-code font-bold text-brand-blue">${b.bill_number}</span></td>
+                      <td><strong>${sup.name}</strong></td>
+                      <td><span class="mono-code">${b.po_id || '—'}</span></td>
+                      <td><span class="mono-code">${b.grn_id || '—'}</span></td>
+                      <td><strong style="color:#0F172A; font-size:14px;">$${b.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })}</strong></td>
+                      <td class="text-slate-500">${b.due_date}</td>
+                      <td>${badge}</td>
+                      <td>
+                        <button class="btn-press btn btn-secondary btn-sm" onclick="app.runThreeWayMatch('${b.id}')">
+                          <i data-lucide="scan" class="w-3.5 h-3.5 text-blue-600"></i> Verify Match
+                        </button>
+                      </td>
+                    </tr>
+                  `;
+                }).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
     return `
       <div class="page-header">
         <div>
@@ -657,99 +1197,23 @@ const app = {
             <i data-lucide="pie-chart" class="w-3.5 h-3.5"></i> Stability & Capital
           </div>
           <h1 class="page-title">Financial & Administrative</h1>
-          <p class="page-sub">Oversee automated P&L statements, tax compliance invoices, and client receivables.</p>
+          <p class="page-sub">Oversee automated P&L statements, multi-line tax invoices, and 3-Way Matching reconciliation.</p>
         </div>
         <div class="page-actions">
-          <button class="btn-press btn btn-primary" onclick="app.openNewInvoiceModal()">
-            <i data-lucide="plus" class="w-4 h-4"></i> Create Invoice
-          </button>
+          ${actionButton}
         </div>
       </div>
 
-      <div class="stats-grid">
-        <div class="stat-card mockup-item">
-          <div class="flex justify-between items-start mb-2">
-            <div class="stat-title">Cash Revenue</div>
-            <div class="w-10 h-10 bg-blue-50 rounded-xl flex items-center justify-center">
-              <i data-lucide="trending-up" class="w-5 h-5 text-brand-blue"></i>
-            </div>
-          </div>
-          <div class="stat-value">$${s.total_revenue.toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
-          <div class="stat-trend trend-up">✓ Collected</div>
-        </div>
-
-        <div class="stat-card mockup-item">
-          <div class="flex justify-between items-start mb-2">
-            <div class="stat-title">Operating Expenses</div>
-            <div class="w-10 h-10 bg-purple-50 rounded-xl flex items-center justify-center">
-              <i data-lucide="pie-chart" class="w-5 h-5 text-purple-600"></i>
-            </div>
-          </div>
-          <div class="stat-value">$${s.total_expense.toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
-          <div class="stat-trend text-slate-500 font-medium">Procurement & Cloud</div>
-        </div>
-
-        <div class="stat-card mockup-item">
-          <div class="flex justify-between items-start mb-2">
-            <div class="stat-title">Net Profit (P&L)</div>
-            <div class="w-10 h-10 bg-emerald-50 rounded-xl flex items-center justify-center">
-              <i data-lucide="check" class="w-5 h-5 text-emerald-500"></i>
-            </div>
-          </div>
-          <div class="stat-value" style="color:#059669;">$${s.net_profit.toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
-          <div class="stat-trend trend-up">P&L Margin: Healthy</div>
-        </div>
-
-        <div class="stat-card mockup-item">
-          <div class="flex justify-between items-start mb-2">
-            <div class="stat-title">Pending Receivables</div>
-            <div class="w-10 h-10 bg-amber-50 rounded-xl flex items-center justify-center">
-              <i data-lucide="clock" class="w-5 h-5 text-amber-500"></i>
-            </div>
-          </div>
-          <div class="stat-value" style="color:#D97706;">$${s.unpaid_total.toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
-          <div class="stat-trend trend-amber">Uncollected Due</div>
-        </div>
+      <div class="subnav-bar">
+        <button class="subnav-pill ${subTab === 'invoices' ? 'active' : ''}" onclick="app.setFinanceSubTab('invoices')">
+          <i data-lucide="receipt" class="w-4 h-4"></i> Customer Invoices (${this.data.invoices.length})
+        </button>
+        <button class="subnav-pill ${subTab === 'bills' ? 'active' : ''}" onclick="app.setFinanceSubTab('bills')">
+          <i data-lucide="scale" class="w-4 h-4"></i> Supplier Bills & 3-Way Match (${this.data.supplierBills.length})
+        </button>
       </div>
 
-      <div class="table-container mockup-item">
-        <div style="padding:18px 24px; font-weight:800; font-size:16px; border-bottom:1px solid #F1F5F9; display:flex; justify-content:space-between; align-items:center;">
-          <span>Recent Invoices</span>
-          <span class="text-[12px] text-slate-400 font-medium">Auto-generated via Billing Engine</span>
-        </div>
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Invoice #</th>
-              <th>Customer</th>
-              <th>Issue Date</th>
-              <th>Due Date</th>
-              <th>Subtotal</th>
-              <th>Tax (8%)</th>
-              <th>Total Amount</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${this.data.invoices.map(inv => `
-              <tr>
-                <td><span class="mono-code">${inv.invoice_number}</span></td>
-                <td><strong>${inv.customer_name || 'Client'}</strong></td>
-                <td class="text-slate-500">${inv.issue_date}</td>
-                <td class="text-slate-500">${inv.due_date}</td>
-                <td class="font-medium">$${inv.subtotal.toFixed(2)}</td>
-                <td class="text-slate-400">$${inv.tax_amount.toFixed(2)}</td>
-                <td><strong style="color:#059669; font-size:14px;">$${inv.total_amount.toFixed(2)}</strong></td>
-                <td>
-                  <span class="badge" style="background:${inv.status === 'paid' ? '#ECFDF5' : '#FEF3C7'}; color:${inv.status === 'paid' ? '#047857' : '#B45309'}; border:1px solid ${inv.status === 'paid' ? '#A7F3D0' : '#FDE68A'};">
-                    ${inv.status.toUpperCase()}
-                  </span>
-                </td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-      </div>
+      ${subTabContent}
     `;
   },
 
@@ -764,16 +1228,25 @@ const app = {
           <h1 class="page-title">Shifts & Team Records</h1>
           <p class="page-sub">Coordinate employee shift schedules, digital timesheets, and wage rates in one place.</p>
         </div>
+        <div class="page-actions">
+          <button class="btn-press btn btn-secondary" onclick="app.openNewEmployeeModal()">
+            <i data-lucide="user-plus" class="w-4 h-4 text-brand-blue"></i> Add Employee
+          </button>
+          <button class="btn-press btn btn-primary" onclick="app.openNewShiftModal()">
+            <i data-lucide="calendar-plus" class="w-4 h-4"></i> Schedule Shift
+          </button>
+        </div>
       </div>
 
       <div style="display:grid; grid-template-columns: 1.8fr 1.2fr; gap:24px;">
         
         <!-- Shifts Schedule Grid -->
         <div class="table-container mockup-item">
-          <div style="padding:18px 24px; font-weight:800; font-size:16px; border-bottom:1px solid #F1F5F9;">
-            Today's Shift Roster
+          <div class="table-filter-bar">
+            <span class="font-bold text-[15px] text-slate-800">Today's Shift Roster</span>
+            <input type="text" class="table-filter-input" placeholder="Search shifts by employee, station..." oninput="app.filterTable('shifts-table', this.value)">
           </div>
-          <table class="data-table">
+          <table class="data-table" id="shifts-table">
             <thead>
               <tr>
                 <th>Employee</th>
@@ -784,40 +1257,45 @@ const app = {
               </tr>
             </thead>
             <tbody>
-              ${this.data.shifts.map(sh => `
-                <tr>
-                  <td><strong>${sh.employee_name}</strong></td>
-                  <td class="font-medium text-slate-500">${sh.start_time} — ${sh.end_time}</td>
-                  <td><span class="badge" style="background:#F1F5F9; color:#475569;">${sh.station}</span></td>
-                  <td>
-                    <span class="badge" style="background:${sh.status === 'clocked_in' ? '#ECFDF5' : '#EFF6FF'}; color:${sh.status === 'clocked_in' ? '#047857' : '#1D4ED8'}; border:1px solid ${sh.status === 'clocked_in' ? '#A7F3D0' : '#BFDBFE'};">
-                      ${sh.status.replace('_', ' ').toUpperCase()}
-                    </span>
-                  </td>
-                  <td>
-                    <button class="btn-press btn btn-secondary btn-sm" onclick="app.toggleShiftClock('${sh.id}', '${sh.status === 'clocked_in' ? 'completed' : 'clocked_in'}')">
-                      ${sh.status === 'clocked_in' ? 'Clock Out' : 'Clock In'}
-                    </button>
-                  </td>
-                </tr>
-              `).join('')}
+              ${this.data.shifts.length === 0 ? `<tr><td colspan="5" class="text-center py-6 text-slate-400">No shifts scheduled for today. Click "+ Schedule Shift" to assign a shift.</td></tr>` :
+                this.data.shifts.map(sh => `
+                  <tr>
+                    <td><strong>${sh.employee_name}</strong></td>
+                    <td class="font-medium text-slate-500">${sh.start_time} — ${sh.end_time}</td>
+                    <td><span class="badge" style="background:#F1F5F9; color:#475569;">${sh.station}</span></td>
+                    <td>
+                      <span class="badge" style="background:${sh.status === 'clocked_in' ? '#ECFDF5' : '#EFF6FF'}; color:${sh.status === 'clocked_in' ? '#047857' : '#1D4ED8'}; border:1px solid ${sh.status === 'clocked_in' ? '#A7F3D0' : '#BFDBFE'};">
+                        ${sh.status.replace('_', ' ').toUpperCase()}
+                      </span>
+                    </td>
+                    <td>
+                      <button class="btn-press btn btn-secondary btn-sm" onclick="app.toggleShiftClock('${sh.id}', '${sh.status === 'clocked_in' ? 'completed' : 'clocked_in'}')">
+                        ${sh.status === 'clocked_in' ? 'Clock Out' : 'Clock In'}
+                      </button>
+                    </td>
+                  </tr>
+                `).join('')}
             </tbody>
           </table>
         </div>
 
         <!-- Employee Directory -->
         <div class="table-container mockup-item" style="padding:24px;">
-          <h3 style="font-size:16px; font-weight:800; margin-bottom:16px; color:#0F172A;">Active Employees</h3>
-          <div style="display:flex; flex-direction:column; gap:12px;">
-            ${this.data.employees.map(emp => `
-              <div style="display:flex; align-items:center; justify-content:space-between; padding:12px 14px; background:#F8FAFC; border:1px solid var(--border-subtle); border-radius:12px;">
-                <div>
-                  <div style="font-weight:700; font-size:14px; color:#0F172A;">${emp.name}</div>
-                  <div style="font-size:12px; color:#64748B; font-weight:500;">${emp.role} • ${emp.department}</div>
+          <div class="flex justify-between items-center mb-4">
+            <h3 style="font-size:16px; font-weight:800; color:#0F172A;">Active Employees (${this.data.employees.length})</h3>
+            <input type="text" class="table-filter-input" style="max-width:180px; height:32px; font-size:11.5px;" placeholder="Filter team..." oninput="app.filterCards('employees-list-container', 'emp-item', this.value)">
+          </div>
+          <div id="employees-list-container" style="display:flex; flex-direction:column; gap:12px; max-height:480px; overflow-y:auto;">
+            ${this.data.employees.length === 0 ? `<div class="text-slate-400 text-sm py-4">No employees registered. Click "+ Add Employee" above.</div>` :
+              this.data.employees.map(emp => `
+                <div class="emp-item" style="display:flex; align-items:center; justify-content:space-between; padding:12px 14px; background:#F8FAFC; border:1px solid var(--border-subtle); border-radius:12px;">
+                  <div>
+                    <div style="font-weight:700; font-size:14px; color:#0F172A;">${emp.name}</div>
+                    <div style="font-size:12px; color:#64748B; font-weight:500;">${emp.role} • ${emp.department}</div>
+                  </div>
+                  <div style="font-family:var(--font-mono); font-size:13px; font-weight:700; color:#2563EB; background:#EFF6FF; padding:3px 8px; border-radius:6px;">$${emp.hourly_rate.toFixed(0)}/hr</div>
                 </div>
-                <div style="font-family:var(--font-mono); font-size:13px; font-weight:700; color:#2563EB; background:#EFF6FF; padding:3px 8px; border-radius:6px;">$${emp.hourly_rate.toFixed(0)}/hr</div>
-              </div>
-            `).join('')}
+              `).join('')}
           </div>
         </div>
 
@@ -836,10 +1314,19 @@ const app = {
           <h1 class="page-title">Tasks & Delivery Milestones</h1>
           <p class="page-sub">Track cross-team delivery priorities and employee task ownership.</p>
         </div>
+        <div class="page-actions">
+          <button class="btn-press btn btn-primary" onclick="app.openNewTaskModal()">
+            <i data-lucide="plus" class="w-4 h-4"></i> New Task
+          </button>
+        </div>
       </div>
 
       <div class="table-container mockup-item">
-        <table class="data-table">
+        <div class="table-filter-bar">
+          <input type="text" class="table-filter-input" placeholder="Search tasks by title, project, assignee..." oninput="app.filterTable('tasks-table', this.value)">
+          <span class="text-[12px] text-slate-400 font-medium">Total tasks: <strong>${this.data.tasks.length}</strong></span>
+        </div>
+        <table class="data-table" id="tasks-table">
           <thead>
             <tr>
               <th>Task</th>
@@ -852,25 +1339,26 @@ const app = {
             </tr>
           </thead>
           <tbody>
-            ${this.data.tasks.map(t => `
-              <tr>
-                <td><strong>${t.title}</strong><br><small style="color:var(--text-muted); font-weight:500;">${t.description}</small></td>
-                <td><span class="badge" style="background:#F1F5F9; color:#475569;">${t.project_name}</span></td>
-                <td class="font-medium text-slate-600">${t.assignee_name}</td>
-                <td>
-                  <span class="badge" style="background:${t.priority === 'urgent' ? '#FEF2F2' : '#EFF6FF'}; color:${t.priority === 'urgent' ? '#B91C1C' : '#1D4ED8'}; border:1px solid ${t.priority === 'urgent' ? '#FECACA' : '#BFDBFE'};">
-                    ${t.priority.toUpperCase()}
-                  </span>
-                </td>
-                <td class="font-medium text-slate-500">${t.due_date}</td>
-                <td><span class="badge" style="background:#F1F5F9; color:#334155;">${t.status.toUpperCase()}</span></td>
-                <td>
-                  <button class="btn-press btn btn-secondary btn-sm" onclick="app.cycleTaskStatus('${t.id}', '${t.status}')">
-                    Advance
-                  </button>
-                </td>
-              </tr>
-            `).join('')}
+            ${this.data.tasks.length === 0 ? `<tr><td colspan="7" class="text-center py-6 text-slate-400">No tasks created yet. Click "+ New Task" to add one.</td></tr>` :
+              this.data.tasks.map(t => `
+                <tr>
+                  <td><strong>${t.title}</strong><br><small style="color:var(--text-muted); font-weight:500;">${t.description}</small></td>
+                  <td><span class="badge" style="background:#F1F5F9; color:#475569;">${t.project_name}</span></td>
+                  <td class="font-medium text-slate-600">${t.assignee_name}</td>
+                  <td>
+                    <span class="badge" style="background:${t.priority === 'urgent' ? '#FEF2F2' : '#EFF6FF'}; color:${t.priority === 'urgent' ? '#B91C1C' : '#1D4ED8'}; border:1px solid ${t.priority === 'urgent' ? '#FECACA' : '#BFDBFE'};">
+                      ${t.priority.toUpperCase()}
+                    </span>
+                  </td>
+                  <td class="font-medium text-slate-500">${t.due_date}</td>
+                  <td><span class="badge" style="background:#F1F5F9; color:#334155;">${t.status.toUpperCase()}</span></td>
+                  <td>
+                    <button class="btn-press btn btn-secondary btn-sm" onclick="app.cycleTaskStatus('${t.id}', '${t.status}')">
+                      Advance
+                    </button>
+                  </td>
+                </tr>
+              `).join('')}
           </tbody>
         </table>
       </div>
@@ -1763,6 +2251,734 @@ const app = {
       await this.reloadEntity('invoices');
       await this.reloadEntity('summary');
       await this.reloadEntity('auditLogs');
+  },
+
+  // ---------------- HR & Team Modals ----------------
+  openNewEmployeeModal() {
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    modal.querySelector('.modal-window').style.maxWidth = '500px';
+
+    content.innerHTML = `
+      <h3 style="font-size:18px; font-weight:800; margin-bottom:10px; color:var(--text-main);">Add New Team Member</h3>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <label for="emp-name" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Full Name</label>
+        <input type="text" id="emp-name" class="form-input" placeholder="e.g. Jessica Chen">
+        
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="emp-role" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Role</label>
+            <input type="text" id="emp-role" class="form-input" value="Inventory Specialist">
+          </div>
+          <div>
+            <label for="emp-dept" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Department</label>
+            <input type="text" id="emp-dept" class="form-input" value="Operations">
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="emp-rate" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Hourly Rate ($)</label>
+            <input type="number" id="emp-rate" class="form-input" value="38.00" step="1">
+          </div>
+          <div>
+            <label for="emp-email" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Email Address</label>
+            <input type="email" id="emp-email" class="form-input" placeholder="jessica@example.com">
+          </div>
+        </div>
+
+        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
+          <button class="btn-press btn btn-secondary" onclick="app.closeModal()">Cancel</button>
+          <button class="btn-press btn btn-primary" onclick="app.submitNewEmployee()">Create Employee</button>
+        </div>
+      </div>
+    `;
+    modal.classList.add('active');
+  },
+
+  async submitNewEmployee() {
+    const name = document.getElementById('emp-name')?.value.trim();
+    const role = document.getElementById('emp-role')?.value.trim();
+    const dept = document.getElementById('emp-dept')?.value.trim();
+    const rate = parseFloat(document.getElementById('emp-rate')?.value || 0);
+    const email = document.getElementById('emp-email')?.value.trim();
+
+    if (!name || !role) {
+      this.showToast('Please enter both name and role');
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/employees', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, role, department: dept, hourly_rate: rate, email })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: res.statusText }));
+        this.showToast('Error: ' + (err.message || 'Failed to add employee'));
+        return;
+      }
+      this.showToast(`Employee ${name} added successfully`);
+      this.closeModal();
+      await this.reloadEntity('employees');
+      await this.reloadEntity('auditLogs');
+    } catch (e) {
+      this.showToast('Error: ' + e.message);
+    }
+  },
+
+  openNewShiftModal() {
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    modal.querySelector('.modal-window').style.maxWidth = '500px';
+
+    const empOptions = (this.data.employees || []).map(e => `<option value="${e.id}">${e.name} (${e.role})</option>`).join('') || '<option value="emp_01">Sarah Jenkins</option>';
+
+    content.innerHTML = `
+      <h3 style="font-size:18px; font-weight:800; margin-bottom:10px; color:var(--text-main);">Schedule Shift</h3>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <label for="shift-emp" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Employee</label>
+        <select id="shift-emp" class="form-input">
+          ${empOptions}
+        </select>
+        
+        <label for="shift-date" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Shift Date</label>
+        <input type="date" id="shift-date" class="form-input" value="2026-10-26">
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="shift-start" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Start Time</label>
+            <input type="text" id="shift-start" class="form-input" value="09:00 AM">
+          </div>
+          <div>
+            <label for="shift-end" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">End Time</label>
+            <input type="text" id="shift-end" class="form-input" value="05:30 PM">
+          </div>
+        </div>
+
+        <label for="shift-station" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Workstation / Area</label>
+        <input type="text" id="shift-station" class="form-input" value="Logistics Bay A">
+
+        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
+          <button class="btn-press btn btn-secondary" onclick="app.closeModal()">Cancel</button>
+          <button class="btn-press btn btn-primary" onclick="app.submitNewShift()">Save Shift</button>
+        </div>
+      </div>
+    `;
+    modal.classList.add('active');
+  },
+
+  async submitNewShift() {
+    const empId = document.getElementById('shift-emp')?.value;
+    const shiftDate = document.getElementById('shift-date')?.value;
+    const start = document.getElementById('shift-start')?.value.trim();
+    const end = document.getElementById('shift-end')?.value.trim();
+    const station = document.getElementById('shift-station')?.value.trim();
+
+    try {
+      const res = await fetch('/api/shifts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employee_id: empId,
+          shift_date: shiftDate,
+          start_time: start,
+          end_time: end,
+          station: station
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: res.statusText }));
+        this.showToast('Error: ' + (err.message || 'Failed to schedule shift'));
+        return;
+      }
+      this.showToast('Shift scheduled successfully');
+      this.closeModal();
+      await this.reloadEntity('shifts');
+      await this.reloadEntity('auditLogs');
+    } catch (e) {
+      this.showToast('Error: ' + e.message);
+    }
+  },
+
+  openNewTaskModal() {
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    modal.querySelector('.modal-window').style.maxWidth = '520px';
+
+    const empOptions = (this.data.employees || []).map(e => `<option value="${e.id}">${e.name} (${e.role})</option>`).join('') || '<option value="emp_01">Sarah Jenkins</option>';
+
+    content.innerHTML = `
+      <h3 style="font-size:18px; font-weight:800; margin-bottom:10px; color:var(--text-main);">Create New Task</h3>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <label for="task-title" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Task Title</label>
+        <input type="text" id="task-title" class="form-input" placeholder="e.g. Conduct Warehouse Bin Audit">
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="task-project" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Project</label>
+            <input type="text" id="task-project" class="form-input" value="Supply Chain Scale">
+          </div>
+          <div>
+            <label for="task-assignee" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Assignee</label>
+            <select id="task-assignee" class="form-input">
+              ${empOptions}
+            </select>
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="task-priority" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Priority</label>
+            <select id="task-priority" class="form-input">
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+              <option value="urgent">Urgent</option>
+              <option value="low">Low</option>
+            </select>
+          </div>
+          <div>
+            <label for="task-due" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Due Date</label>
+            <input type="date" id="task-due" class="form-input" value="2026-11-05">
+          </div>
+        </div>
+
+        <label for="task-desc" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Description</label>
+        <textarea id="task-desc" class="form-input" rows="3">Verify physical inventory counts against system records across storage bins.</textarea>
+
+        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
+          <button class="btn-press btn btn-secondary" onclick="app.closeModal()">Cancel</button>
+          <button class="btn-press btn btn-primary" onclick="app.submitNewTask()">Create Task</button>
+        </div>
+      </div>
+    `;
+    modal.classList.add('active');
+  },
+
+  async submitNewTask() {
+    const title = document.getElementById('task-title')?.value.trim();
+    const project = document.getElementById('task-project')?.value.trim();
+    const assigneeId = document.getElementById('task-assignee')?.value;
+    const priority = document.getElementById('task-priority')?.value;
+    const due = document.getElementById('task-due')?.value;
+    const desc = document.getElementById('task-desc')?.value.trim();
+
+    if (!title) {
+      this.showToast('Please enter a task title');
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/tasks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title,
+          project_name: project,
+          assignee_id: assigneeId,
+          priority,
+          due_date: due,
+          description: desc
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: res.statusText }));
+        this.showToast('Error: ' + (err.message || 'Failed to create task'));
+        return;
+      }
+      this.showToast(`Task "${title}" created`);
+      this.closeModal();
+      await this.reloadEntity('tasks');
+      await this.reloadEntity('auditLogs');
+    } catch (e) {
+      this.showToast('Error: ' + e.message);
+    }
+  },
+
+  // ---------------- Supply Chain & Multi-Warehouse Modals ----------------
+  openNewWarehouseModal() {
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    modal.querySelector('.modal-window').style.maxWidth = '500px';
+
+    content.innerHTML = `
+      <h3 style="font-size:18px; font-weight:800; margin-bottom:10px; color:var(--text-main);">Add New Warehouse</h3>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <div style="display:grid; grid-template-columns:1fr 1.5fr; gap:12px;">
+          <div>
+            <label for="wh-code" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Warehouse Code</label>
+            <input type="text" id="wh-code" class="form-input" placeholder="e.g. WH-SOUTH">
+          </div>
+          <div>
+            <label for="wh-name" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Facility Name</label>
+            <input type="text" id="wh-name" class="form-input" placeholder="e.g. South Distribution Hub">
+          </div>
+        </div>
+
+        <label for="wh-location" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Location / Address</label>
+        <input type="text" id="wh-location" class="form-input" placeholder="e.g. 500 Airport Way, Dallas, TX">
+
+        <label for="wh-desc" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Description / Specialization</label>
+        <input type="text" id="wh-desc" class="form-input" value="Bulk storage & secondary fulfillment hub">
+
+        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
+          <button class="btn-press btn btn-secondary" onclick="app.closeModal()">Cancel</button>
+          <button class="btn-press btn btn-primary" onclick="app.submitNewWarehouse()">Create Warehouse</button>
+        </div>
+      </div>
+    `;
+    modal.classList.add('active');
+  },
+
+  async submitNewWarehouse() {
+    const code = document.getElementById('wh-code')?.value.trim();
+    const name = document.getElementById('wh-name')?.value.trim();
+    const location = document.getElementById('wh-location')?.value.trim();
+    const desc = document.getElementById('wh-desc')?.value.trim();
+
+    if (!code || !name) {
+      this.showToast('Please provide both warehouse code and name');
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/warehouses', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, name, location, description: desc })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: res.statusText }));
+        this.showToast('Error: ' + (err.message || 'Failed to add warehouse'));
+        return;
+      }
+      this.showToast(`Warehouse ${name} (${code}) added`);
+      this.closeModal();
+      await this.reloadEntity('warehouses');
+      await this.reloadEntity('auditLogs');
+    } catch (e) {
+      this.showToast('Error: ' + e.message);
+    }
+  },
+
+  openStockTransferModal(sourceWhId = '', skuCode = '') {
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    modal.querySelector('.modal-window').style.maxWidth = '540px';
+
+    const whOptionsFrom = (this.data.warehouses || []).map(w => `<option value="${w.id}" ${w.id === sourceWhId ? 'selected' : ''}>${w.name} (${w.code})</option>`).join('');
+    const whOptionsTo = (this.data.warehouses || []).map(w => `<option value="${w.id}" ${w.id !== sourceWhId ? 'selected' : ''}>${w.name} (${w.code})</option>`).join('');
+    const skuOptions = (this.data.skus || []).map(s => `<option value="${s.code}" ${s.code === skuCode ? 'selected' : ''}>${s.code} — ${s.name}</option>`).join('');
+
+    content.innerHTML = `
+      <h3 style="font-size:18px; font-weight:800; margin-bottom:10px; color:var(--text-main);">Transfer Stock Between Warehouses</h3>
+      <p style="font-size:13px; color:var(--text-muted); margin-bottom:14px;">
+        Execute an atomic inter-warehouse inventory movement with optimistic balance verification.
+      </p>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="tr-source" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Source Warehouse</label>
+            <select id="tr-source" class="form-input">
+              ${whOptionsFrom}
+            </select>
+          </div>
+          <div>
+            <label for="tr-dest" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Destination Warehouse</label>
+            <select id="tr-dest" class="form-input">
+              ${whOptionsTo}
+            </select>
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1.5fr 1fr; gap:12px;">
+          <div>
+            <label for="tr-sku" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Select SKU</label>
+            <select id="tr-sku" class="form-input">
+              ${skuOptions}
+            </select>
+          </div>
+          <div>
+            <label for="tr-qty" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Quantity</label>
+            <input type="number" id="tr-qty" class="form-input" value="10" min="1">
+          </div>
+        </div>
+
+        <label for="tr-reason" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Transfer Reason / Memo</label>
+        <input type="text" id="tr-reason" class="form-input" value="Regional rebalancing & order fulfillment prep">
+
+        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
+          <button class="btn-press btn btn-secondary" onclick="app.closeModal()">Cancel</button>
+          <button class="btn-press btn btn-primary" onclick="app.submitStockTransfer()">
+            <i data-lucide="arrow-left-right" class="w-4 h-4"></i> Execute Transfer
+          </button>
+        </div>
+      </div>
+    `;
+    modal.classList.add('active');
+  },
+
+  async submitStockTransfer() {
+    const fromWh = document.getElementById('tr-source')?.value;
+    const toWh = document.getElementById('tr-dest')?.value;
+    const skuCode = document.getElementById('tr-sku')?.value;
+    const qty = parseInt(document.getElementById('tr-qty')?.value || 0, 10);
+    const reason = document.getElementById('tr-reason')?.value.trim();
+
+    if (fromWh === toWh) {
+      this.showToast('Source and destination warehouses cannot be the same');
+      return;
+    }
+    if (qty <= 0) {
+      this.showToast('Transfer quantity must be greater than 0');
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/stock-transfers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from_warehouse_id: fromWh,
+          to_warehouse_id: toWh,
+          sku_code: skuCode,
+          quantity: qty,
+          reason
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: res.statusText }));
+        this.showToast('Error: ' + (err.message || 'Transfer failed'));
+        return;
+      }
+      const data = await res.json();
+      this.showToast(`Transfer #${data.transfer_number} executed for ${qty}x ${skuCode}`);
+      this.closeModal();
+      await this.reloadEntity('warehouseStocks');
+      await this.reloadEntity('stockTransfers');
+      await this.reloadEntity('skus');
+      await this.reloadEntity('auditLogs');
+    } catch (e) {
+      this.showToast('Error: ' + e.message);
+    }
+  },
+
+  openReceiveGRNModal(poId = '') {
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    modal.querySelector('.modal-window').style.maxWidth = '640px';
+
+    const poList = (this.data.purchaseOrders || []).filter(p => p.status === 'ordered' || p.status === 'partially_received' || p.status === 'approved' || p.id === poId);
+    const poOptions = poList.map(p => `<option value="${p.id}" ${p.id === poId ? 'selected' : ''}>${p.id} — Total: $${p.total.toFixed(2)} (${p.status})</option>`).join('') || '<option value="po_01">po_01 — $2,250.00 (ordered)</option>';
+    const whOptions = (this.data.warehouses || []).map(w => `<option value="${w.id}">${w.name} (${w.code})</option>`).join('');
+
+    // Pre-populate items from selected PO
+    const targetPO = poList.find(p => p.id === poId) || poList[0];
+    let items = [];
+    if (targetPO && targetPO.items_json) {
+      try { items = JSON.parse(targetPO.items_json); } catch(e) {}
+    }
+    if (items.length === 0) {
+      items = [{ sku_code: 'SKU-CORE-100', quantity: 20 }];
+    }
+
+    content.innerHTML = `
+      <h3 style="font-size:18px; font-weight:800; margin-bottom:10px; color:var(--text-main);">Receive Goods (GRN Generator)</h3>
+      <p style="font-size:13px; color:var(--text-muted); margin-bottom:16px;">
+        Issue a physical Goods Receipt Note. Supports partial receipts, auto-allocates to warehouse stock, and updates General Ledger.
+      </p>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="grn-po" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Purchase Order</label>
+            <select id="grn-po" class="form-input">
+              ${poOptions}
+            </select>
+          </div>
+          <div>
+            <label for="grn-warehouse" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Destination Warehouse</label>
+            <select id="grn-warehouse" class="form-input">
+              ${whOptions}
+            </select>
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="grn-carrier" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Carrier / Tracking #</label>
+            <input type="text" id="grn-carrier" class="form-input" value="FedEx Express #8829-1002">
+          </div>
+          <div>
+            <label for="grn-inspector" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Receiving Inspector / Agent</label>
+            <input type="text" id="grn-inspector" class="form-input" value="Autonomous Receiving Agent">
+          </div>
+        </div>
+
+        <div>
+          <label style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase; margin-bottom:6px; display:block;">Physical Received Items</label>
+          <table class="data-table" style="font-size:13px;" id="grn-items-table">
+            <thead>
+              <tr>
+                <th>SKU Code</th>
+                <th style="width:130px;">Received Qty</th>
+                <th style="width:140px;">Storage Bin</th>
+              </tr>
+            </thead>
+            <tbody id="grn-items-body">
+              ${items.map((it, idx) => `
+                <tr class="grn-item-row">
+                  <td><input type="text" class="form-input grn-item-sku" style="padding:6px 8px; font-size:12.5px;" value="${it.sku_code || 'SKU-CORE-100'}"></td>
+                  <td><input type="number" class="form-input grn-item-qty" style="padding:6px 8px; font-size:12.5px;" value="${it.quantity || 20}" min="1"></td>
+                  <td><input type="text" class="form-input grn-item-bin" style="padding:6px 8px; font-size:12.5px;" value="A-01-0${idx + 1}"></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+
+        <label for="grn-notes" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Receiving Inspection Notes</label>
+        <input type="text" id="grn-notes" class="form-input" value="Shipment verified in good physical condition; quality QA passed.">
+
+        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
+          <button class="btn-press btn btn-secondary" onclick="app.closeModal()">Cancel</button>
+          <button class="btn-press btn btn-primary" onclick="app.submitReceiveGRN()">
+            <i data-lucide="package-check" class="w-4 h-4"></i> Issue GRN & Restock
+          </button>
+        </div>
+      </div>
+    `;
+    modal.classList.add('active');
+  },
+
+  async submitReceiveGRN() {
+    const poId = document.getElementById('grn-po')?.value;
+    const whId = document.getElementById('grn-warehouse')?.value;
+    const carrier = document.getElementById('grn-carrier')?.value.trim();
+    const inspector = document.getElementById('grn-inspector')?.value.trim();
+    const notes = document.getElementById('grn-notes')?.value.trim();
+
+    const rows = document.querySelectorAll('.grn-item-row');
+    const items = [];
+    rows.forEach(r => {
+      const sku = r.querySelector('.grn-item-sku')?.value.trim();
+      const qty = parseInt(r.querySelector('.grn-item-qty')?.value || 0, 10);
+      const bin = r.querySelector('.grn-item-bin')?.value.trim() || 'A-01-01';
+      if (sku && qty > 0) {
+        items.push({ sku_code: sku, quantity: qty, bin_location: bin });
+      }
+    });
+
+    if (items.length === 0) {
+      this.showToast('Please specify at least one item to receive');
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/grns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          po_id: poId,
+          warehouse_id: whId,
+          carrier_tracking: carrier,
+          inspector_name: inspector,
+          notes,
+          items_json: JSON.stringify(items)
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: res.statusText }));
+        this.showToast('Error: ' + (err.message || 'GRN failed'));
+        return;
+      }
+      const data = await res.json();
+      this.showToast(`GRN #${data.grn_number} created and inventory updated`);
+      this.closeModal();
+      await this.reloadEntity('grns');
+      await this.reloadEntity('purchaseOrders');
+      await this.reloadEntity('warehouseStocks');
+      await this.reloadEntity('skus');
+      await this.reloadEntity('summary');
+      await this.reloadEntity('auditLogs');
+    } catch (e) {
+      this.showToast('Error: ' + e.message);
+    }
+  },
+
+  openNewSupplierBillModal() {
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    modal.querySelector('.modal-window').style.maxWidth = '540px';
+
+    const supOptions = (this.data.suppliers || []).map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+    const poOptions = (this.data.purchaseOrders || []).map(p => `<option value="${p.id}">${p.id} ($${p.total.toFixed(2)})</option>`).join('') || '<option value="po_01">po_01</option>';
+    const grnOptions = (this.data.grns || []).map(g => `<option value="${g.id}">${g.grn_number} (${g.po_id})</option>`).join('') || '<option value="">No GRN recorded yet</option>';
+
+    content.innerHTML = `
+      <h3 style="font-size:18px; font-weight:800; margin-bottom:10px; color:var(--text-main);">Add Supplier Bill</h3>
+      <p style="font-size:13px; color:var(--text-muted); margin-bottom:16px;">
+        Register a vendor invoice for Accounts Payable and 3-Way Matching reconciliation.
+      </p>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="bill-number" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Bill # / Invoice Ref</label>
+            <input type="text" id="bill-number" class="form-input" value="BILL-2026-${Math.floor(1000 + Math.random() * 9000)}">
+          </div>
+          <div>
+            <label for="bill-supplier" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Vendor / Supplier</label>
+            <select id="bill-supplier" class="form-input">
+              ${supOptions}
+            </select>
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="bill-po" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Target Purchase Order</label>
+            <select id="bill-po" class="form-input">
+              ${poOptions}
+            </select>
+          </div>
+          <div>
+            <label for="bill-grn" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Related GRN</label>
+            <select id="bill-grn" class="form-input">
+              ${grnOptions}
+            </select>
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="bill-amount" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Billed Amount ($)</label>
+            <input type="number" id="bill-amount" class="form-input" value="2250.00" step="0.5">
+          </div>
+          <div>
+            <label for="bill-due" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Due Date</label>
+            <input type="date" id="bill-due" class="form-input" value="2026-11-25">
+          </div>
+        </div>
+
+        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
+          <button class="btn-press btn btn-secondary" onclick="app.closeModal()">Cancel</button>
+          <button class="btn-press btn btn-primary" onclick="app.submitNewSupplierBill()">Register Supplier Bill</button>
+        </div>
+      </div>
+    `;
+    modal.classList.add('active');
+  },
+
+  async submitNewSupplierBill() {
+    const billNum = document.getElementById('bill-number')?.value.trim();
+    const supId = document.getElementById('bill-supplier')?.value;
+    const poId = document.getElementById('bill-po')?.value;
+    const grnId = document.getElementById('bill-grn')?.value;
+    const amount = parseFloat(document.getElementById('bill-amount')?.value || 0);
+    const dueDate = document.getElementById('bill-due')?.value;
+
+    if (!billNum) {
+      this.showToast('Please enter a bill number');
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/supplier-bills', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bill_number: billNum,
+          supplier_id: supId,
+          po_id: poId,
+          grn_id: grnId,
+          amount,
+          due_date: dueDate
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: res.statusText }));
+        this.showToast('Error: ' + (err.message || 'Failed to register bill'));
+        return;
+      }
+      this.showToast(`Supplier Bill ${billNum} recorded`);
+      this.closeModal();
+      await this.reloadEntity('supplierBills');
+      await this.reloadEntity('summary');
+      await this.reloadEntity('auditLogs');
+    } catch (e) {
+      this.showToast('Error: ' + e.message);
+    }
+  },
+
+  async runThreeWayMatch(billId) {
+    try {
+      this.showToast('Running 3-Way Matching Engine...');
+      const res = await fetch('/api/supplier-bills/match', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bill_id: billId })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: res.statusText }));
+        this.showToast('Match error: ' + (err.message || 'Reconciliation failed'));
+        return;
+      }
+      const matchResult = await res.json();
+      
+      const modal = document.getElementById('action-modal');
+      const content = document.getElementById('modal-content');
+      modal.querySelector('.modal-window').style.maxWidth = '560px';
+
+      const isMatched = matchResult.match_status === 'matched';
+      content.innerHTML = `
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px;">
+          <div class="w-10 h-10 rounded-xl ${isMatched ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'} flex items-center justify-center">
+            <i data-lucide="${isMatched ? 'check-circle' : 'alert-triangle'}" class="w-5 h-5"></i>
+          </div>
+          <div>
+            <h3 style="font-size:18px; font-weight:800; color:var(--text-main);">3-Way Match Inspection</h3>
+            <span class="badge ${isMatched ? 'badge-matched' : 'badge-variance-price'}">${matchResult.match_status.toUpperCase()}</span>
+          </div>
+        </div>
+
+        <div style="background:var(--bg-tertiary); border:1px solid var(--border-subtle); border-radius:14px; padding:16px; margin-bottom:16px;">
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; font-size:13px;">
+            <div>
+              <span class="text-slate-400">Bill Number:</span>
+              <div class="font-bold text-slate-800">${matchResult.bill_number}</div>
+            </div>
+            <div>
+              <span class="text-slate-400">Billed Total:</span>
+              <div class="font-bold text-slate-800">$${matchResult.bill_amount.toFixed(2)}</div>
+            </div>
+            <div>
+              <span class="text-slate-400">PO Contract Expected:</span>
+              <div class="font-bold text-slate-800">$${matchResult.po_total.toFixed(2)}</div>
+            </div>
+            <div>
+              <span class="text-slate-400">Variance Amount:</span>
+              <div class="font-bold ${Math.abs(matchResult.variance_amount) > 0 ? 'text-rose-600' : 'text-emerald-600'}">
+                $${matchResult.variance_amount.toFixed(2)}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style="font-size:13px; color:var(--text-muted); line-height:1.5; margin-bottom:20px;">
+          ${matchResult.discrepancy_reason ? `<strong>Details:</strong> ${matchResult.discrepancy_reason}` : 'All line items, contract pricing, and physical receipts match perfectly with zero variance.'}
+          ${!isMatched ? `<br><br><span style="color:#D97706; font-weight:600;">⚠️ Discrepancy detected: this bill has been placed on hold and sent to the Human Approval Inbox.</span>` : ''}
+        </div>
+
+        <div style="display:flex; justify-content:flex-end;">
+          <button class="btn-press btn btn-primary" onclick="app.closeModal()">Acknowledge</button>
+        </div>
+      `;
+      modal.classList.add('active');
+      if (window.lucide) lucide.createIcons();
+
+      await this.reloadEntity('supplierBills');
+      await this.reloadEntity('approvals');
+      await this.reloadEntity('auditLogs');
     } catch (e) {
       this.showToast('Error: ' + e.message);
     }
@@ -1967,7 +3183,14 @@ const app = {
       { title: 'Trigger Immediate NAP Directory Sync', tag: 'Action', action: () => { app.syncAllNAP(); app.closeCommandPalette(); } },
       { title: 'Create Client Invoice', tag: 'Action', action: () => { app.closeCommandPalette(); app.openNewInvoiceModal(); } },
       { title: 'Create Supplier Purchase Order', tag: 'Action', action: () => { app.closeCommandPalette(); app.openNewPOModal(); } },
-      { title: 'Add New Sales Deal', tag: 'Action', action: () => { app.closeCommandPalette(); app.openNewDealModal(); } }
+      { title: 'Add New Sales Deal', tag: 'Action', action: () => { app.closeCommandPalette(); app.openNewDealModal(); } },
+      { title: 'Add Team Member (Employee)', tag: 'Action', action: () => { app.closeCommandPalette(); app.openNewEmployeeModal(); } },
+      { title: 'Schedule Employee Shift', tag: 'Action', action: () => { app.closeCommandPalette(); app.openNewShiftModal(); } },
+      { title: 'Create Project Task', tag: 'Action', action: () => { app.closeCommandPalette(); app.openNewTaskModal(); } },
+      { title: 'Add New Warehouse', tag: 'Action', action: () => { app.closeCommandPalette(); app.openNewWarehouseModal(); } },
+      { title: 'Transfer Warehouse Stock', tag: 'Action', action: () => { app.closeCommandPalette(); app.openStockTransferModal(); } },
+      { title: 'Receive Goods (GRN)', tag: 'Action', action: () => { app.closeCommandPalette(); app.openReceiveGRNModal(); } },
+      { title: 'Add Supplier Bill & 3-Way Match', tag: 'Action', action: () => { app.closeCommandPalette(); app.openNewSupplierBillModal(); } }
     ];
 
     const filtered = commands.filter(c => c.title.toLowerCase().includes(q) || c.tag.toLowerCase().includes(q));

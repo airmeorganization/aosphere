@@ -18,11 +18,12 @@ var (
 
 // Purchase Order Lifecycle States
 const (
-	POStatusDraft           = "draft"
-	POStatusPendingApproval = "pending_approval"
-	POStatusOrdered         = "ordered"
-	POStatusReceived        = "received"
-	POStatusCancelled       = "cancelled"
+	POStatusDraft             = "draft"
+	POStatusPendingApproval   = "pending_approval"
+	POStatusOrdered           = "ordered"
+	POStatusPartiallyReceived = "partially_received"
+	POStatusReceived          = "received"
+	POStatusCancelled         = "cancelled"
 )
 
 var validPOTransitions = map[string]map[string]bool{
@@ -36,8 +37,14 @@ var validPOTransitions = map[string]map[string]bool{
 		POStatusCancelled: true, // Upon human rejection or cancel
 	},
 	POStatusOrdered: {
-		POStatusReceived:  true, // Goods arrived
-		POStatusCancelled: true, // Supplier cancel
+		POStatusPartiallyReceived: true, // Partial delivery received
+		POStatusReceived:          true, // Goods fully arrived
+		POStatusCancelled:         true, // Supplier cancel
+	},
+	POStatusPartiallyReceived: {
+		POStatusPartiallyReceived: true, // Another partial shipment
+		POStatusReceived:          true, // Final remaining goods arrived
+		POStatusCancelled:         true, // Cancel remainder
 	},
 	POStatusReceived:  {}, // Terminal state
 	POStatusCancelled: {}, // Terminal state

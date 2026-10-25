@@ -137,7 +137,7 @@ func createTables(db *sql.DB) error {
 		org_id TEXT NOT NULL DEFAULT 'org_default' REFERENCES organizations(id),
 		po_number TEXT NOT NULL,
 		supplier_id TEXT REFERENCES suppliers(id),
-		status TEXT NOT NULL DEFAULT 'draft', -- draft, pending_approval, ordered, received, cancelled
+		status TEXT NOT NULL DEFAULT 'draft', -- draft, pending_approval, ordered, partially_received, received, cancelled
 		total_amount REAL NOT NULL DEFAULT 0.0,
 		items_json TEXT NOT NULL DEFAULT '[]',
 		created_by_type TEXT NOT NULL DEFAULT 'human', -- human, agent
@@ -146,6 +146,84 @@ func createTables(db *sql.DB) error {
 		version INTEGER NOT NULL DEFAULT 1,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		UNIQUE(org_id, po_number)
+	);
+
+	CREATE TABLE IF NOT EXISTS warehouses (
+		id TEXT PRIMARY KEY,
+		org_id TEXT NOT NULL DEFAULT 'org_default' REFERENCES organizations(id),
+		name TEXT NOT NULL,
+		code TEXT NOT NULL,
+		address TEXT NOT NULL DEFAULT '',
+		is_active BOOLEAN NOT NULL DEFAULT 1,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(org_id, code)
+	);
+
+	CREATE TABLE IF NOT EXISTS warehouse_stocks (
+		id TEXT PRIMARY KEY,
+		org_id TEXT NOT NULL DEFAULT 'org_default' REFERENCES organizations(id),
+		warehouse_id TEXT NOT NULL REFERENCES warehouses(id),
+		sku_id TEXT NOT NULL REFERENCES skus(id),
+		stock_quantity INTEGER NOT NULL DEFAULT 0,
+		reserved_quantity INTEGER NOT NULL DEFAULT 0,
+		bin_location TEXT NOT NULL DEFAULT 'A-01-01',
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(org_id, warehouse_id, sku_id)
+	);
+
+	CREATE TABLE IF NOT EXISTS goods_receipt_notes (
+		id TEXT PRIMARY KEY,
+		org_id TEXT NOT NULL DEFAULT 'org_default' REFERENCES organizations(id),
+		grn_number TEXT NOT NULL,
+		po_id TEXT NOT NULL REFERENCES purchase_orders(id),
+		warehouse_id TEXT NOT NULL REFERENCES warehouses(id),
+		received_by TEXT NOT NULL DEFAULT 'warehouse_staff',
+		status TEXT NOT NULL DEFAULT 'completed',
+		items_json TEXT NOT NULL DEFAULT '[]',
+		notes TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(org_id, grn_number)
+	);
+
+	CREATE TABLE IF NOT EXISTS supplier_bills (
+		id TEXT PRIMARY KEY,
+		org_id TEXT NOT NULL DEFAULT 'org_default' REFERENCES organizations(id),
+		bill_number TEXT NOT NULL,
+		supplier_id TEXT NOT NULL REFERENCES suppliers(id),
+		po_id TEXT REFERENCES purchase_orders(id),
+		amount REAL NOT NULL DEFAULT 0.0,
+		status TEXT NOT NULL DEFAULT 'open',
+		match_status TEXT NOT NULL DEFAULT 'pending',
+		items_json TEXT NOT NULL DEFAULT '[]',
+		notes TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(org_id, bill_number)
+	);
+
+	CREATE TABLE IF NOT EXISTS stock_transfers (
+		id TEXT PRIMARY KEY,
+		org_id TEXT NOT NULL DEFAULT 'org_default' REFERENCES organizations(id),
+		transfer_number TEXT NOT NULL,
+		from_warehouse_id TEXT NOT NULL REFERENCES warehouses(id),
+		to_warehouse_id TEXT NOT NULL REFERENCES warehouses(id),
+		status TEXT NOT NULL DEFAULT 'completed',
+		items_json TEXT NOT NULL DEFAULT '[]',
+		notes TEXT,
+		created_by TEXT NOT NULL DEFAULT 'system',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(org_id, transfer_number)
+	);
+
+	CREATE TABLE IF NOT EXISTS batch_lots (
+		id TEXT PRIMARY KEY,
+		org_id TEXT NOT NULL DEFAULT 'org_default' REFERENCES organizations(id),
+		sku_id TEXT NOT NULL REFERENCES skus(id),
+		batch_number TEXT NOT NULL,
+		expiry_date TEXT,
+		quantity INTEGER NOT NULL DEFAULT 0,
+		warehouse_id TEXT REFERENCES warehouses(id),
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(org_id, sku_id, batch_number)
 	);
 
 	-- 2. CRM & SALES PIPELINE
@@ -374,6 +452,12 @@ func createTables(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_approvals_pending ON approvals(org_id, status);
 	CREATE INDEX IF NOT EXISTS idx_idempotency_org_key ON idempotency_keys(org_id, key);
 	CREATE INDEX IF NOT EXISTS idx_audit_org ON audit_logs(org_id);
+	CREATE INDEX IF NOT EXISTS idx_warehouses_org ON warehouses(org_id);
+	CREATE INDEX IF NOT EXISTS idx_warehouse_stocks_org ON warehouse_stocks(org_id, warehouse_id);
+	CREATE INDEX IF NOT EXISTS idx_grn_org ON goods_receipt_notes(org_id, po_id);
+	CREATE INDEX IF NOT EXISTS idx_supplier_bills_org ON supplier_bills(org_id, po_id);
+	CREATE INDEX IF NOT EXISTS idx_transfers_org ON stock_transfers(org_id);
+	CREATE INDEX IF NOT EXISTS idx_batches_org ON batch_lots(org_id, sku_id);
 	`
 	_, err := db.Exec(schema)
 	return err
@@ -398,6 +482,10 @@ func SeedStarterData(db *sql.DB) error {
 	_, _ = db.Exec(`INSERT OR IGNORE INTO company_profiles (org_id, company_name, currency, timezone, tax_rate, address, phone, website, onboarding_completed)
 		VALUES ('org_default', 'AO Sphere Enterprise', 'USD', 'America/New_York', 0.10, '100 Innovation Way, Suite 400', '+1 (555) 019-2834', 'https://aosphere.local', 1)`)
 
+	// Seed Starter Warehouses
+	_, _ = db.Exec(`INSERT OR IGNORE INTO warehouses (id, org_id, name, code, address, is_active) VALUES
+		('wh_main_org_default', 'org_default', 'Main Logistics Hub', 'WH-MAIN', '100 Innovation Way, Logistics Gate 1', 1),
+		('wh_east_org_default', 'org_default', 'East Coast Fulfillment Center', 'WH-EAST', '450 Harbor Boulevard, Dock 12', 1)`)
 
 	// 2. Seed Admin User (Password: "Admin1234!")
 	adminHash, err := auth.HashPassword("Admin1234!")

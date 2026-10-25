@@ -715,6 +715,10 @@ func (s *Store) GetEmployeesForOrg(orgID string) ([]db.Employee, error) {
 }
 
 func (s *Store) CreateEmployee(orgID, name, role, department, email, phone string, hourlyRate float64) (*db.Employee, error) {
+	return s.CreateEmployeeForOrg(orgID, name, role, department, email, phone, hourlyRate, "human", "system")
+}
+
+func (s *Store) CreateEmployeeForOrg(orgID, name, role, department, email, phone string, hourlyRate float64, actorType, actorID string) (*db.Employee, error) {
 	if orgID == "" {
 		orgID = "org_default"
 	}
@@ -726,6 +730,7 @@ func (s *Store) CreateEmployee(orgID, name, role, department, email, phone strin
 	if err != nil {
 		return nil, err
 	}
+	_ = s.LogAuditForOrg(orgID, actorType, actorID, "CREATE_EMPLOYEE", "employees", id, fmt.Sprintf("Created employee %s (%s)", name, role), "{}")
 	return &db.Employee{
 		ID:         id,
 		OrgID:      orgID,
@@ -815,6 +820,47 @@ func (s *Store) UpdateShiftStatusForOrg(orgID, shiftID, status, actorType, actor
 	return nil
 }
 
+func (s *Store) CreateShiftForOrg(orgID, employeeID, shiftDate, startTime, endTime, station, status, actorType, actorID string) (*db.Shift, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	if status == "" {
+		status = "scheduled"
+	}
+	if station == "" {
+		station = "Floor"
+	}
+	id := "shf_" + uuid.New().String()[:8]
+	now := time.Now()
+
+	var empName string
+	if employeeID != "" {
+		_ = s.db.QueryRow(`SELECT name FROM employees WHERE id = ? AND org_id = ?`, employeeID, orgID).Scan(&empName)
+	}
+
+	_, err := s.db.Exec(`INSERT INTO shifts (id, org_id, employee_id, shift_date, start_time, end_time, station, status, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, orgID, employeeID, shiftDate, startTime, endTime, station, status, now)
+	if err != nil {
+		return nil, err
+	}
+
+	_ = s.LogAuditForOrg(orgID, actorType, actorID, "CREATE_SHIFT", "shifts", id, fmt.Sprintf("Scheduled shift for %s on %s (%s-%s)", empName, shiftDate, startTime, endTime), "{}")
+
+	return &db.Shift{
+		ID:           id,
+		OrgID:        orgID,
+		EmployeeID:   employeeID,
+		EmployeeName: empName,
+		ShiftDate:    shiftDate,
+		StartTime:    startTime,
+		EndTime:      endTime,
+		Station:      station,
+		Status:       status,
+		CreatedAt:    now,
+	}, nil
+}
+
 func (s *Store) GetTasks() ([]db.Task, error) {
 	return s.GetTasksForOrg("org_default")
 }
@@ -862,6 +908,51 @@ func (s *Store) UpdateTaskStatusForOrg(orgID, taskID, status, actorType, actorID
 	}
 	_ = s.LogAuditForOrg(orgID, actorType, actorID, "UPDATE_TASK", "tasks", taskID, fmt.Sprintf("Status set to %s", status), "{}")
 	return nil
+}
+
+func (s *Store) CreateTaskForOrg(orgID, title, description, projectName, assigneeID, priority, dueDate, status, actorType, actorID string) (*db.Task, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	if projectName == "" {
+		projectName = "General"
+	}
+	if priority == "" {
+		priority = "medium"
+	}
+	if status == "" {
+		status = "todo"
+	}
+	id := "tsk_" + uuid.New().String()[:8]
+	now := time.Now()
+
+	var assigneeName string
+	if assigneeID != "" {
+		_ = s.db.QueryRow(`SELECT name FROM employees WHERE id = ? AND org_id = ?`, assigneeID, orgID).Scan(&assigneeName)
+	}
+
+	_, err := s.db.Exec(`INSERT INTO tasks (id, org_id, title, description, project_name, assignee_id, priority, status, due_date, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, orgID, title, description, projectName, assigneeID, priority, status, dueDate, now)
+	if err != nil {
+		return nil, err
+	}
+
+	_ = s.LogAuditForOrg(orgID, actorType, actorID, "CREATE_TASK", "tasks", id, fmt.Sprintf("Task '%s' created (Priority: %s)", title, priority), "{}")
+
+	return &db.Task{
+		ID:           id,
+		OrgID:        orgID,
+		Title:        title,
+		Description:  description,
+		ProjectName:  projectName,
+		AssigneeID:   assigneeID,
+		AssigneeName: assigneeName,
+		Priority:     priority,
+		Status:       status,
+		DueDate:      dueDate,
+		CreatedAt:    now,
+	}, nil
 }
 
 // ----------------- DIGITAL PRESENCE & REPUTATION -----------------
@@ -953,4 +1044,382 @@ func (s *Store) ReplyReviewForOrg(orgID, reviewID, replyText, status, actorType,
 	}
 	_ = s.LogAuditForOrg(orgID, actorType, actorID, "REPLY_REVIEW", "reviews", reviewID, fmt.Sprintf("Reply status: %s", status), replyText)
 	return nil
+}
+
+// ----------------- SUPPLY CHAIN & MULTI-WAREHOUSE METHODS -----------------
+
+func (s *Store) GetWarehousesForOrg(orgID string) ([]db.Warehouse, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	rows, err := s.db.Query(`SELECT id, org_id, name, code, COALESCE(address, ''), is_active, created_at FROM warehouses WHERE org_id = ? ORDER BY name ASC`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []db.Warehouse
+	for rows.Next() {
+		var w db.Warehouse
+		if err := rows.Scan(&w.ID, &w.OrgID, &w.Name, &w.Code, &w.Address, &w.IsActive, &w.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, w)
+	}
+	return list, nil
+}
+
+func (s *Store) CreateWarehouseForOrg(orgID, name, code, address, actorType, actorID string) (*db.Warehouse, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	id := "wh_" + uuid.New().String()[:8]
+	now := time.Now()
+	_, err := s.db.Exec(`INSERT INTO warehouses (id, org_id, name, code, address, is_active, created_at)
+		VALUES (?, ?, ?, ?, ?, 1, ?)`,
+		id, orgID, name, code, address, now)
+	if err != nil {
+		return nil, err
+	}
+
+	_ = s.LogAuditForOrg(orgID, actorType, actorID, "CREATE_WAREHOUSE", "warehouses", id, fmt.Sprintf("Created warehouse %s (%s)", name, code), "{}")
+
+	return &db.Warehouse{
+		ID:        id,
+		OrgID:     orgID,
+		Name:      name,
+		Code:      code,
+		Address:   address,
+		IsActive:  true,
+		CreatedAt: now,
+	}, nil
+}
+
+func (s *Store) GetWarehouseStocksForOrg(orgID string) ([]db.WarehouseStock, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	rows, err := s.db.Query(`SELECT ws.id, ws.org_id, ws.warehouse_id, COALESCE(w.name, ''), COALESCE(w.code, ''),
+		ws.sku_id, COALESCE(sk.code, ''), COALESCE(sk.name, ''), ws.stock_quantity, ws.reserved_quantity, ws.bin_location, ws.updated_at
+		FROM warehouse_stocks ws
+		LEFT JOIN warehouses w ON ws.warehouse_id = w.id
+		LEFT JOIN skus sk ON ws.sku_id = sk.id
+		WHERE ws.org_id = ?
+		ORDER BY w.name ASC, sk.code ASC`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []db.WarehouseStock
+	for rows.Next() {
+		var ws db.WarehouseStock
+		if err := rows.Scan(&ws.ID, &ws.OrgID, &ws.WarehouseID, &ws.WarehouseName, &ws.WarehouseCode,
+			&ws.SKUID, &ws.SKUCode, &ws.SKUName, &ws.StockQuantity, &ws.ReservedQuantity, &ws.BinLocation, &ws.UpdatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, ws)
+	}
+	return list, nil
+}
+
+func (s *Store) SetWarehouseStockForOrg(orgID, warehouseID, skuID string, stockQty, reservedQty int, binLocation string) error {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	if binLocation == "" {
+		binLocation = "A-01-01"
+	}
+	id := "ws_" + uuid.New().String()[:8]
+	now := time.Now()
+	_, err := s.db.Exec(`INSERT INTO warehouse_stocks (id, org_id, warehouse_id, sku_id, stock_quantity, reserved_quantity, bin_location, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(org_id, warehouse_id, sku_id) DO UPDATE SET
+			stock_quantity = excluded.stock_quantity,
+			reserved_quantity = excluded.reserved_quantity,
+			bin_location = excluded.bin_location,
+			updated_at = excluded.updated_at`,
+		id, orgID, warehouseID, skuID, stockQty, reservedQty, binLocation, now)
+	return err
+}
+
+func (s *Store) GetGRNsForOrg(orgID string) ([]db.GoodsReceiptNote, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	rows, err := s.db.Query(`SELECT g.id, g.org_id, g.grn_number, g.po_id, COALESCE(p.po_number, ''),
+		g.warehouse_id, COALESCE(w.name, ''), g.received_by, g.status, g.items_json, COALESCE(g.notes, ''), g.created_at
+		FROM goods_receipt_notes g
+		LEFT JOIN purchase_orders p ON g.po_id = p.id
+		LEFT JOIN warehouses w ON g.warehouse_id = w.id
+		WHERE g.org_id = ?
+		ORDER BY g.created_at DESC`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []db.GoodsReceiptNote
+	for rows.Next() {
+		var g db.GoodsReceiptNote
+		if err := rows.Scan(&g.ID, &g.OrgID, &g.GRNNumber, &g.POID, &g.PONumber, &g.WarehouseID, &g.WarehouseName, &g.ReceivedBy, &g.Status, &g.ItemsJSON, &g.Notes, &g.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, g)
+	}
+	return list, nil
+}
+
+func (s *Store) CreateGRNForOrg(orgID, poID, warehouseID, receivedBy, notes, itemsJSON, actorType, actorID string) (*db.GoodsReceiptNote, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	id := "grn_" + uuid.New().String()[:8]
+	now := time.Now()
+	grnNum := fmt.Sprintf("GRN-%s-%s", now.Format("0601"), id[4:])
+
+	var poNumber string
+	_ = s.db.QueryRow(`SELECT po_number FROM purchase_orders WHERE id = ? AND org_id = ?`, poID, orgID).Scan(&poNumber)
+
+	var whName string
+	_ = s.db.QueryRow(`SELECT name FROM warehouses WHERE id = ? AND org_id = ?`, warehouseID, orgID).Scan(&whName)
+
+	_, err := s.db.Exec(`INSERT INTO goods_receipt_notes (id, org_id, grn_number, po_id, warehouse_id, received_by, status, items_json, notes, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?)`,
+		id, orgID, grnNum, poID, warehouseID, receivedBy, itemsJSON, notes, now)
+	if err != nil {
+		return nil, err
+	}
+
+	_ = s.LogAuditForOrg(orgID, actorType, actorID, "CREATE_GRN", "goods_receipt_notes", id, fmt.Sprintf("GRN %s created for PO %s at %s", grnNum, poNumber, whName), itemsJSON)
+
+	return &db.GoodsReceiptNote{
+		ID:            id,
+		OrgID:         orgID,
+		GRNNumber:     grnNum,
+		POID:          poID,
+		PONumber:      poNumber,
+		WarehouseID:   warehouseID,
+		WarehouseName: whName,
+		ReceivedBy:    receivedBy,
+		Status:        "completed",
+		ItemsJSON:     itemsJSON,
+		Notes:         notes,
+		CreatedAt:     now,
+	}, nil
+}
+
+func (s *Store) GetSupplierBillsForOrg(orgID string) ([]db.SupplierBill, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	rows, err := s.db.Query(`SELECT b.id, b.org_id, b.bill_number, b.supplier_id, COALESCE(sup.name, ''),
+		COALESCE(b.po_id, ''), COALESCE(p.po_number, ''), b.amount, b.status, b.match_status, b.items_json, COALESCE(b.notes, ''), b.created_at
+		FROM supplier_bills b
+		LEFT JOIN suppliers sup ON b.supplier_id = sup.id
+		LEFT JOIN purchase_orders p ON b.po_id = p.id
+		WHERE b.org_id = ?
+		ORDER BY b.created_at DESC`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []db.SupplierBill
+	for rows.Next() {
+		var b db.SupplierBill
+		if err := rows.Scan(&b.ID, &b.OrgID, &b.BillNumber, &b.SupplierID, &b.SupplierName, &b.POID, &b.PONumber, &b.Amount, &b.Status, &b.MatchStatus, &b.ItemsJSON, &b.Notes, &b.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, b)
+	}
+	return list, nil
+}
+
+func (s *Store) CreateSupplierBillForOrg(orgID, supplierID, poID string, amount float64, itemsJSON, notes, actorType, actorID string) (*db.SupplierBill, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	id := "bill_" + uuid.New().String()[:8]
+	now := time.Now()
+	billNum := fmt.Sprintf("BILL-%s-%s", now.Format("0601"), id[5:])
+
+	var supName string
+	_ = s.db.QueryRow(`SELECT name FROM suppliers WHERE id = ? AND org_id = ?`, supplierID, orgID).Scan(&supName)
+
+	var poNumber string
+	if poID != "" {
+		_ = s.db.QueryRow(`SELECT po_number FROM purchase_orders WHERE id = ? AND org_id = ?`, poID, orgID).Scan(&poNumber)
+	}
+
+	_, err := s.db.Exec(`INSERT INTO supplier_bills (id, org_id, bill_number, supplier_id, po_id, amount, status, match_status, items_json, notes, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, 'open', 'pending', ?, ?, ?)`,
+		id, orgID, billNum, supplierID, poID, amount, itemsJSON, notes, now)
+	if err != nil {
+		return nil, err
+	}
+
+	_ = s.LogAuditForOrg(orgID, actorType, actorID, "CREATE_SUPPLIER_BILL", "supplier_bills", id, fmt.Sprintf("Supplier Bill %s from %s ($%.2f)", billNum, supName, amount), itemsJSON)
+
+	return &db.SupplierBill{
+		ID:           id,
+		OrgID:        orgID,
+		BillNumber:   billNum,
+		SupplierID:   supplierID,
+		SupplierName: supName,
+		POID:         poID,
+		PONumber:     poNumber,
+		Amount:       amount,
+		Status:       "open",
+		MatchStatus:  "pending",
+		ItemsJSON:    itemsJSON,
+		Notes:        notes,
+		CreatedAt:    now,
+	}, nil
+}
+
+func (s *Store) UpdateSupplierBillMatchStatusForOrg(orgID, billID, matchStatus, actorType, actorID string) error {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	res, err := s.db.Exec(`UPDATE supplier_bills SET match_status = ? WHERE id = ? AND org_id = ?`, matchStatus, billID, orgID)
+	if err != nil {
+		return err
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("supplier bill %s not found in org %s", billID, orgID)
+	}
+	_ = s.LogAuditForOrg(orgID, actorType, actorID, "MATCH_SUPPLIER_BILL", "supplier_bills", billID, fmt.Sprintf("Match status updated to %s", matchStatus), "{}")
+	return nil
+}
+
+func (s *Store) GetStockTransfersForOrg(orgID string) ([]db.StockTransfer, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	rows, err := s.db.Query(`SELECT t.id, t.org_id, t.transfer_number, t.from_warehouse_id, COALESCE(wf.name, ''),
+		t.to_warehouse_id, COALESCE(wt.name, ''), t.status, t.items_json, COALESCE(t.notes, ''), t.created_by, t.created_at
+		FROM stock_transfers t
+		LEFT JOIN warehouses wf ON t.from_warehouse_id = wf.id
+		LEFT JOIN warehouses wt ON t.to_warehouse_id = wt.id
+		WHERE t.org_id = ?
+		ORDER BY t.created_at DESC`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []db.StockTransfer
+	for rows.Next() {
+		var t db.StockTransfer
+		if err := rows.Scan(&t.ID, &t.OrgID, &t.TransferNumber, &t.FromWarehouseID, &t.FromWarehouseName, &t.ToWarehouseID, &t.ToWarehouseName, &t.Status, &t.ItemsJSON, &t.Notes, &t.CreatedBy, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, t)
+	}
+	return list, nil
+}
+
+func (s *Store) CreateStockTransferForOrg(orgID, fromWarehouseID, toWarehouseID, itemsJSON, notes, createdBy, actorType, actorID string) (*db.StockTransfer, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	id := "xfer_" + uuid.New().String()[:8]
+	now := time.Now()
+	xferNum := fmt.Sprintf("XFER-%s-%s", now.Format("0601"), id[5:])
+
+	var wfName, wtName string
+	_ = s.db.QueryRow(`SELECT name FROM warehouses WHERE id = ? AND org_id = ?`, fromWarehouseID, orgID).Scan(&wfName)
+	_ = s.db.QueryRow(`SELECT name FROM warehouses WHERE id = ? AND org_id = ?`, toWarehouseID, orgID).Scan(&wtName)
+
+	_, err := s.db.Exec(`INSERT INTO stock_transfers (id, org_id, transfer_number, from_warehouse_id, to_warehouse_id, status, items_json, notes, created_by, created_at)
+		VALUES (?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)`,
+		id, orgID, xferNum, fromWarehouseID, toWarehouseID, itemsJSON, notes, createdBy, now)
+	if err != nil {
+		return nil, err
+	}
+
+	_ = s.LogAuditForOrg(orgID, actorType, actorID, "CREATE_STOCK_TRANSFER", "stock_transfers", id, fmt.Sprintf("Transferred stock from %s to %s", wfName, wtName), itemsJSON)
+
+	return &db.StockTransfer{
+		ID:                id,
+		OrgID:             orgID,
+		TransferNumber:    xferNum,
+		FromWarehouseID:   fromWarehouseID,
+		FromWarehouseName: wfName,
+		ToWarehouseID:     toWarehouseID,
+		ToWarehouseName:   wtName,
+		Status:            "completed",
+		ItemsJSON:         itemsJSON,
+		Notes:             notes,
+		CreatedBy:         createdBy,
+		CreatedAt:         now,
+	}, nil
+}
+
+func (s *Store) GetBatchLotsForOrg(orgID string) ([]db.BatchLot, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	rows, err := s.db.Query(`SELECT bl.id, bl.org_id, bl.sku_id, COALESCE(sk.code, ''), COALESCE(sk.name, ''),
+		bl.batch_number, COALESCE(bl.expiry_date, ''), bl.quantity, COALESCE(bl.warehouse_id, ''), COALESCE(w.name, ''), bl.created_at
+		FROM batch_lots bl
+		LEFT JOIN skus sk ON bl.sku_id = sk.id
+		LEFT JOIN warehouses w ON bl.warehouse_id = w.id
+		WHERE bl.org_id = ?
+		ORDER BY bl.created_at DESC`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []db.BatchLot
+	for rows.Next() {
+		var bl db.BatchLot
+		if err := rows.Scan(&bl.ID, &bl.OrgID, &bl.SKUID, &bl.SKUCode, &bl.SKUName, &bl.BatchNumber, &bl.ExpiryDate, &bl.Quantity, &bl.WarehouseID, &bl.WarehouseName, &bl.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, bl)
+	}
+	return list, nil
+}
+
+func (s *Store) CreateBatchLotForOrg(orgID, skuID, batchNumber, expiryDate string, quantity int, warehouseID, actorType, actorID string) (*db.BatchLot, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	id := "lot_" + uuid.New().String()[:8]
+	now := time.Now()
+
+	var skuCode, skuName string
+	_ = s.db.QueryRow(`SELECT code, name FROM skus WHERE id = ? AND org_id = ?`, skuID, orgID).Scan(&skuCode, &skuName)
+
+	var whName string
+	if warehouseID != "" {
+		_ = s.db.QueryRow(`SELECT name FROM warehouses WHERE id = ? AND org_id = ?`, warehouseID, orgID).Scan(&whName)
+	}
+
+	_, err := s.db.Exec(`INSERT INTO batch_lots (id, org_id, sku_id, batch_number, expiry_date, quantity, warehouse_id, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, orgID, skuID, batchNumber, expiryDate, quantity, warehouseID, now)
+	if err != nil {
+		return nil, err
+	}
+
+	_ = s.LogAuditForOrg(orgID, actorType, actorID, "CREATE_BATCH_LOT", "batch_lots", id, fmt.Sprintf("Batch %s for SKU %s (Qty: %d)", batchNumber, skuCode, quantity), "{}")
+
+	return &db.BatchLot{
+		ID:            id,
+		OrgID:         orgID,
+		SKUID:         skuID,
+		SKUCode:       skuCode,
+		SKUName:       skuName,
+		BatchNumber:   batchNumber,
+		ExpiryDate:    expiryDate,
+		Quantity:      quantity,
+		WarehouseID:   warehouseID,
+		WarehouseName: whName,
+		CreatedAt:     now,
+	}, nil
 }

@@ -175,6 +175,104 @@ var Migrations = []Migration{
 		FROM organizations WHERE id = 'org_default';
 		`,
 	},
+	{
+		Version: 6,
+		Name:    "006_warehouses_and_grn",
+		SQL: `
+		CREATE TABLE IF NOT EXISTS warehouses (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			name TEXT NOT NULL,
+			code TEXT NOT NULL,
+			address TEXT NOT NULL DEFAULT '',
+			is_active BOOLEAN NOT NULL DEFAULT 1,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(org_id, code)
+		);
+
+		CREATE TABLE IF NOT EXISTS warehouse_stocks (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			warehouse_id TEXT NOT NULL REFERENCES warehouses(id),
+			sku_id TEXT NOT NULL REFERENCES skus(id),
+			stock_quantity INTEGER NOT NULL DEFAULT 0,
+			reserved_quantity INTEGER NOT NULL DEFAULT 0,
+			bin_location TEXT NOT NULL DEFAULT 'A-01-01',
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(org_id, warehouse_id, sku_id)
+		);
+
+		CREATE TABLE IF NOT EXISTS goods_receipt_notes (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			grn_number TEXT NOT NULL,
+			po_id TEXT NOT NULL REFERENCES purchase_orders(id),
+			warehouse_id TEXT NOT NULL REFERENCES warehouses(id),
+			received_by TEXT NOT NULL DEFAULT 'warehouse_staff',
+			status TEXT NOT NULL DEFAULT 'completed',
+			items_json TEXT NOT NULL DEFAULT '[]',
+			notes TEXT,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(org_id, grn_number)
+		);
+
+		CREATE TABLE IF NOT EXISTS supplier_bills (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			bill_number TEXT NOT NULL,
+			supplier_id TEXT NOT NULL REFERENCES suppliers(id),
+			po_id TEXT REFERENCES purchase_orders(id),
+			amount REAL NOT NULL DEFAULT 0.0,
+			status TEXT NOT NULL DEFAULT 'open',
+			match_status TEXT NOT NULL DEFAULT 'pending',
+			items_json TEXT NOT NULL DEFAULT '[]',
+			notes TEXT,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(org_id, bill_number)
+		);
+
+		CREATE TABLE IF NOT EXISTS stock_transfers (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			transfer_number TEXT NOT NULL,
+			from_warehouse_id TEXT NOT NULL REFERENCES warehouses(id),
+			to_warehouse_id TEXT NOT NULL REFERENCES warehouses(id),
+			status TEXT NOT NULL DEFAULT 'completed',
+			items_json TEXT NOT NULL DEFAULT '[]',
+			notes TEXT,
+			created_by TEXT NOT NULL DEFAULT 'system',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(org_id, transfer_number)
+		);
+
+		CREATE TABLE IF NOT EXISTS batch_lots (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			sku_id TEXT NOT NULL REFERENCES skus(id),
+			batch_number TEXT NOT NULL,
+			expiry_date TEXT,
+			quantity INTEGER NOT NULL DEFAULT 0,
+			warehouse_id TEXT REFERENCES warehouses(id),
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(org_id, sku_id, batch_number)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_warehouses_org ON warehouses(org_id);
+		CREATE INDEX IF NOT EXISTS idx_warehouse_stocks_org ON warehouse_stocks(org_id, warehouse_id);
+		CREATE INDEX IF NOT EXISTS idx_grn_org ON goods_receipt_notes(org_id, po_id);
+		CREATE INDEX IF NOT EXISTS idx_supplier_bills_org ON supplier_bills(org_id, po_id);
+		CREATE INDEX IF NOT EXISTS idx_transfers_org ON stock_transfers(org_id);
+		CREATE INDEX IF NOT EXISTS idx_batches_org ON batch_lots(org_id, sku_id);
+
+		INSERT OR IGNORE INTO warehouses (id, org_id, name, code, address, is_active)
+		SELECT 'wh_main_' || id, id, 'Main Logistics Hub', 'WH-MAIN', '100 Innovation Way, Logistics Gate 1', 1
+		FROM organizations;
+
+		INSERT OR IGNORE INTO warehouses (id, org_id, name, code, address, is_active)
+		SELECT 'wh_east_' || id, id, 'East Coast Fulfillment Center', 'WH-EAST', '450 Harbor Boulevard, Dock 12', 1
+		FROM organizations;
+		`,
+	},
 }
 
 // RunMigrations applies all pending migrations in sequential order

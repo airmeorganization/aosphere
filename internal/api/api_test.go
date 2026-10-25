@@ -13,6 +13,7 @@ import (
 
 	"aosphere/internal/auth"
 	"aosphere/internal/db"
+	"aosphere/internal/service"
 	"aosphere/internal/store"
 )
 
@@ -26,7 +27,8 @@ func setupTestAPI(t *testing.T) (*API, *sql.DB) {
 	}
 
 	appStore := store.NewStore(database)
-	testAPI := NewAPI(appStore, nil, "test")
+	wfService := service.NewWorkflowService(appStore)
+	testAPI := NewAPI(appStore, wfService, "test")
 	return testAPI, database
 }
 
@@ -385,5 +387,212 @@ func TestCreateSKU_API(t *testing.T) {
 
 	if !strings.Contains(rrGet.Body.String(), "SKU-FIBER-99") {
 		t.Fatalf("created SKU not found in GET /api/skus response: %s", rrGet.Body.String())
+	}
+}
+
+func TestEmployeeShiftTask_API(t *testing.T) {
+	testAPI, database := setupTestAPI(t)
+	defer database.Close()
+
+	mux := http.NewServeMux()
+	testAPI.RegisterRoutes(mux)
+
+	authCtx := &auth.AuthContext{
+		UserID: "usr_admin",
+		OrgID:  "org_default",
+		Role:   auth.RoleOwner,
+	}
+
+	// 1. Create Employee
+	empPayload := map[string]interface{}{
+		"name":        "Elena Rostova",
+		"role":        "Robotics Engineer",
+		"department":  "Engineering",
+		"email":       "elena@aosphere.local",
+		"phone":       "+1-555-4921",
+		"hourly_rate": 65.0,
+	}
+	body, _ := json.Marshal(empPayload)
+	req := httptest.NewRequest(http.MethodPost, "/api/employees", bytes.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), AuthCtxKey, authCtx))
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for POST /api/employees, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var emp db.Employee
+	_ = json.Unmarshal(rr.Body.Bytes(), &emp)
+	if emp.Name != "Elena Rostova" || emp.HourlyRate != 65.0 {
+		t.Fatalf("unexpected employee created: %+v", emp)
+	}
+
+	// 2. Schedule Shift
+	shiftPayload := map[string]interface{}{
+		"employee_id": emp.ID,
+		"shift_date":  "2026-11-01",
+		"start_time":  "08:00",
+		"end_time":    "16:30",
+		"station":     "Robotics Lab Alpha",
+		"status":      "scheduled",
+	}
+	sBody, _ := json.Marshal(shiftPayload)
+	sReq := httptest.NewRequest(http.MethodPost, "/api/shifts", bytes.NewReader(sBody))
+	sReq = sReq.WithContext(context.WithValue(sReq.Context(), AuthCtxKey, authCtx))
+	sRR := httptest.NewRecorder()
+	mux.ServeHTTP(sRR, sReq)
+
+	if sRR.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for POST /api/shifts, got %d: %s", sRR.Code, sRR.Body.String())
+	}
+	var shf db.Shift
+	_ = json.Unmarshal(sRR.Body.Bytes(), &shf)
+	if shf.Station != "Robotics Lab Alpha" || shf.EmployeeName != "Elena Rostova" {
+		t.Fatalf("unexpected shift created: %+v", shf)
+	}
+
+	// 3. Create Task
+	taskPayload := map[string]interface{}{
+		"title":        "Calibrate Sensor Arrays",
+		"description":  "Perform laser telemetry alignment on MCU v2",
+		"project_name": "Quantum Drone Initiative",
+		"assignee_id":  emp.ID,
+		"priority":     "high",
+		"due_date":     "2026-11-05",
+	}
+	tBody, _ := json.Marshal(taskPayload)
+	tReq := httptest.NewRequest(http.MethodPost, "/api/tasks", bytes.NewReader(tBody))
+	tReq = tReq.WithContext(context.WithValue(tReq.Context(), AuthCtxKey, authCtx))
+	tRR := httptest.NewRecorder()
+	mux.ServeHTTP(tRR, tReq)
+
+	if tRR.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for POST /api/tasks, got %d: %s", tRR.Code, tRR.Body.String())
+	}
+	var tsk db.Task
+	_ = json.Unmarshal(tRR.Body.Bytes(), &tsk)
+	if tsk.Title != "Calibrate Sensor Arrays" || tsk.Priority != "high" {
+		t.Fatalf("unexpected task created: %+v", tsk)
+	}
+}
+
+func TestSupplyChain_WarehousesAndGRN_API(t *testing.T) {
+	testAPI, database := setupTestAPI(t)
+	defer database.Close()
+
+	mux := http.NewServeMux()
+	testAPI.RegisterRoutes(mux)
+
+	authCtx := &auth.AuthContext{
+		UserID: "usr_admin",
+		OrgID:  "org_default",
+		Role:   auth.RoleOwner,
+	}
+
+	// 1. Create Warehouse
+	whPayload := map[string]interface{}{
+		"name":    "West Coast Distribution Hub",
+		"code":    "WH-WEST",
+		"address": "770 Pacific Way, Gate 4",
+	}
+	wBody, _ := json.Marshal(whPayload)
+	wReq := httptest.NewRequest(http.MethodPost, "/api/warehouses", bytes.NewReader(wBody))
+	wReq = wReq.WithContext(context.WithValue(wReq.Context(), AuthCtxKey, authCtx))
+	wRR := httptest.NewRecorder()
+	mux.ServeHTTP(wRR, wReq)
+
+	if wRR.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for POST /api/warehouses, got %d: %s", wRR.Code, wRR.Body.String())
+	}
+	var wh db.Warehouse
+	_ = json.Unmarshal(wRR.Body.Bytes(), &wh)
+	if wh.Code != "WH-WEST" {
+		t.Fatalf("unexpected warehouse created: %+v", wh)
+	}
+
+	// 2. Create Purchase Order to receive against
+	poPayload := map[string]interface{}{
+		"supplier_id": "sup_01",
+		"items": []map[string]interface{}{
+			{"sku_code": "SKU-CORE-100", "quantity": 10, "unit_cost": 45.0},
+		},
+		"notes": "Fast-track shipment",
+	}
+	poBody, _ := json.Marshal(poPayload)
+	poReq := httptest.NewRequest(http.MethodPost, "/api/purchase-orders", bytes.NewReader(poBody))
+	poReq = poReq.WithContext(context.WithValue(poReq.Context(), AuthCtxKey, authCtx))
+	poRR := httptest.NewRecorder()
+	mux.ServeHTTP(poRR, poReq)
+
+	if poRR.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for PO creation, got %d: %s", poRR.Code, poRR.Body.String())
+	}
+	var po db.PurchaseOrder
+	_ = json.Unmarshal(poRR.Body.Bytes(), &po)
+
+	// 3. Receive GRN (Partial receipt: 4 of 10)
+	grnPayload := map[string]interface{}{
+		"po_id":        po.ID,
+		"warehouse_id": wh.ID,
+		"received_by":  "Marcus Vance",
+		"notes":        "Initial pallet delivery",
+		"items": []map[string]interface{}{
+			{
+				"sku_code":     "SKU-CORE-100",
+				"quantity":     4,
+				"bin_location": "B-02-14",
+				"batch_number": "BATCH-2026-001",
+			},
+		},
+	}
+	grnBody, _ := json.Marshal(grnPayload)
+	grnReq := httptest.NewRequest(http.MethodPost, "/api/grns", bytes.NewReader(grnBody))
+	grnReq = grnReq.WithContext(context.WithValue(grnReq.Context(), AuthCtxKey, authCtx))
+	grnRR := httptest.NewRecorder()
+	mux.ServeHTTP(grnRR, grnReq)
+
+	if grnRR.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for GRN creation, got %d: %s", grnRR.Code, grnRR.Body.String())
+	}
+	var grnRes service.ReceiveGRNResult
+	_ = json.Unmarshal(grnRR.Body.Bytes(), &grnRes)
+	if !grnRes.IsPartial || grnRes.PurchaseOrder.Status != service.POStatusPartiallyReceived {
+		t.Fatalf("expected partial receipt status, got: %+v", grnRes)
+	}
+
+	// 4. Create Supplier Bill and run 3-Way Match
+	billPayload := map[string]interface{}{
+		"supplier_id": "sup_01",
+		"po_id":       po.ID,
+		"amount":      450.0,
+		"notes":       "Invoice for 10x SKU-CORE-100",
+	}
+	bBody, _ := json.Marshal(billPayload)
+	bReq := httptest.NewRequest(http.MethodPost, "/api/supplier-bills", bytes.NewReader(bBody))
+	bReq = bReq.WithContext(context.WithValue(bReq.Context(), AuthCtxKey, authCtx))
+	bRR := httptest.NewRecorder()
+	mux.ServeHTTP(bRR, bReq)
+
+	if bRR.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for Supplier Bill, got %d: %s", bRR.Code, bRR.Body.String())
+	}
+	var bill db.SupplierBill
+	_ = json.Unmarshal(bRR.Body.Bytes(), &bill)
+
+	// Run 3-Way Match (shortfall expected: received 4 vs ordered 10)
+	matchPayload := map[string]interface{}{"bill_id": bill.ID}
+	mBody, _ := json.Marshal(matchPayload)
+	mReq := httptest.NewRequest(http.MethodPost, "/api/supplier-bills/match", bytes.NewReader(mBody))
+	mReq = mReq.WithContext(context.WithValue(mReq.Context(), AuthCtxKey, authCtx))
+	mRR := httptest.NewRecorder()
+	mux.ServeHTTP(mRR, mReq)
+
+	if mRR.Code != http.StatusOK {
+		t.Fatalf("expected 200 for 3-way match, got %d: %s", mRR.Code, mRR.Body.String())
+	}
+	var matchRes service.ThreeWayMatchResult
+	_ = json.Unmarshal(mRR.Body.Bytes(), &matchRes)
+	if matchRes.Status != "discrepancy_qty" || !matchRes.RequiresApproval {
+		t.Fatalf("expected discrepancy_qty requiring approval, got: %+v", matchRes)
 	}
 }
