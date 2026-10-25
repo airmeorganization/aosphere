@@ -627,7 +627,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 code = req.get("code")
                 name = req.get("name")
                 cat = req.get("category", "General")
-                cost = float(req.get("cost_price", 0.0))
+                cost = float(req.get("unit_cost") or req.get("cost_price", 0.0))
                 price = float(req.get("selling_price", 0.0))
                 stock = int(req.get("stock_quantity", 0))
                 min_thresh = int(req.get("min_threshold", 10))
@@ -637,8 +637,8 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
                 conn.execute(
-                    "INSERT INTO skus (id, org_id, code, name, category, cost_price, selling_price, stock_quantity, min_threshold, reorder_quantity, supplier_id, created_at, updated_at) VALUES (?, 'org_default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (sku_id, code, name, cat, cost, price, stock, min_thresh, reorder, sup_id, now, now)
+                    "INSERT INTO skus (id, org_id, code, name, category, unit_cost, selling_price, stock_quantity, min_threshold, reorder_quantity, supplier_id, updated_at) VALUES (?, 'org_default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (sku_id, code, name, cat, cost, price, stock, min_thresh, reorder, sup_id, now)
                 )
                 log_audit(conn, "human", "web_user", "CREATE_SKU", "skus", sku_id, f"Created SKU '{code}' ({name})")
                 conn.commit()
@@ -698,13 +698,13 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 sdate = req.get("shift_date")
                 start = req.get("start_time", "09:00")
                 end = req.get("end_time", "17:00")
-                role = req.get("role_assigned", "Warehouse Associate")
+                station = req.get("station") or req.get("role_assigned", "Warehouse Associate")
                 shift_id = f"shift_{int(time.time()*1000)}"
                 now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
                 conn.execute(
-                    "INSERT INTO shifts (id, org_id, employee_id, shift_date, start_time, end_time, role_assigned, status, created_at) VALUES (?, 'org_default', ?, ?, ?, ?, ?, 'scheduled', ?)",
-                    (shift_id, emp_id, sdate, start, end, role, now)
+                    "INSERT INTO shifts (id, org_id, employee_id, shift_date, start_time, end_time, station, status, created_at) VALUES (?, 'org_default', ?, ?, ?, ?, ?, 'scheduled', ?)",
+                    (shift_id, emp_id, sdate, start, end, station, now)
                 )
                 log_audit(conn, "human", "web_user", "CREATE_SHIFT", "shifts", shift_id, f"Scheduled shift for {emp_id} on {sdate}")
                 conn.commit()
@@ -718,12 +718,12 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 desc = req.get("description", "")
                 priority = req.get("priority", "medium")
                 due = req.get("due_date", "")
-                assignee = req.get("assigned_to", "")
+                assignee = req.get("assignee_id") or req.get("assigned_to", "")
                 task_id = f"task_{int(time.time()*1000)}"
                 now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
                 conn.execute(
-                    "INSERT INTO tasks (id, org_id, title, description, priority, due_date, assigned_to, status, created_at) VALUES (?, 'org_default', ?, ?, ?, ?, ?, 'pending', ?)",
+                    "INSERT INTO tasks (id, org_id, title, description, priority, due_date, assignee_id, status, created_at) VALUES (?, 'org_default', ?, ?, ?, ?, ?, 'todo', ?)",
                     (task_id, title, desc, priority, due, assignee, now)
                 )
                 log_audit(conn, "human", "web_user", "CREATE_TASK", "tasks", task_id, f"Created task: {title} ({priority})")

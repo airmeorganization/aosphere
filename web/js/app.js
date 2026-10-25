@@ -2060,7 +2060,7 @@ const app = {
         <span class="actor-pill actor-human">HUMAN AUTHOR</span>
       </div>
       <div style="display:flex; flex-direction:column; gap:14px;">
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;">
           <div>
             <label for="inv-customer" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Customer / Client</label>
             <select id="inv-customer" class="form-input">
@@ -2070,6 +2070,15 @@ const app = {
           <div>
             <label for="inv-due" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Payment Due Date</label>
             <input type="date" id="inv-due" class="form-input" value="2026-11-20">
+          </div>
+          <div>
+            <label for="inv-recurring" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Recurring Frequency</label>
+            <select id="inv-recurring" class="form-input">
+              <option value="none">None (One-time)</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
+              <option value="annually">Annually</option>
+            </select>
           </div>
         </div>
 
@@ -2209,6 +2218,7 @@ const app = {
   async submitNewInvoice() {
     const custId = document.getElementById('inv-customer')?.value || 'cust_01';
     const dueDate = document.getElementById('inv-due')?.value || '2026-11-20';
+    const recurring = document.getElementById('inv-recurring')?.value || 'none';
     const rows = document.querySelectorAll('.inv-row');
     const items = [];
     let subtotal = 0;
@@ -2238,7 +2248,7 @@ const app = {
           subtotal,
           tax,
           due_date: dueDate,
-          recurring: 'none'
+          recurring
         })
       });
       if (!res.ok) {
@@ -2251,6 +2261,9 @@ const app = {
       await this.reloadEntity('invoices');
       await this.reloadEntity('summary');
       await this.reloadEntity('auditLogs');
+    } catch (e) {
+      this.showToast('Failed to issue invoice: ' + e.message);
+    }
   },
 
   // ---------------- HR & Team Modals ----------------
@@ -2670,7 +2683,7 @@ const app = {
     modal.querySelector('.modal-window').style.maxWidth = '640px';
 
     const poList = (this.data.purchaseOrders || []).filter(p => p.status === 'ordered' || p.status === 'partially_received' || p.status === 'approved' || p.id === poId);
-    const poOptions = poList.map(p => `<option value="${p.id}" ${p.id === poId ? 'selected' : ''}>${p.id} — Total: $${p.total.toFixed(2)} (${p.status})</option>`).join('') || '<option value="po_01">po_01 — $2,250.00 (ordered)</option>';
+    const poOptions = poList.map(p => `<option value="${p.id}" ${p.id === poId ? 'selected' : ''}>${p.id} — Total: $${Number(p.total ?? p.total_amount ?? 0).toFixed(2)} (${p.status})</option>`).join('') || '<option value="po_01">po_01 — $2,250.00 (ordered)</option>';
     const whOptions = (this.data.warehouses || []).map(w => `<option value="${w.id}">${w.name} (${w.code})</option>`).join('');
 
     // Pre-populate items from selected PO
@@ -2812,7 +2825,7 @@ const app = {
     modal.querySelector('.modal-window').style.maxWidth = '540px';
 
     const supOptions = (this.data.suppliers || []).map(s => `<option value="${s.id}">${s.name}</option>`).join('');
-    const poOptions = (this.data.purchaseOrders || []).map(p => `<option value="${p.id}">${p.id} ($${p.total.toFixed(2)})</option>`).join('') || '<option value="po_01">po_01</option>';
+    const poOptions = (this.data.purchaseOrders || []).map(p => `<option value="${p.id}">${p.id} ($${Number(p.total ?? p.total_amount ?? 0).toFixed(2)})</option>`).join('') || '<option value="po_01">po_01</option>';
     const grnOptions = (this.data.grns || []).map(g => `<option value="${g.id}">${g.grn_number} (${g.po_id})</option>`).join('') || '<option value="">No GRN recorded yet</option>';
 
     content.innerHTML = `
@@ -2937,7 +2950,7 @@ const app = {
           </div>
           <div>
             <h3 style="font-size:18px; font-weight:800; color:var(--text-main);">3-Way Match Inspection</h3>
-            <span class="badge ${isMatched ? 'badge-matched' : 'badge-variance-price'}">${matchResult.match_status.toUpperCase()}</span>
+            <span class="badge ${isMatched ? 'badge-matched' : 'badge-variance-price'}">${(matchResult.match_status || matchResult.status || 'MATCHED').toUpperCase()}</span>
           </div>
         </div>
 
@@ -3228,6 +3241,8 @@ const app = {
     }, 3200);
   }
 };
+
+window.app = app;
 
 // Initialize when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
