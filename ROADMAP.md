@@ -114,24 +114,24 @@ Phase 10: Packaging, Distribution & Cloud Deployments ──> Docker Distroless,
 
 **Goal:** Resolve all defects discovered during browser testing to provide a polished, responsive, and accessible interface.
 
-#### Checklist (5/5)
-- [ ] **Fix Dark Theme System in CSS (`web/css/style.css`)**:
+#### Checklist (5/5 COMPLETED)
+- [x] **Fix Dark Theme System in CSS (`web/css/style.css`)**:
   - Add explicit `.theme-dark` CSS variable overrides for `--bg-primary` (`#0F172A`), `--bg-secondary` (`#1E293B`), `--bg-tertiary` (`#334155`), `--bg-card` (`#1E293B`), `--border-subtle` (`#334155`), and `--text-main` (`#F8FAFC`).
   - Persist theme selection in `localStorage` across page refreshes.
-- [ ] **Inject Active Session/Token into MCP Agent Console (`web/js/app.js`)**:
+- [x] **Inject Active Session/Token into MCP Agent Console (`web/js/app.js`)**:
   - Fix the 401 Unauthorized bug in `executeManualToolCall()` by injecting `Authorization: Bearer <token>` or `X-API-Key` headers into `fetch('/mcp/messages')`.
   - Display execution status badges and formatted JSON results in the drawer.
-- [ ] **Implement Mobile Responsive Sidebar & Breakpoints**:
+- [x] **Implement Mobile Responsive Sidebar & Breakpoints**:
   - Add `@media (max-width: 768px)` rules in `style.css` to collapse the 256px sidebar into a hidden slide-out drawer.
   - Add a hamburger menu toggle button in the top navigation bar.
-- [ ] **Eliminate Waterfall Cascade (`loadAllData`)**:
+- [x] **Eliminate Waterfall Cascade (`loadAllData`)**:
   - Replace the global 12-endpoint parallel GET waterfall with targeted cache invalidation (e.g. only refresh `/api/invoices` when an invoice is created).
   - Add an in-memory client-side data store with optimistic UI updates.
-- [ ] **Form Accessibility & Explicit `<label for="...">` Association**:
+- [x] **Form Accessibility & Explicit `<label for="...">` Association**:
   - Add explicit `id` attributes and matching `<label for="...">` tags to all modal form controls across Deals, POs, SKUs, and Invoices.
   - Eliminate browser a11y console warnings; ensure tab-key keyboard traversal across all interactive modals.
 
-> **Exit Gate:** Dark mode toggles seamlessly, MCP tool executions from the web console succeed with 200 OK, mobile screens display a collapsible navigation drawer, and 0 a11y warnings appear in browser DevTools.
+> **Exit Gate:** Dark mode toggles seamlessly, MCP tool executions from the web console succeed with 200 OK, mobile screens display a collapsible navigation drawer, and 0 a11y warnings appear in browser DevTools. (VERIFIED)
 
 ---
 
@@ -139,19 +139,19 @@ Phase 10: Packaging, Distribution & Cloud Deployments ──> Docker Distroless,
 
 **Goal:** Ensure humans have direct, intuitive CRUD manipulation over every business entity—freeing the system from being an agent-only dashboard.
 
-#### Checklist (8/8)
-- [ ] **Interactive Multi-Line Item Invoice Builder**:
+#### Checklist (5/8 Completed in Sprint 1)
+- [x] **Interactive Multi-Line Item Invoice Builder**:
   - Create a dedicated modal and full-page editor to compose invoices with dynamic line items (SKU picker, quantity, unit price, line discount, tax rate, auto-calculated line totals).
   - Allow instant client selection or on-the-fly customer creation.
-- [ ] **Direct Purchase Order Generator with Supplier Catalog**:
+- [x] **Direct Purchase Order Generator with Supplier Catalog**:
   - Visual PO composer allowing operators to pick a supplier, browse supplier SKUs, specify delivery dates, add purchase notes, and save as `draft` or submit for approval.
-- [ ] **Interactive SKU & Inventory Management**:
+- [x] **Interactive SKU & Inventory Management**:
   - Create an "Add SKU" and "Edit SKU" modal for manual catalog creation (code, name, category, cost, selling price, reorder thresholds, initial stock).
   - Add manual stock adjustment dialog with reason codes (`recount`, `damage`, `received`, `shrinkage`).
-- [ ] **Quote Composer & Quote-to-Invoice Conversion**:
+- [x] **Quote Composer & Quote-to-Invoice Conversion**:
   - UI interface to draft sales quotes with validity dates, terms, and discounts.
   - "Convert to Invoice" button on accepted quotes and won deals with automatic line item transfer.
-- [ ] **Deal & Lead Management Studio**:
+- [x] **Deal & Lead Management Studio**:
   - Drag-and-drop Kanban deal stage movement with stage history tracking.
   - Modal to create, edit, reassign, or archive deals with expected close dates and probability weighting.
 - [ ] **Shift Roster & Employee Scheduling Interface**:
