@@ -141,20 +141,26 @@ class AOSphereHandler(BaseHTTPRequestHandler):
         pass
 
     def send_json(self, data, status=200):
-        body = json.dumps(data, default=str).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            body = json.dumps(data, default=str).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception:
+            pass
 
     def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        self.end_headers()
+        try:
+            self.send_response(200)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+            self.end_headers()
+        except Exception:
+            pass
 
     def do_HEAD(self):
         self.do_GET(head_only=True)
@@ -167,12 +173,16 @@ class AOSphereHandler(BaseHTTPRequestHandler):
         # 1. SSE Stream
         if path == "/api/events":
             import queue
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+            except Exception:
+                return
+
             if head_only:
                 return
 
@@ -192,7 +202,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                     except queue.Empty:
                         self.wfile.write(b": keepalive\n\n")
                         self.wfile.flush()
-            except (ConnectionResetError, BrokenPipeError):
+            except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, OSError, Exception):
                 pass
             finally:
                 with clients_lock:
@@ -271,12 +281,17 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                     return self.send_json([dict(r) for r in rows])
 
                 elif path == "/api/tasks":
-                    rows = conn.execute("SELECT t.*, COALESCE(e.name, '') as assignee_name FROM tasks t LEFT JOIN employees e ON t.assigned_to = e.id ORDER BY t.created_at DESC").fetchall()
+                    rows = conn.execute("SELECT t.*, COALESCE(e.name, '') as assignee_name FROM tasks t LEFT JOIN employees e ON t.assignee_id = e.id ORDER BY t.created_at DESC").fetchall()
                     conn.close()
                     return self.send_json([dict(r) for r in rows])
 
                 elif path == "/api/listings":
-                    rows = conn.execute("SELECT * FROM listings ORDER BY platform").fetchall()
+                    rows = conn.execute("SELECT id, directory as platform, nap_business_name as business_name, nap_address as address, nap_phone as phone, nap_website as website, sync_status as status, last_synced_at as last_synced FROM local_listings ORDER BY directory").fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path == "/api/audit-logs":
+                    rows = conn.execute("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 100").fetchall()
                     conn.close()
                     return self.send_json([dict(r) for r in rows])
 
@@ -864,7 +879,13 @@ def main():
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nShutting down AO Sphere...")
-        server.server_close()
+    except Exception as e:
+        print(f"\nServer exception: {e}")
+    finally:
+        try:
+            server.server_close()
+        except Exception:
+            pass
         print("AO Sphere exited cleanly.")
 
 if __name__ == "__main__":
