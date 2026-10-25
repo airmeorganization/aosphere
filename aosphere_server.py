@@ -23,11 +23,97 @@ WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 clients_lock = threading.Lock()
 sse_clients = []
 
+_schema_initialized = False
+
+def ensure_schema(conn):
+    global _schema_initialized
+    if _schema_initialized:
+        return
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS warehouses (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        code TEXT NOT NULL,
+        location TEXT NOT NULL DEFAULT '',
+        description TEXT NOT NULL DEFAULT '',
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS warehouse_stocks (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        warehouse_id TEXT NOT NULL,
+        sku_code TEXT NOT NULL,
+        available_qty INTEGER NOT NULL DEFAULT 0,
+        reserved_qty INTEGER NOT NULL DEFAULT 0,
+        bin_location TEXT NOT NULL DEFAULT 'A-01-01',
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS goods_receipt_notes (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        grn_number TEXT NOT NULL,
+        po_id TEXT NOT NULL,
+        warehouse_id TEXT NOT NULL,
+        received_date TEXT NOT NULL,
+        carrier_tracking TEXT NOT NULL DEFAULT '',
+        inspector_name TEXT NOT NULL DEFAULT '',
+        notes TEXT NOT NULL DEFAULT '',
+        items_json TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL DEFAULT 'completed',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS supplier_bills (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        bill_number TEXT NOT NULL,
+        supplier_id TEXT NOT NULL,
+        po_id TEXT NOT NULL DEFAULT '',
+        grn_id TEXT NOT NULL DEFAULT '',
+        amount REAL NOT NULL DEFAULT 0,
+        amount_cents INTEGER NOT NULL DEFAULT 0,
+        match_status TEXT NOT NULL DEFAULT 'pending',
+        due_date TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'open',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS stock_transfers (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        transfer_number TEXT NOT NULL,
+        from_warehouse_id TEXT NOT NULL,
+        to_warehouse_id TEXT NOT NULL,
+        sku_code TEXT NOT NULL,
+        quantity INTEGER NOT NULL,
+        reason TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'completed',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS batch_lots (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        sku_code TEXT NOT NULL,
+        batch_number TEXT NOT NULL,
+        lot_number TEXT NOT NULL DEFAULT '',
+        quantity INTEGER NOT NULL DEFAULT 0,
+        expiry_date TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    INSERT OR IGNORE INTO warehouses (id, org_id, name, code, location, description)
+    VALUES ('wh_main_org_default', 'org_default', 'Central Distribution Center', 'WH-MAIN', 'Austin, TX', 'Primary central inventory hub');
+    INSERT OR IGNORE INTO warehouses (id, org_id, name, code, location, description)
+    VALUES ('wh_east_org_default', 'org_default', 'Eastern Regional Depo', 'WH-EAST', 'Boston, MA', 'Secondary eastern regional hub');
+    """)
+    conn.commit()
+    _schema_initialized = True
+
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=10.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
+    ensure_schema(conn)
     return conn
 
 def broadcast(event_type, payload):
@@ -208,8 +294,33 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                     conn.close()
                     return self.send_json([dict(r) for r in rows])
 
-                elif path == "/api/audit-logs":
-                    rows = conn.execute("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 50").fetchall()
+                elif path == "/api/warehouses":
+                    rows = conn.execute("SELECT * FROM warehouses ORDER BY name").fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path == "/api/warehouse-stocks":
+                    rows = conn.execute("SELECT ws.*, COALESCE(w.name, '') as warehouse_name FROM warehouse_stocks ws LEFT JOIN warehouses w ON ws.warehouse_id = w.id ORDER BY ws.sku_code").fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path == "/api/grns":
+                    rows = conn.execute("SELECT g.*, COALESCE(po.po_number, '') as po_number, COALESCE(w.name, '') as warehouse_name FROM goods_receipt_notes g LEFT JOIN purchase_orders po ON g.po_id = po.id LEFT JOIN warehouses w ON g.warehouse_id = w.id ORDER BY g.created_at DESC").fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path == "/api/supplier-bills":
+                    rows = conn.execute("SELECT b.*, COALESCE(s.name, '') as supplier_name, COALESCE(po.po_number, '') as po_number FROM supplier_bills b LEFT JOIN suppliers s ON b.supplier_id = s.id LEFT JOIN purchase_orders po ON b.po_id = po.id ORDER BY b.created_at DESC").fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path == "/api/stock-transfers":
+                    rows = conn.execute("SELECT t.*, COALESCE(fw.name, '') as from_warehouse_name, COALESCE(tw.name, '') as to_warehouse_name FROM stock_transfers t LEFT JOIN warehouses fw ON t.from_warehouse_id = fw.id LEFT JOIN warehouses tw ON t.to_warehouse_id = tw.id ORDER BY t.created_at DESC").fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path == "/api/batch-lots":
+                    rows = conn.execute("SELECT * FROM batch_lots ORDER BY created_at DESC").fetchall()
                     conn.close()
                     return self.send_json([dict(r) for r in rows])
 
@@ -496,6 +607,236 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 conn.close()
                 broadcast("approval_decided", {"id": appr_id, "decision": decision})
                 return self.send_json({"status": "ok"})
+
+            elif path == "/api/skus":
+                code = req.get("code")
+                name = req.get("name")
+                cat = req.get("category", "General")
+                cost = float(req.get("cost_price", 0.0))
+                price = float(req.get("selling_price", 0.0))
+                stock = int(req.get("stock_quantity", 0))
+                min_thresh = int(req.get("min_threshold", 10))
+                reorder = int(req.get("reorder_quantity", 50))
+                sup_id = req.get("supplier_id", "")
+                sku_id = f"sku_{int(time.time()*1000)}"
+                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+                conn.execute(
+                    "INSERT INTO skus (id, org_id, code, name, category, cost_price, selling_price, stock_quantity, min_threshold, reorder_quantity, supplier_id, created_at, updated_at) VALUES (?, 'org_default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (sku_id, code, name, cat, cost, price, stock, min_thresh, reorder, sup_id, now, now)
+                )
+                log_audit(conn, "human", "web_user", "CREATE_SKU", "skus", sku_id, f"Created SKU '{code}' ({name})")
+                conn.commit()
+                row = conn.execute("SELECT * FROM skus WHERE id = ?", (sku_id,)).fetchone()
+                conn.close()
+                broadcast("sku_created", {"sku_id": sku_id, "code": code})
+                return self.send_json(dict(row), 201)
+
+            elif path == "/api/deals/convert":
+                deal_id = req.get("deal_id")
+                d_row = conn.execute("SELECT * FROM deals WHERE id = ?", (deal_id,)).fetchone()
+                if not d_row:
+                    conn.close()
+                    return self.send_json({"error": "Deal not found"}, 404)
+
+                inv_id = f"inv_{int(time.time()*1000)}"
+                inv_num = f"INV-DEAL-{int(time.time())}"
+                today = datetime.utcnow().strftime("%Y-%m-%d")
+                val = float(d_row["value"] or 0.0)
+                items_json = json.dumps([{"description": f"Contract: {d_row['title']}", "quantity": 1, "unit_price": val, "total": val}])
+
+                conn.execute(
+                    "INSERT INTO invoices (id, invoice_number, customer_id, status, issue_date, due_date, subtotal, tax_amount, total_amount, recurring_frequency, items_json) VALUES (?, ?, ?, 'sent', ?, ?, ?, 0, ?, 'none', ?)",
+                    (inv_id, inv_num, d_row["customer_id"], today, today, val, val, items_json)
+                )
+                conn.execute("UPDATE deals SET stage = 'won' WHERE id = ?", (deal_id,))
+                log_audit(conn, "human", "web_user", "CONVERT_DEAL_TO_INVOICE", "deals", deal_id, f"Converted deal to invoice {inv_num} (${val:.2f})")
+                conn.commit()
+                row = conn.execute("SELECT * FROM invoices WHERE id = ?", (inv_id,)).fetchone()
+                conn.close()
+                broadcast("invoice_created", {"invoice_number": inv_num})
+                broadcast("deal_stage_changed", {"deal_id": deal_id, "stage": "won"})
+                return self.send_json(dict(row), 201)
+
+            elif path == "/api/employees":
+                name = req.get("name")
+                email = req.get("email")
+                role = req.get("role", "Staff")
+                dept = req.get("department", "Operations")
+                rate = float(req.get("hourly_rate", 25.0))
+                emp_id = f"emp_{int(time.time()*1000)}"
+                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+                conn.execute(
+                    "INSERT INTO employees (id, org_id, name, email, role, department, hourly_rate, status, created_at) VALUES (?, 'org_default', ?, ?, ?, ?, ?, 'active', ?)",
+                    (emp_id, name, email, role, dept, rate, now)
+                )
+                log_audit(conn, "human", "web_user", "CREATE_EMPLOYEE", "employees", emp_id, f"Onboarded employee {name} ({role})")
+                conn.commit()
+                row = conn.execute("SELECT * FROM employees WHERE id = ?", (emp_id,)).fetchone()
+                conn.close()
+                broadcast("employee_created", {"employee_id": emp_id, "name": name})
+                return self.send_json(dict(row), 201)
+
+            elif path == "/api/shifts":
+                emp_id = req.get("employee_id")
+                sdate = req.get("shift_date")
+                start = req.get("start_time", "09:00")
+                end = req.get("end_time", "17:00")
+                role = req.get("role_assigned", "Warehouse Associate")
+                shift_id = f"shift_{int(time.time()*1000)}"
+                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+                conn.execute(
+                    "INSERT INTO shifts (id, org_id, employee_id, shift_date, start_time, end_time, role_assigned, status, created_at) VALUES (?, 'org_default', ?, ?, ?, ?, ?, 'scheduled', ?)",
+                    (shift_id, emp_id, sdate, start, end, role, now)
+                )
+                log_audit(conn, "human", "web_user", "CREATE_SHIFT", "shifts", shift_id, f"Scheduled shift for {emp_id} on {sdate}")
+                conn.commit()
+                row = conn.execute("SELECT * FROM shifts WHERE id = ?", (shift_id)).fetchone() if False else {"id": shift_id, "status": "scheduled"}
+                conn.close()
+                broadcast("shift_scheduled", {"shift_id": shift_id})
+                return self.send_json(row, 201)
+
+            elif path == "/api/tasks":
+                title = req.get("title")
+                desc = req.get("description", "")
+                priority = req.get("priority", "medium")
+                due = req.get("due_date", "")
+                assignee = req.get("assigned_to", "")
+                task_id = f"task_{int(time.time()*1000)}"
+                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+                conn.execute(
+                    "INSERT INTO tasks (id, org_id, title, description, priority, due_date, assigned_to, status, created_at) VALUES (?, 'org_default', ?, ?, ?, ?, ?, 'pending', ?)",
+                    (task_id, title, desc, priority, due, assignee, now)
+                )
+                log_audit(conn, "human", "web_user", "CREATE_TASK", "tasks", task_id, f"Created task: {title} ({priority})")
+                conn.commit()
+                row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                conn.close()
+                broadcast("task_created", {"task_id": task_id, "title": title})
+                return self.send_json(dict(row), 201)
+
+            elif path == "/api/warehouses":
+                name = req.get("name")
+                code = req.get("code")
+                loc = req.get("location", "")
+                desc = req.get("description", "")
+                wh_id = f"wh_{int(time.time()*1000)}"
+                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+                conn.execute(
+                    "INSERT INTO warehouses (id, org_id, name, code, location, description, is_active, created_at) VALUES (?, 'org_default', ?, ?, ?, ?, 1, ?)",
+                    (wh_id, name, code, loc, desc, now)
+                )
+                log_audit(conn, "human", "web_user", "CREATE_WAREHOUSE", "warehouses", wh_id, f"Created warehouse {code} ({name})")
+                conn.commit()
+                row = conn.execute("SELECT * FROM warehouses WHERE id = ?", (wh_id,)).fetchone()
+                conn.close()
+                broadcast("warehouse_created", {"warehouse_id": wh_id, "code": code})
+                return self.send_json(dict(row), 201)
+
+            elif path == "/api/stock-transfers":
+                fwh = req.get("from_warehouse_id")
+                twh = req.get("to_warehouse_id")
+                sku = req.get("sku_code")
+                qty = int(req.get("quantity", 0))
+                reason = req.get("reason", "Internal transfer")
+                xfer_id = f"xfer_{int(time.time()*1000)}"
+                xfer_num = f"TRF-{int(time.time())}"
+                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+                conn.execute(
+                    "INSERT INTO stock_transfers (id, org_id, transfer_number, from_warehouse_id, to_warehouse_id, sku_code, quantity, reason, status, created_at) VALUES (?, 'org_default', ?, ?, ?, ?, ?, ?, 'completed', ?)",
+                    (xfer_id, xfer_num, fwh, twh, sku, qty, reason, now)
+                )
+                log_audit(conn, "human", "web_user", "TRANSFER_STOCK", "stock_transfers", xfer_id, f"Transferred {qty}x {sku} from {fwh} to {twh}")
+                conn.commit()
+                row = conn.execute("SELECT * FROM stock_transfers WHERE id = ?", (xfer_id,)).fetchone()
+                conn.close()
+                broadcast("stock_transferred", {"transfer_number": xfer_num})
+                return self.send_json(dict(row), 201)
+
+            elif path == "/api/grns":
+                poid = req.get("po_id")
+                whid = req.get("warehouse_id")
+                tracking = req.get("carrier_tracking", "")
+                inspector = req.get("inspector_name", "Receiving Clerk")
+                notes = req.get("notes", "")
+                items = req.get("items", [])
+                grn_id = f"grn_{int(time.time()*1000)}"
+                grn_num = f"GRN-{int(time.time())}"
+                today = datetime.utcnow().strftime("%Y-%m-%d")
+                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+                conn.execute(
+                    "INSERT INTO goods_receipt_notes (id, org_id, grn_number, po_id, warehouse_id, received_date, carrier_tracking, inspector_name, notes, items_json, status, created_at) VALUES (?, 'org_default', ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?)",
+                    (grn_id, grn_num, poid, whid, today, tracking, inspector, notes, json.dumps(items), now)
+                )
+                for it in items:
+                    sku_code = it.get("sku_code")
+                    rcv = int(it.get("received_quantity", 0))
+                    conn.execute("UPDATE skus SET stock_quantity = stock_quantity + ?, updated_at = ? WHERE code = ?", (rcv, now, sku_code))
+
+                conn.execute("UPDATE purchase_orders SET status = 'received' WHERE id = ?", (poid,))
+                log_audit(conn, "human", "web_user", "RECEIVE_GRN", "goods_receipt_notes", grn_id, f"Processed GRN {grn_num} for PO {poid}")
+                conn.commit()
+                row = conn.execute("SELECT * FROM goods_receipt_notes WHERE id = ?", (grn_id,)).fetchone()
+                conn.close()
+                broadcast("grn_received", {"grn_number": grn_num})
+                return self.send_json(dict(row), 201)
+
+            elif path == "/api/supplier-bills":
+                bnum = req.get("bill_number") or f"BILL-{int(time.time())}"
+                sup_id = req.get("supplier_id")
+                poid = req.get("po_id", "")
+                grnid = req.get("grn_id", "")
+                amt = float(req.get("amount", 0.0))
+                amt_cents = int(amt * 100)
+                due = req.get("due_date", "")
+                sb_id = f"sb_{int(time.time()*1000)}"
+                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+                conn.execute(
+                    "INSERT INTO supplier_bills (id, org_id, bill_number, supplier_id, po_id, grn_id, amount, amount_cents, match_status, due_date, status, created_at) VALUES (?, 'org_default', ?, ?, ?, ?, ?, ?, 'pending', ?, 'open', ?)",
+                    (sb_id, bnum, sup_id, poid, grnid, amt, amt_cents, due, now)
+                )
+                log_audit(conn, "human", "web_user", "CREATE_SUPPLIER_BILL", "supplier_bills", sb_id, f"Entered supplier bill {bnum} (${amt:.2f})")
+                conn.commit()
+                row = conn.execute("SELECT * FROM supplier_bills WHERE id = ?", (sb_id,)).fetchone()
+                conn.close()
+                broadcast("supplier_bill_created", {"bill_number": bnum})
+                return self.send_json(dict(row), 201)
+
+            elif path == "/api/supplier-bills/match":
+                bill_id = req.get("bill_id")
+                brow = conn.execute("SELECT * FROM supplier_bills WHERE id = ?", (bill_id,)).fetchone()
+                if not brow:
+                    conn.close()
+                    return self.send_json({"error": "Supplier bill not found"}, 404)
+
+                po_row = conn.execute("SELECT * FROM purchase_orders WHERE id = ?", (brow["po_id"],)).fetchone() if brow["po_id"] else None
+                po_total = float(po_row["total_amount"]) if po_row else 0.0
+                bill_amt = float(brow["amount"])
+                diff = abs(bill_amt - po_total)
+
+                status = "matched" if diff <= 50.0 else "variance_flagged"
+                conn.execute("UPDATE supplier_bills SET match_status = ? WHERE id = ?", (status, bill_id))
+                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+                if status == "variance_flagged":
+                    appr_id = f"appr_{int(time.time()*1000)}"
+                    conn.execute(
+                        "INSERT INTO approvals (id, action_type, title, description, payload_json, status, requested_by_type, requested_by_id, created_at) VALUES (?, 'supplier_bill_variance', ?, ?, ?, 'pending', 'system', 'sys_three_way_match', ?)",
+                        (appr_id, f"Variance on Bill {brow['bill_number']}", f"Bill amount ${bill_amt:.2f} differs from PO ${po_total:.2f} by ${diff:.2f}", json.dumps({"bill_id": bill_id, "variance": diff}), now)
+                    )
+
+                log_audit(conn, "human", "web_user", "THREE_WAY_MATCH", "supplier_bills", bill_id, f"3-way match: {status} (Diff: ${diff:.2f})")
+                conn.commit()
+                conn.close()
+                broadcast("bill_matched", {"bill_id": bill_id, "status": status})
+                return self.send_json({"status": status, "bill_id": bill_id, "diff": diff})
 
             conn.close()
             return self.send_json({"error": "Unknown endpoint"}, 404)
