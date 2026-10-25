@@ -56,6 +56,9 @@
     <!-- Top Global Header (Glassmorphism Nav) -->
     <header class="app-header glass-nav" id="navbar">
       <div class="brand">
+        <button class="mobile-menu-btn icon-btn" onclick="app.toggleMobileSidebar()" title="Toggle Navigation Menu" aria-label="Toggle Navigation Menu">
+          <i data-lucide="menu" class="w-5 h-5 text-slate-600"></i>
+        </button>
         <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-brand-blue to-blue-400 flex items-center justify-center shadow-[0_4px_12px_rgba(37,99,235,0.25)] text-white font-extrabold text-[17px] shrink-0 tracking-tight">
           AO
         </div>
@@ -98,6 +101,9 @@
         </button>
       </div>
     </header>
+
+    <!-- Mobile Sidebar Backdrop -->
+    <div class="sidebar-backdrop" id="sidebar-backdrop" onclick="app.closeMobileSidebar()"></div>
 
     <!-- Main Workspace Layout -->
     <div class="app-body">
@@ -217,15 +223,21 @@
           <!-- Interactive Agent Console Simulator -->
           <div id="drawer-tester-view" class="drawer-view">
             <div class="console-box">
-              <label>Select MCP Tool:</label>
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                <label for="mcp-api-key" style="margin-bottom:0;">Agent API Key / Token:</label>
+                <span class="actor-pill actor-agent" style="font-size:9px;">AUTHENTICATED</span>
+              </div>
+              <input type="password" id="mcp-api-key" class="form-input code-input" style="margin-bottom:12px;" value="ao_sk_agent_default_token_12345" onchange="app.onApiKeyChange(this.value)">
+
+              <label for="mcp-tool-select">Select MCP Tool:</label>
               <select id="mcp-tool-select" class="form-input" onchange="app.onToolSelectChange()"></select>
               
-              <label style="margin-top:12px;">Tool Arguments (JSON):</label>
+              <label for="mcp-tool-args" style="margin-top:12px;">Tool Arguments (JSON):</label>
               <textarea id="mcp-tool-args" class="form-input code-input" rows="5"></textarea>
               
               <button class="btn-press btn btn-primary" style="margin-top:14px; width:100%;" onclick="app.executeManualToolCall()">Execute via MCP Engine</button>
               
-              <label style="margin-top:16px;">Execution Output:</label>
+              <label for="mcp-tool-output" style="margin-top:16px;">Execution Output:</label>
               <pre id="mcp-tool-output" class="console-output">Ready to execute...</pre>
             </div>
           </div>

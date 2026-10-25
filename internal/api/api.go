@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -219,6 +220,57 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 
 	// ERP
 	mux.HandleFunc("/api/skus", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			authCtx, ok := a.requireAuth(w, r, auth.PermManageInventory)
+			if !ok {
+				return
+			}
+			var req struct {
+				Code            string  `json:"code"`
+				Name            string  `json:"name"`
+				Category        string  `json:"category"`
+				StockQuantity   int     `json:"stock_quantity"`
+				MinThreshold    int     `json:"min_threshold"`
+				ReorderQuantity int     `json:"reorder_quantity"`
+				UnitCost        float64 `json:"unit_cost"`
+				SellingPrice    float64 `json:"selling_price"`
+				SupplierID      string  `json:"supplier_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			if strings.TrimSpace(req.Code) == "" || strings.TrimSpace(req.Name) == "" {
+				http.Error(w, "code and name are required", http.StatusBadRequest)
+				return
+			}
+			if req.MinThreshold <= 0 {
+				req.MinThreshold = 10
+			}
+			if req.ReorderQuantity <= 0 {
+				req.ReorderQuantity = 50
+			}
+
+			sku, err := a.store.CreateSKUForOrg(authCtx.OrgID, req.Code, req.Name, req.Category, req.SupplierID,
+				req.StockQuantity, req.MinThreshold, req.ReorderQuantity, req.UnitCost, req.SellingPrice)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			actorType := "human"
+			if authCtx.IsAPIKey {
+				actorType = "agent"
+			}
+			_ = a.store.LogAuditForOrg(authCtx.OrgID, actorType, authCtx.UserID, "SKU_CREATED", "skus", sku.ID,
+				fmt.Sprintf("Created SKU %s (%s)", sku.Code, sku.Name), fmt.Sprintf("{\"cost\":%.2f,\"price\":%.2f,\"stock\":%d}", sku.UnitCost, sku.SellingPrice, sku.StockQuantity))
+
+			a.BroadcastForOrg(authCtx.OrgID, "sku_created", fmt.Sprintf("{\"sku_id\":\"%s\",\"code\":\"%s\",\"name\":\"%s\"}", sku.ID, sku.Code, sku.Name))
+			w.WriteHeader(http.StatusCreated)
+			writeJSON(w, sku)
+			return
+		}
+
 		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
 		if !ok {
 			return

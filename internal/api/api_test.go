@@ -332,3 +332,58 @@ func TestTenantIsolation_APIEndpoints(t *testing.T) {
 		t.Fatalf("cross-tenant NAP sync pollution! Beta listing overwritten: %s", betaName)
 	}
 }
+
+func TestCreateSKU_API(t *testing.T) {
+	testAPI, database := setupTestAPI(t)
+	defer database.Close()
+
+	mux := http.NewServeMux()
+	testAPI.RegisterRoutes(mux)
+
+	authCtx := &auth.AuthContext{
+		UserID: "usr_ops",
+		OrgID:  "org_default",
+		Role:   auth.RoleOperations,
+	}
+
+	skuPayload := map[string]interface{}{
+		"code":             "SKU-FIBER-99",
+		"name":             "Fiber Optic Transceiver",
+		"category":         "Networking",
+		"stock_quantity":   25,
+		"min_threshold":    5,
+		"reorder_quantity": 40,
+		"unit_cost":        85.50,
+		"selling_price":    199.00,
+		"supplier_id":      "sup_01",
+	}
+	body, _ := json.Marshal(skuPayload)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/skus", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(context.WithValue(req.Context(), AuthCtxKey, authCtx))
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created for POST /api/skus, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var createdSKU db.SKU
+	if err := json.Unmarshal(rr.Body.Bytes(), &createdSKU); err != nil {
+		t.Fatalf("failed to parse created SKU response: %v", err)
+	}
+	if createdSKU.Code != "SKU-FIBER-99" || createdSKU.StockQuantity != 25 {
+		t.Fatalf("unexpected SKU created data: %+v", createdSKU)
+	}
+
+	// Verify it shows up in GET /api/skus
+	reqGet := httptest.NewRequest(http.MethodGet, "/api/skus", nil)
+	reqGet = reqGet.WithContext(context.WithValue(reqGet.Context(), AuthCtxKey, authCtx))
+	rrGet := httptest.NewRecorder()
+	mux.ServeHTTP(rrGet, reqGet)
+
+	if !strings.Contains(rrGet.Body.String(), "SKU-FIBER-99") {
+		t.Fatalf("created SKU not found in GET /api/skus response: %s", rrGet.Body.String())
+	}
+}

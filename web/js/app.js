@@ -7,6 +7,7 @@ const app = {
   activeTab: 'dashboard',
   drawerTab: 'stream',
   theme: 'light',
+  apiKey: localStorage.getItem('aosphere_api_key') || 'ao_sk_agent_default_token_12345',
   data: {
     skus: [],
     suppliers: [],
@@ -35,6 +36,12 @@ const app = {
     }
   },
 
+  onApiKeyChange(val) {
+    this.apiKey = val.trim();
+    localStorage.setItem('aosphere_api_key', this.apiKey);
+    this.showToast('Agent API key updated');
+  },
+
   // ---------------- Theme Management ----------------
   setupTheme() {
     const saved = localStorage.getItem('aosphere_theme') || 'light';
@@ -44,7 +51,13 @@ const app = {
   setTheme(theme) {
     this.theme = theme;
     localStorage.setItem('aosphere_theme', theme);
-    document.body.className = theme === 'dark' ? 'theme-dark bg-slate-900 text-white' : 'theme-light bg-brand-bg text-brand-textMain';
+    if (theme === 'dark') {
+      document.documentElement.classList.add('theme-dark');
+      document.body.className = 'theme-dark bg-slate-900 text-white';
+    } else {
+      document.documentElement.classList.remove('theme-dark');
+      document.body.className = 'theme-light bg-brand-bg text-brand-textMain';
+    }
     const icon = document.getElementById('theme-icon');
     if (icon) {
       icon.setAttribute('data-lucide', theme === 'dark' ? 'sun' : 'moon');
@@ -54,6 +67,21 @@ const app = {
 
   toggleTheme() {
     this.setTheme(this.theme === 'dark' ? 'light' : 'dark');
+  },
+
+  // ---------------- Mobile Responsive Navigation ----------------
+  toggleMobileSidebar() {
+    const sidebar = document.querySelector('.app-sidebar');
+    const backdrop = document.getElementById('sidebar-backdrop');
+    if (sidebar) sidebar.classList.toggle('mobile-open');
+    if (backdrop) backdrop.classList.toggle('active');
+  },
+
+  closeMobileSidebar() {
+    const sidebar = document.querySelector('.app-sidebar');
+    const backdrop = document.getElementById('sidebar-backdrop');
+    if (sidebar) sidebar.classList.remove('mobile-open');
+    if (backdrop) backdrop.classList.remove('active');
   },
 
   // ---------------- Keyboard Shortcuts ----------------
@@ -90,16 +118,33 @@ const app = {
         }
       };
 
-      const events = [
-        'stock_updated', 'po_created', 'deal_created', 'deal_stage_changed',
-        'invoice_created', 'shift_updated', 'task_updated', 'nap_synced',
-        'review_replied', 'approval_decided'
-      ];
+      const eventEntityMap = {
+        stock_updated: ['skus', 'summary'],
+        sku_created: ['skus'],
+        po_created: ['skus', 'approvals', 'summary'],
+        po_received: ['skus', 'summary'],
+        po_paid: ['summary'],
+        deal_created: ['deals', 'summary'],
+        deal_stage_changed: ['deals', 'summary'],
+        deal_converted: ['deals', 'invoices', 'summary'],
+        quote_generated: ['deals'],
+        invoice_created: ['invoices', 'summary'],
+        shift_updated: ['shifts'],
+        task_updated: ['tasks'],
+        nap_synced: ['listings'],
+        review_replied: ['reviews'],
+        approval_decided: ['approvals', 'skus'],
+        approval_required: ['approvals']
+      };
 
-      events.forEach(evtName => {
-        this.sse.addEventListener(evtName, (e) => {
+      Object.keys(eventEntityMap).forEach(evtName => {
+        this.sse.addEventListener(evtName, async (e) => {
           this.showToast(`Live Event: ${evtName.replace(/_/g, ' ')}`);
-          this.loadAllData();
+          const entities = eventEntityMap[evtName] || [];
+          for (const ent of entities) {
+            await this.reloadEntity(ent);
+          }
+          await this.reloadEntity('auditLogs');
         });
       });
     } catch (err) {
@@ -107,7 +152,37 @@ const app = {
     }
   },
 
-  // ---------------- Data Loading ----------------
+  // ---------------- Granular Entity Reload ----------------
+  async reloadEntity(name) {
+    const endpoints = {
+      skus: '/api/skus',
+      suppliers: '/api/suppliers',
+      deals: '/api/deals',
+      invoices: '/api/invoices',
+      summary: '/api/financial-summary',
+      employees: '/api/employees',
+      shifts: '/api/shifts',
+      tasks: '/api/tasks',
+      listings: '/api/listings',
+      reviews: '/api/reviews',
+      approvals: '/api/approvals',
+      auditLogs: '/api/audit-logs'
+    };
+    if (!endpoints[name]) return;
+    try {
+      const res = await fetch(endpoints[name]);
+      if (res.ok) {
+        this.data[name] = await res.json();
+        this.updateBadges();
+        this.render();
+        if (name === 'auditLogs') this.renderDrawerTimeline();
+      }
+    } catch (err) {
+      console.warn(`Failed to reload entity ${name}:`, err);
+    }
+  },
+
+  // ---------------- Full Data Loading (Boot) ----------------
   async loadAllData() {
     try {
       const [skus, suppliers, deals, invoices, summary, employees, shifts, tasks, listings, reviews, approvals, auditLogs] = await Promise.all([
@@ -170,6 +245,7 @@ const app = {
   // ---------------- Navigation ----------------
   setTab(tab) {
     this.activeTab = tab;
+    this.closeMobileSidebar();
     document.querySelectorAll('.nav-item').forEach(el => {
       el.classList.toggle('active', el.dataset.tab === tab);
     });
@@ -401,6 +477,9 @@ const app = {
           <p class="page-sub">Centralize supply chain, SKU inventories, and automated threshold reorder triggers.</p>
         </div>
         <div class="page-actions">
+          <button class="btn-press btn btn-secondary" onclick="app.openNewSKUModal()">
+            <i data-lucide="package-plus" class="w-4 h-4 text-brand-blue"></i> Add SKU
+          </button>
           <button class="btn-press btn btn-primary" onclick="app.openNewPOModal()">
             <i data-lucide="plus" class="w-4 h-4"></i> New Purchase Order
           </button>
@@ -512,8 +591,11 @@ const app = {
                     <div class="deal-customer">${deal.customer_name || 'Client'} • ${deal.customer_company || ''}</div>
                     <div class="deal-footer">
                       <span class="deal-value">$${deal.value.toLocaleString()}</span>
-                      <span style="font-size:11px; font-weight:700; color:#64748B; background:#F1F5F9; padding:2px 6px; border-radius:4px;">${deal.probability}%</span>
+                      <span style="font-size:11px; font-weight:700; color:#64748B; background:var(--bg-tertiary); padding:2px 6px; border-radius:4px;">${deal.probability}%</span>
                     </div>
+                    <button class="btn-press btn btn-secondary btn-sm" style="margin-top:10px; width:100%; font-size:11px; height:28px;" onclick="event.stopPropagation(); app.convertDealToInvoice('${deal.id}')">
+                      <i data-lucide="receipt" class="w-3.5 h-3.5 text-blue-500"></i> Convert to Invoice
+                    </button>
                   </div>
                 `).join('')}
               </div>
@@ -557,7 +639,9 @@ const app = {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ deal_id: dealId, stage: targetStage })
           });
-          app.loadAllData();
+          await app.reloadEntity('deals');
+          await app.reloadEntity('summary');
+          await app.reloadEntity('auditLogs');
         }
       });
     });
@@ -1039,7 +1123,9 @@ const app = {
       });
       if (res.ok) {
         this.showToast(`Stock adjusted by ${delta > 0 ? '+' : ''}${delta}`);
-        this.loadAllData();
+        await this.reloadEntity('skus');
+        await this.reloadEntity('summary');
+        await this.reloadEntity('auditLogs');
       } else {
         const err = await res.text();
         alert(err);
@@ -1056,7 +1142,8 @@ const app = {
       body: JSON.stringify({ shift_id: shiftId, status: newStatus })
     });
     this.showToast(`Shift status updated to ${newStatus}`);
-    this.loadAllData();
+    await this.reloadEntity('shifts');
+    await this.reloadEntity('auditLogs');
   },
 
   async cycleTaskStatus(taskId, currentStatus) {
@@ -1067,7 +1154,8 @@ const app = {
       body: JSON.stringify({ task_id: taskId, status: next })
     });
     this.showToast(`Task status updated to ${next}`);
-    this.loadAllData();
+    await this.reloadEntity('tasks');
+    await this.reloadEntity('auditLogs');
   },
 
   async syncAllNAP() {
@@ -1083,7 +1171,8 @@ const app = {
       })
     });
     this.showToast('Synchronized NAP across Google, Yelp, Bing & Apple Maps');
-    this.loadAllData();
+    await this.reloadEntity('listings');
+    await this.reloadEntity('auditLogs');
   },
 
   async saveAndSyncNAP() {
@@ -1098,7 +1187,8 @@ const app = {
       body: JSON.stringify({ business_name: bName, address: addr, phone, website: web })
     });
     this.showToast('Master business data saved & broadcasted');
-    this.loadAllData();
+    await this.reloadEntity('listings');
+    await this.reloadEntity('auditLogs');
   },
 
   async publishReviewReply(reviewId) {
@@ -1110,7 +1200,8 @@ const app = {
       body: JSON.stringify({ review_id: reviewId, reply_text: rev.reply_text, publish: true })
     });
     this.showToast(`Reply published to ${rev.platform}`);
-    this.loadAllData();
+    await this.reloadEntity('reviews');
+    await this.reloadEntity('auditLogs');
   },
 
   async draftAIReply(reviewId) {
@@ -1126,7 +1217,8 @@ const app = {
       body: JSON.stringify({ review_id: reviewId, reply_text: sampleReply, publish: false })
     });
     this.showToast('AI agent drafted response. Ready for approval.');
-    this.loadAllData();
+    await this.reloadEntity('reviews');
+    await this.reloadEntity('auditLogs');
   },
 
   async decideApproval(apprId, decision) {
@@ -1136,22 +1228,24 @@ const app = {
       body: JSON.stringify({ approval_id: apprId, decision })
     });
     this.showToast(`Approval ${decision}`);
-    this.loadAllData();
+    await this.reloadEntity('approvals');
+    await this.reloadEntity('skus');
+    await this.reloadEntity('auditLogs');
   },
 
-  // ---------------- Modals ----------------
+  // ---------------- Modals & Human Actions ----------------
   openStockModal(skuId, code, currentStock) {
     const modal = document.getElementById('action-modal');
     const content = document.getElementById('modal-content');
     content.innerHTML = `
-      <h3 style="font-size:18px; font-weight:800; margin-bottom:10px; color:#0F172A;">Adjust Stock for ${code}</h3>
-      <p style="font-size:13.5px; color:#64748B; margin-bottom:16px;">
+      <h3 style="font-size:18px; font-weight:800; margin-bottom:10px; color:var(--text-main);">Adjust Stock for ${code}</h3>
+      <p style="font-size:13.5px; color:var(--text-muted); margin-bottom:16px;">
         Current stock: <strong>${currentStock}</strong>. If quantity drops below safety threshold, the system automatically triggers an automated purchase order!
       </p>
       <div style="display:flex; flex-direction:column; gap:12px;">
-        <label style="font-size:12px; font-weight:700; color:#64748B; text-transform:uppercase;">Quantity Delta (+/-)</label>
+        <label for="modal-stock-delta" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Quantity Delta (+/-)</label>
         <input type="number" id="modal-stock-delta" class="form-input" value="-10">
-        <label style="font-size:12px; font-weight:700; color:#64748B; text-transform:uppercase;">Reason / Note</label>
+        <label for="modal-stock-reason" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Reason / Note</label>
         <input type="text" id="modal-stock-reason" class="form-input" value="Assembly line consumption">
         <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
           <button class="btn-press btn btn-secondary" onclick="app.closeModal()">Cancel</button>
@@ -1169,43 +1263,155 @@ const app = {
     this.closeModal();
   },
 
+  openNewSKUModal() {
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    modal.querySelector('.modal-window').style.maxWidth = '560px';
+    const supOptions = (this.data.suppliers || []).map(s => `<option value="${s.id}">${s.name}</option>`).join('') || '<option value="sup_01">Nexis Silicon</option>';
+
+    content.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+        <h3 style="font-size:18px; font-weight:800; color:var(--text-main);">Add New SKU</h3>
+        <span class="actor-pill actor-human">HUMAN CRUD</span>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="sku-code" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">SKU Code</label>
+            <input type="text" id="sku-code" class="form-input code-input" placeholder="e.g. SKU-SEN-500">
+          </div>
+          <div>
+            <label for="sku-category" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Category</label>
+            <select id="sku-category" class="form-input">
+              <option value="Hardware">Hardware</option>
+              <option value="Electronics">Electronics</option>
+              <option value="Sensors">Sensors</option>
+              <option value="Accessories">Accessories</option>
+              <option value="Software">Software</option>
+            </select>
+          </div>
+        </div>
+        <label for="sku-name" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Product Name</label>
+        <input type="text" id="sku-name" class="form-input" placeholder="e.g. 4K Vision Sensor">
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;">
+          <div>
+            <label for="sku-stock" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Initial Stock</label>
+            <input type="number" id="sku-stock" class="form-input" value="100">
+          </div>
+          <div>
+            <label for="sku-min" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Min Threshold</label>
+            <input type="number" id="sku-min" class="form-input" value="20">
+          </div>
+          <div>
+            <label for="sku-reorder" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Reorder Qty</label>
+            <input type="number" id="sku-reorder" class="form-input" value="50">
+          </div>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="sku-cost" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Unit Cost ($)</label>
+            <input type="number" step="0.01" id="sku-cost" class="form-input" value="45.00">
+          </div>
+          <div>
+            <label for="sku-price" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Selling Price ($)</label>
+            <input type="number" step="0.01" id="sku-price" class="form-input" value="95.00">
+          </div>
+        </div>
+        <label for="sku-supplier" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Primary Supplier</label>
+        <select id="sku-supplier" class="form-input">
+          ${supOptions}
+        </select>
+        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
+          <button class="btn-press btn btn-secondary" onclick="app.closeModal()">Cancel</button>
+          <button class="btn-press btn btn-primary" onclick="app.submitNewSKU()">Create SKU</button>
+        </div>
+      </div>
+    `;
+    modal.classList.add('active');
+  },
+
+  async submitNewSKU() {
+    const code = document.getElementById('sku-code').value.trim();
+    const name = document.getElementById('sku-name').value.trim();
+    const category = document.getElementById('sku-category').value;
+    const stock = parseInt(document.getElementById('sku-stock').value, 10);
+    const min = parseInt(document.getElementById('sku-min').value, 10);
+    const reorder = parseInt(document.getElementById('sku-reorder').value, 10);
+    const cost = parseFloat(document.getElementById('sku-cost').value);
+    const price = parseFloat(document.getElementById('sku-price').value);
+    const supplier = document.getElementById('sku-supplier').value;
+
+    if (!code || !name) {
+      this.showToast('Please provide both SKU code and name');
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/skus', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code, name, category,
+          stock_quantity: stock,
+          min_threshold: min,
+          reorder_quantity: reorder,
+          unit_cost: cost,
+          selling_price: price,
+          supplier_id: supplier
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: res.statusText }));
+        this.showToast('Error: ' + (err.message || 'Failed to create SKU'));
+        return;
+      }
+      this.showToast(`SKU ${code} created successfully`);
+      this.closeModal();
+      await this.reloadEntity('skus');
+      await this.reloadEntity('auditLogs');
+    } catch (e) {
+      this.showToast('Error: ' + e.message);
+    }
+  },
+
   openNewPOModal() {
     const modal = document.getElementById('action-modal');
     const content = document.getElementById('modal-content');
+    modal.querySelector('.modal-window').style.maxWidth = '540px';
     const supOptions = (this.data.suppliers || []).map(s => `<option value="${s.id}">${s.name} (${s.lead_time_days}d lead time)</option>`).join('');
     const skuOptions = (this.data.skus || []).map(k => `<option value="${k.code}" data-cost="${k.unit_cost}">${k.code} — ${k.name} ($${k.unit_cost.toFixed(2)})</option>`).join('');
 
     content.innerHTML = `
-      <h3 style="font-size:18px; font-weight:800; margin-bottom:10px; color:#0F172A;">Create Purchase Order</h3>
-      <p style="font-size:13.5px; color:#64748B; margin-bottom:16px;">
+      <h3 style="font-size:18px; font-weight:800; margin-bottom:10px; color:var(--text-main);">Create Purchase Order</h3>
+      <p style="font-size:13.5px; color:var(--text-muted); margin-bottom:16px;">
         Issue supplier purchase order. Orders &gt; $1,000 automatically route to the Human-in-the-Loop Approval Inbox.
       </p>
       <div style="display:flex; flex-direction:column; gap:12px;">
-        <label style="font-size:12px; font-weight:700; color:#64748B; text-transform:uppercase;">Target Supplier</label>
+        <label for="po-supplier" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Target Supplier</label>
         <select id="po-supplier" class="form-input">
           ${supOptions}
         </select>
-        <label style="font-size:12px; font-weight:700; color:#64748B; text-transform:uppercase;">Select SKU</label>
+        <label for="po-sku" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Select SKU</label>
         <select id="po-sku" class="form-input" onchange="app.onPOSkuChange()">
           ${skuOptions}
         </select>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
           <div>
-            <label style="font-size:12px; font-weight:700; color:#64748B; text-transform:uppercase;">Quantity</label>
+            <label for="po-qty" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Quantity</label>
             <input type="number" id="po-qty" class="form-input" value="50" oninput="app.calculatePOTotal()">
           </div>
           <div>
-            <label style="font-size:12px; font-weight:700; color:#64748B; text-transform:uppercase;">Unit Cost ($)</label>
+            <label for="po-cost" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Unit Cost ($)</label>
             <input type="number" id="po-cost" class="form-input" value="45" step="0.5" oninput="app.calculatePOTotal()">
           </div>
         </div>
-        <div style="padding:14px; background:#F8FAFC; border:1px solid var(--border-subtle); border-radius:12px; font-size:13px;">
+        <div style="padding:14px; background:var(--bg-tertiary); border:1px solid var(--border-subtle); border-radius:12px; font-size:13px;">
           Estimated Total: <strong id="po-total-display" style="color:#059669; font-size:15px;">$2,250.00</strong>
           <span id="po-approval-hint" style="display:block; font-size:11.5px; color:#D97706; margin-top:4px; font-weight:600;">
             ⚠️ Total exceeds $1,000 safety threshold: will be queued for Human Approval.
           </span>
         </div>
-        <label style="font-size:12px; font-weight:700; color:#64748B; text-transform:uppercase;">Notes / Instructions</label>
+        <label for="po-notes" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Notes / Instructions</label>
         <input type="text" id="po-notes" class="form-input" value="Stock replenishment for production batch">
         <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
           <button class="btn-press btn btn-secondary" onclick="app.closeModal()">Cancel</button>
@@ -1264,28 +1470,38 @@ const app = {
 
     this.showToast(total > 1000 ? 'PO created & sent to Approval Inbox' : 'Purchase Order drafted');
     this.closeModal();
-    this.loadAllData();
+    await this.reloadEntity('skus');
+    await this.reloadEntity('approvals');
+    await this.reloadEntity('auditLogs');
   },
 
   openNewDealModal() {
     const modal = document.getElementById('action-modal');
     const content = document.getElementById('modal-content');
+    modal.querySelector('.modal-window').style.maxWidth = '540px';
 
     content.innerHTML = `
-      <h3 style="font-size:18px; font-weight:800; margin-bottom:10px; color:#0F172A;">Create New Deal</h3>
+      <h3 style="font-size:18px; font-weight:800; margin-bottom:10px; color:var(--text-main);">Create New Deal</h3>
       <div style="display:flex; flex-direction:column; gap:12px;">
-        <label style="font-size:12px; font-weight:700; color:#64748B; text-transform:uppercase;">Deal Title</label>
+        <label for="deal-title" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Deal Title</label>
         <input type="text" id="deal-title" class="form-input" placeholder="e.g. Enterprise Hardware License">
-        <label style="font-size:12px; font-weight:700; color:#64748B; text-transform:uppercase;">Deal Value ($)</label>
+        <label for="deal-customer" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Customer</label>
+        <select id="deal-customer" class="form-input">
+          <option value="cust_01">Acme Corporation</option>
+          <option value="cust_02">Starlight Systems</option>
+          <option value="cust_03">Apex Logistics</option>
+        </select>
+        <label for="deal-value" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Deal Value ($)</label>
         <input type="number" id="deal-value" class="form-input" value="25000">
-        <label style="font-size:12px; font-weight:700; color:#64748B; text-transform:uppercase;">Stage</label>
+        <label for="deal-stage" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Stage</label>
         <select id="deal-stage" class="form-input">
           <option value="lead">New Leads</option>
           <option value="qualified">Qualified</option>
           <option value="proposal">Proposal</option>
           <option value="negotiation">Negotiation</option>
+          <option value="won">Won</option>
         </select>
-        <label style="font-size:12px; font-weight:700; color:#64748B; text-transform:uppercase;">Close Date</label>
+        <label for="deal-date" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Close Date</label>
         <input type="date" id="deal-date" class="form-input" value="2026-11-30">
         <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
           <button class="btn-press btn btn-secondary" onclick="app.closeModal()">Cancel</button>
@@ -1298,6 +1514,7 @@ const app = {
 
   async submitNewDeal() {
     const title = document.getElementById('deal-title').value;
+    const customerId = document.getElementById('deal-customer')?.value || 'cust_01';
     const value = parseFloat(document.getElementById('deal-value').value);
     const stage = document.getElementById('deal-stage').value;
     const closeDate = document.getElementById('deal-date').value;
@@ -1305,73 +1522,260 @@ const app = {
     await fetch('/api/deals', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title, customer_id: 'cust_01', value, stage, expected_close_date: closeDate })
+      body: JSON.stringify({ title, customer_id: customerId, value, stage, expected_close_date: closeDate })
     });
     this.showToast('Deal created successfully');
     this.closeModal();
-    this.loadAllData();
+    await this.reloadEntity('deals');
+    await this.reloadEntity('summary');
+    await this.reloadEntity('auditLogs');
+  },
+
+  async convertDealToInvoice(dealId) {
+    if (!confirm('Convert this sales deal into an official customer invoice?')) return;
+    try {
+      const res = await fetch('/api/deals/convert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deal_id: dealId })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: res.statusText }));
+        this.showToast('Error: ' + (err.message || 'Failed to convert deal'));
+        return;
+      }
+      const inv = await res.json();
+      this.showToast(`Deal converted to invoice #${inv.invoice_number}`);
+      await this.reloadEntity('deals');
+      await this.reloadEntity('invoices');
+      await this.reloadEntity('summary');
+      await this.reloadEntity('auditLogs');
+    } catch (e) {
+      this.showToast('Error: ' + e.message);
+    }
   },
 
   openNewInvoiceModal() {
     const modal = document.getElementById('action-modal');
     const content = document.getElementById('modal-content');
+    modal.querySelector('.modal-window').style.maxWidth = '680px';
+
+    const custOptions = (this.data.deals || [])
+      .filter(d => d.customer_name)
+      .map(d => `<option value="${d.customer_id || 'cust_01'}">${d.customer_name} (${d.customer_company || 'Client'})</option>`)
+      .filter((v, i, a) => a.indexOf(v) === i)
+      .join('') || '<option value="cust_01">Acme Corporation</option><option value="cust_02">Starlight Systems</option>';
+
     content.innerHTML = `
-      <h3 style="font-size:18px; font-weight:800; margin-bottom:10px; color:#0F172A;">Generate Client Invoice</h3>
-      <div style="display:flex; flex-direction:column; gap:12px;">
-        <label style="font-size:12px; font-weight:700; color:#64748B; text-transform:uppercase;">Line Item Description</label>
-        <input type="text" id="inv-desc" class="form-input" value="Quarterly Embedded Hardware Delivery">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+        <h3 style="font-size:18px; font-weight:800; color:var(--text-main);">Generate Multi-Line Invoice</h3>
+        <span class="actor-pill actor-human">HUMAN AUTHOR</span>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:14px;">
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
           <div>
-            <label style="font-size:12px; font-weight:700; color:#64748B; text-transform:uppercase;">Quantity</label>
-            <input type="number" id="inv-qty" class="form-input" value="100">
+            <label for="inv-customer" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Customer / Client</label>
+            <select id="inv-customer" class="form-input">
+              ${custOptions}
+            </select>
           </div>
           <div>
-            <label style="font-size:12px; font-weight:700; color:#64748B; text-transform:uppercase;">Unit Price ($)</label>
-            <input type="number" id="inv-price" class="form-input" value="150">
+            <label for="inv-due" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Payment Due Date</label>
+            <input type="date" id="inv-due" class="form-input" value="2026-11-20">
           </div>
         </div>
-        <label style="font-size:12px; font-weight:700; color:#64748B; text-transform:uppercase;">Due Date</label>
-        <input type="date" id="inv-due" class="form-input" value="2026-11-15">
-        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
+
+        <div>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+            <label style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Invoice Line Items</label>
+            <button type="button" class="btn-press btn btn-secondary btn-sm" onclick="app.addInvoiceRow()" style="height:28px; font-size:11.5px;">
+              <i data-lucide="plus" class="w-3 h-3"></i> Add Line
+            </button>
+          </div>
+          <table class="data-table" style="font-size:13px;" id="inv-items-table">
+            <thead>
+              <tr>
+                <th style="padding:8px 10px;">Item Description</th>
+                <th style="padding:8px 10px; width:90px;">Qty</th>
+                <th style="padding:8px 10px; width:110px;">Unit ($)</th>
+                <th style="padding:8px 10px; width:110px;">Total ($)</th>
+                <th style="padding:8px 10px; width:45px;"></th>
+              </tr>
+            </thead>
+            <tbody id="inv-items-body">
+              <tr class="inv-row">
+                <td style="padding:6px 10px;">
+                  <input type="text" class="form-input inv-item-desc" style="padding:6px 8px; font-size:12.5px;" value="Quantum Computing Node Deployment" list="sku-datalist">
+                </td>
+                <td style="padding:6px 10px;">
+                  <input type="number" class="form-input inv-item-qty" style="padding:6px 8px; font-size:12.5px;" value="1" min="1" oninput="app.calculateInvoiceTotals()">
+                </td>
+                <td style="padding:6px 10px;">
+                  <input type="number" class="form-input inv-item-price" style="padding:6px 8px; font-size:12.5px;" value="2400.00" step="0.5" oninput="app.calculateInvoiceTotals()">
+                </td>
+                <td style="padding:6px 10px; font-weight:700; color:var(--text-main);" class="inv-item-total">$2,400.00</td>
+                <td style="padding:6px 10px; text-align:center;">
+                  <button type="button" class="icon-btn" style="width:28px; height:28px;" onclick="app.removeInvoiceRow(this)" title="Remove item">
+                    <i data-lucide="trash-2" class="w-3.5 h-3.5 text-rose-500"></i>
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <datalist id="sku-datalist">
+            ${(this.data.skus || []).map(k => `<option value="${k.name}">${k.code} - $${k.selling_price}</option>`).join('')}
+          </datalist>
+        </div>
+
+        <!-- Totals summary box -->
+        <div style="background:var(--bg-tertiary); border:1px solid var(--border-subtle); border-radius:12px; padding:12px 16px; display:flex; flex-direction:column; gap:6px;">
+          <div style="display:flex; justify-content:space-between; font-size:13px; color:var(--text-muted);">
+            <span>Subtotal:</span>
+            <strong id="inv-subtotal" style="color:var(--text-main);">$2,400.00</strong>
+          </div>
+          <div style="display:flex; justify-content:space-between; font-size:13px; color:var(--text-muted);">
+            <span>Tax (8%):</span>
+            <strong id="inv-tax" style="color:var(--text-main);">$192.00</strong>
+          </div>
+          <div style="display:flex; justify-content:space-between; font-size:15px; font-weight:800; border-top:1px solid var(--border-subtle); padding-top:6px; color:var(--text-main);">
+            <span>Grand Total:</span>
+            <span id="inv-grand-total" style="color:#059669;">$2,592.00</span>
+          </div>
+        </div>
+
+        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:8px;">
           <button class="btn-press btn btn-secondary" onclick="app.closeModal()">Cancel</button>
-          <button class="btn-press btn btn-primary" onclick="app.submitNewInvoice()">Issue Invoice</button>
+          <button class="btn-press btn btn-primary" onclick="app.submitNewInvoice()">
+            <i data-lucide="file-check" class="w-4 h-4"></i> Issue Invoice
+          </button>
         </div>
       </div>
     `;
     modal.classList.add('active');
+    this.calculateInvoiceTotals();
+    if (window.lucide) lucide.createIcons();
+  },
+
+  addInvoiceRow() {
+    const tbody = document.getElementById('inv-items-body');
+    if (!tbody) return;
+    const tr = document.createElement('tr');
+    tr.className = 'inv-row';
+    tr.innerHTML = `
+      <td style="padding:6px 10px;">
+        <input type="text" class="form-input inv-item-desc" style="padding:6px 8px; font-size:12.5px;" placeholder="Item name or service..." list="sku-datalist">
+      </td>
+      <td style="padding:6px 10px;">
+        <input type="number" class="form-input inv-item-qty" style="padding:6px 8px; font-size:12.5px;" value="1" min="1" oninput="app.calculateInvoiceTotals()">
+      </td>
+      <td style="padding:6px 10px;">
+        <input type="number" class="form-input inv-item-price" style="padding:6px 8px; font-size:12.5px;" value="100.00" step="0.5" oninput="app.calculateInvoiceTotals()">
+      </td>
+      <td style="padding:6px 10px; font-weight:700; color:var(--text-main);" class="inv-item-total">$100.00</td>
+      <td style="padding:6px 10px; text-align:center;">
+        <button type="button" class="icon-btn" style="width:28px; height:28px;" onclick="app.removeInvoiceRow(this)" title="Remove item">
+          <i data-lucide="trash-2" class="w-3.5 h-3.5 text-rose-500"></i>
+        </button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+    if (window.lucide) lucide.createIcons();
+    this.calculateInvoiceTotals();
+  },
+
+  removeInvoiceRow(btn) {
+    const row = btn.closest('tr');
+    const tbody = document.getElementById('inv-items-body');
+    if (tbody && tbody.querySelectorAll('tr').length > 1) {
+      row.remove();
+      this.calculateInvoiceTotals();
+    } else {
+      this.showToast('Invoice must have at least one line item');
+    }
+  },
+
+  calculateInvoiceTotals() {
+    const rows = document.querySelectorAll('.inv-row');
+    let subtotal = 0;
+    rows.forEach(r => {
+      const qty = parseFloat(r.querySelector('.inv-item-qty')?.value || 0);
+      const price = parseFloat(r.querySelector('.inv-item-price')?.value || 0);
+      const rowTotal = qty * price;
+      const totalCell = r.querySelector('.inv-item-total');
+      if (totalCell) totalCell.textContent = `$${rowTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      subtotal += rowTotal;
+    });
+
+    const tax = subtotal * 0.08;
+    const grand = subtotal + tax;
+
+    const subEl = document.getElementById('inv-subtotal');
+    const taxEl = document.getElementById('inv-tax');
+    const grandEl = document.getElementById('inv-grand-total');
+
+    if (subEl) subEl.textContent = `$${subtotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    if (taxEl) taxEl.textContent = `$${tax.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    if (grandEl) grandEl.textContent = `$${grand.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   },
 
   async submitNewInvoice() {
-    const desc = document.getElementById('inv-desc').value;
-    const qty = parseInt(document.getElementById('inv-qty').value, 10);
-    const price = parseFloat(document.getElementById('inv-price').value);
-    const dueDate = document.getElementById('inv-due').value;
+    const custId = document.getElementById('inv-customer')?.value || 'cust_01';
+    const dueDate = document.getElementById('inv-due')?.value || '2026-11-20';
+    const rows = document.querySelectorAll('.inv-row');
+    const items = [];
+    let subtotal = 0;
 
-    const subtotal = qty * price;
-    const tax = subtotal * 0.08;
-    const items = JSON.stringify([{ desc, qty, price }]);
-
-    await fetch('/api/invoices', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        customer_id: 'cust_02',
-        items_json: items,
-        subtotal,
-        tax,
-        due_date: dueDate,
-        recurring: 'none'
-      })
+    rows.forEach(r => {
+      const desc = r.querySelector('.inv-item-desc')?.value.trim() || 'Service';
+      const qty = parseFloat(r.querySelector('.inv-item-qty')?.value || 1);
+      const price = parseFloat(r.querySelector('.inv-item-price')?.value || 0);
+      items.push({ desc, qty, price });
+      subtotal += qty * price;
     });
-    this.showToast('Tax invoice generated');
-    this.closeModal();
-    this.loadAllData();
+
+    if (items.length === 0) {
+      this.showToast('Please add at least one line item');
+      return;
+    }
+
+    const tax = subtotal * 0.08;
+
+    try {
+      const res = await fetch('/api/invoices', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          customer_id: custId,
+          items_json: JSON.stringify(items),
+          subtotal,
+          tax,
+          due_date: dueDate,
+          recurring: 'none'
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: res.statusText }));
+        this.showToast('Error: ' + (err.message || 'Failed to issue invoice'));
+        return;
+      }
+      this.showToast(`Tax invoice generated for $${(subtotal + tax).toLocaleString('en-US', { minimumFractionDigits: 2 })}`);
+      this.closeModal();
+      await this.reloadEntity('invoices');
+      await this.reloadEntity('summary');
+      await this.reloadEntity('auditLogs');
+    } catch (e) {
+      this.showToast('Error: ' + e.message);
+    }
   },
 
   closeModal(event) {
     if (event && event.target && !event.target.classList.contains('modal-backdrop')) return;
     const modal = document.getElementById('action-modal');
-    if (modal) modal.classList.remove('active');
+    if (modal) {
+      modal.classList.remove('active');
+      const win = modal.querySelector('.modal-window');
+      if (win) win.style.maxWidth = '';
+    }
   },
 
   // ---------------- MCP Drawer & Co-Pilot Inspector ----------------
@@ -1481,6 +1885,12 @@ const app = {
     const sel = document.getElementById('mcp-tool-select');
     const argsBox = document.getElementById('mcp-tool-args');
     const outBox = document.getElementById('mcp-tool-output');
+    const keyInput = document.getElementById('mcp-api-key');
+
+    if (keyInput && keyInput.value) {
+      this.apiKey = keyInput.value.trim();
+      localStorage.setItem('aosphere_api_key', this.apiKey);
+    }
 
     try {
       const toolName = sel.value;
@@ -1500,14 +1910,23 @@ const app = {
 
       const res = await fetch('/mcp/messages', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.apiKey}`,
+          'X-API-Key': this.apiKey
+        },
         body: JSON.stringify(rpcReq)
       });
 
       const rpcResp = await res.json();
       outBox.textContent = JSON.stringify(rpcResp, null, 2);
       this.showToast(`MCP Tool ${toolName} executed`);
-      this.loadAllData();
+      await this.reloadEntity('skus');
+      await this.reloadEntity('deals');
+      await this.reloadEntity('invoices');
+      await this.reloadEntity('approvals');
+      await this.reloadEntity('summary');
+      await this.reloadEntity('auditLogs');
     } catch (e) {
       outBox.textContent = 'Error: ' + e.message;
     }

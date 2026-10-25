@@ -181,6 +181,49 @@ func (s *Store) GetSKUsForOrg(orgID string, belowThresholdOnly bool) ([]db.SKU, 
 	return list, nil
 }
 
+func (s *Store) CreateSKU(code, name, category, supID string, stock, min, reorder int, cost, price float64) (*db.SKU, error) {
+	return s.CreateSKUForOrg("org_default", code, name, category, supID, stock, min, reorder, cost, price)
+}
+
+func (s *Store) CreateSKUForOrg(orgID, code, name, category, supID string, stock, min, reorder int, cost, price float64) (*db.SKU, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	id := "sku_" + uuid.New().String()[:8]
+	now := time.Now()
+
+	var supIDVal interface{}
+	if supID != "" {
+		supIDVal = supID
+	} else {
+		supIDVal = nil
+	}
+
+	_, err := s.db.Exec(`INSERT INTO skus (id, org_id, code, name, category, stock_quantity, reserved_quantity, min_threshold, reorder_quantity, unit_cost, selling_price, supplier_id, version, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 1, ?)`,
+		id, orgID, code, name, category, stock, min, reorder, cost, price, supIDVal, now.Format(time.RFC3339))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create sku: %w", err)
+	}
+
+	return &db.SKU{
+		ID:               id,
+		OrgID:            orgID,
+		Code:             code,
+		Name:             name,
+		Category:         category,
+		StockQuantity:    stock,
+		ReservedQuantity: 0,
+		MinThreshold:     min,
+		ReorderQuantity:  reorder,
+		UnitCost:         cost,
+		SellingPrice:     price,
+		SupplierID:       supID,
+		Version:          1,
+		UpdatedAt:        now,
+	}, nil
+}
+
 func (s *Store) UpdateStock(skuID string, delta int, reason, actorType, actorID string) (*db.SKU, error) {
 	return s.UpdateStockForOrg("org_default", skuID, delta, reason, actorType, actorID)
 }
