@@ -12,7 +12,7 @@ import sqlite3
 import argparse
 import mimetypes
 from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import threading
 import time
@@ -693,10 +693,10 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 )
                 log_audit(conn, "human", "web_user", "CREATE_SHIFT", "shifts", shift_id, f"Scheduled shift for {emp_id} on {sdate}")
                 conn.commit()
-                row = conn.execute("SELECT * FROM shifts WHERE id = ?", (shift_id)).fetchone() if False else {"id": shift_id, "status": "scheduled"}
+                row = conn.execute("SELECT s.*, COALESCE(e.name, '') as employee_name, COALESCE(e.role, '') as employee_role FROM shifts s LEFT JOIN employees e ON s.employee_id = e.id WHERE s.id = ?", (shift_id,)).fetchone()
                 conn.close()
                 broadcast("shift_scheduled", {"shift_id": shift_id})
-                return self.send_json(row, 201)
+                return self.send_json(dict(row) if row else {"id": shift_id, "status": "scheduled"}, 201)
 
             elif path == "/api/tasks":
                 title = req.get("title")
@@ -849,7 +849,8 @@ def main():
     parser.add_argument("-port", type=int, default=8080, help="HTTP Server Port")
     args = parser.parse_args()
 
-    server = HTTPServer(("0.0.0.0", args.port), AOSphereHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", args.port), AOSphereHandler)
+    server.daemon_threads = True
     print("==================================================================")
     print("  AO Sphere — Agent-Native Business Operating System (Live Server)")
     print("==================================================================")
