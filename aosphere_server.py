@@ -11,7 +11,16 @@ import json
 import sqlite3
 import argparse
 import mimetypes
-from datetime import datetime
+from datetime import datetime, timezone
+
+def utcnow_str():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def utc_today_str():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+def utcnow_iso():
+    return datetime.now(timezone.utc).isoformat()
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import threading
@@ -173,7 +182,7 @@ def broadcast(event_type, payload):
 
 def log_audit(conn, actor_type, actor_id, action, entity_type, entity_id, reasoning, meta="{}"):
     audit_id = f"aud_{int(time.time()*1000)}"
-    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = utcnow_str()
     conn.execute(
         "INSERT INTO audit_logs (id, actor_type, actor_id, action, entity_type, entity_id, reasoning, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (audit_id, actor_type, actor_id, action, entity_type, entity_id, reasoning, meta, now)
@@ -233,7 +242,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
             with clients_lock:
                 sse_clients.append(q)
 
-            init_msg = f"event: connected\ndata: {{\"status\":\"ok\",\"time\":\"{datetime.utcnow().isoformat()}\"}}\n\n"
+            init_msg = f"event: connected\ndata: {{\"status\":\"ok\",\"time\":\"{utcnow_iso()}\"}}\n\n"
             try:
                 self.wfile.write(init_msg.encode("utf-8"))
                 self.wfile.flush()
@@ -445,7 +454,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                     conn.close()
                     return self.send_json({
                         "org_id": "org_default",
-                        "as_of": datetime.utcnow().isoformat(),
+                        "as_of": utcnow_iso(),
                         "accounts": [dict(r) for r in rows],
                         "total_debits_cents": tot_debits,
                         "total_credits_cents": tot_credits,
@@ -662,7 +671,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                     return self.send_json({"error": "SKU not found"}, 404)
 
                 new_stock = max(0, row["stock_quantity"] + delta)
-                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                now = utcnow_str()
                 conn.execute("UPDATE skus SET stock_quantity = ?, updated_at = ? WHERE id = ?", (new_stock, now, sku_id))
                 log_audit(conn, "human", "web_user", "UPDATE_STOCK", "skus", sku_id, f"Adjusted stock by {delta}: {reason}", json.dumps({"delta": delta, "new_stock": new_stock}))
 
@@ -690,7 +699,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 notes = req.get("notes", "")
                 po_id = f"po_{int(time.time()*1000)}"
                 po_num = f"PO-{int(time.time())}"
-                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                now = utcnow_str()
 
                 conn.execute(
                     "INSERT INTO purchase_orders (id, po_number, supplier_id, status, total_amount, items_json, created_by_type, actor_id, notes, created_at) VALUES (?, ?, ?, 'ordered', ?, ?, 'human', 'web_user', ?, ?)",
@@ -710,7 +719,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 stage = req.get("stage", "lead")
                 close_date = req.get("expected_close_date", "")
                 deal_id = f"deal_{int(time.time()*1000)}"
-                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                now = utcnow_str()
 
                 conn.execute(
                     "INSERT INTO deals (id, title, customer_id, value, stage, probability, expected_close_date, created_at) VALUES (?, ?, ?, ?, ?, 60, ?, ?)",
@@ -743,7 +752,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 total = subtotal + tax
                 inv_id = f"inv_{int(time.time()*1000)}"
                 inv_num = f"INV-{int(time.time())}"
-                now = datetime.utcnow().strftime("%Y-%m-%d")
+                now = utc_today_str()
 
                 conn.execute(
                     "INSERT INTO invoices (id, invoice_number, customer_id, status, issue_date, due_date, subtotal, tax_amount, total_amount, recurring_frequency, items_json) VALUES (?, ?, ?, 'sent', ?, ?, ?, ?, ?, ?, ?)",
@@ -781,7 +790,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 addr = req.get("address")
                 phone = req.get("phone")
                 web = req.get("website")
-                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                now = utcnow_str()
                 conn.execute("UPDATE listings SET sync_status = 'synced', last_sync = ?, nap_json = ? WHERE 1=1", (now, json.dumps({"name": name, "address": addr, "phone": phone, "website": web})))
                 log_audit(conn, "human", "web_user", "SYNC_NAP", "listings", "all", "Synced NAP data across all directories")
                 conn.commit()
@@ -794,7 +803,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 text = req.get("reply_text")
                 pub = req.get("publish", False)
                 status = "published" if pub else "drafted_by_agent"
-                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                now = utcnow_str()
                 conn.execute("UPDATE reviews SET reply_text = ?, reply_status = ?, replied_at = ? WHERE id = ?", (text, status, now, rev_id))
                 log_audit(conn, "human", "web_user", "REPLY_REVIEW", "reviews", rev_id, f"Response: {status}")
                 conn.commit()
@@ -805,7 +814,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
             elif path == "/api/approvals/decide":
                 appr_id = req.get("approval_id")
                 decision = req.get("decision")
-                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                now = utcnow_str()
                 conn.execute("UPDATE approvals SET status = ?, decided_by = 'admin', decided_at = ? WHERE id = ?", (decision, now, appr_id))
                 log_audit(conn, "human", "admin", f"DECIDE_APPROVAL_{decision.upper()}", "approvals", appr_id, f"Decision: {decision}")
                 conn.commit()
@@ -824,7 +833,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 reorder = int(req.get("reorder_quantity", 50))
                 sup_id = req.get("supplier_id", "")
                 sku_id = f"sku_{int(time.time()*1000)}"
-                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                now = utcnow_str()
 
                 conn.execute(
                     "INSERT INTO skus (id, org_id, code, name, category, unit_cost, selling_price, stock_quantity, min_threshold, reorder_quantity, supplier_id, updated_at) VALUES (?, 'org_default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -846,7 +855,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
 
                 inv_id = f"inv_{int(time.time()*1000)}"
                 inv_num = f"INV-DEAL-{int(time.time())}"
-                today = datetime.utcnow().strftime("%Y-%m-%d")
+                today = utc_today_str()
                 val = float(d_row["value"] or 0.0)
                 items_json = json.dumps([{"description": f"Contract: {d_row['title']}", "quantity": 1, "unit_price": val, "total": val}])
 
@@ -870,7 +879,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 dept = req.get("department", "Operations")
                 rate = float(req.get("hourly_rate", 25.0))
                 emp_id = f"emp_{int(time.time()*1000)}"
-                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                now = utcnow_str()
 
                 conn.execute(
                     "INSERT INTO employees (id, org_id, name, email, role, department, hourly_rate, status, created_at) VALUES (?, 'org_default', ?, ?, ?, ?, ?, 'active', ?)",
@@ -890,7 +899,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 end = req.get("end_time", "17:00")
                 station = req.get("station") or req.get("role_assigned", "Warehouse Associate")
                 shift_id = f"shift_{int(time.time()*1000)}"
-                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                now = utcnow_str()
 
                 conn.execute(
                     "INSERT INTO shifts (id, org_id, employee_id, shift_date, start_time, end_time, station, status, created_at) VALUES (?, 'org_default', ?, ?, ?, ?, ?, 'scheduled', ?)",
@@ -910,7 +919,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 due = req.get("due_date", "")
                 assignee = req.get("assignee_id") or req.get("assigned_to", "")
                 task_id = f"task_{int(time.time()*1000)}"
-                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                now = utcnow_str()
 
                 conn.execute(
                     "INSERT INTO tasks (id, org_id, title, description, priority, due_date, assignee_id, status, created_at) VALUES (?, 'org_default', ?, ?, ?, ?, ?, 'todo', ?)",
@@ -929,7 +938,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 loc = req.get("location", "")
                 desc = req.get("description", "")
                 wh_id = f"wh_{int(time.time()*1000)}"
-                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                now = utcnow_str()
 
                 conn.execute(
                     "INSERT INTO warehouses (id, org_id, name, code, location, description, is_active, created_at) VALUES (?, 'org_default', ?, ?, ?, ?, 1, ?)",
@@ -950,7 +959,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 reason = req.get("reason", "Internal transfer")
                 xfer_id = f"xfer_{int(time.time()*1000)}"
                 xfer_num = f"TRF-{int(time.time())}"
-                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                now = utcnow_str()
 
                 conn.execute(
                     "INSERT INTO stock_transfers (id, org_id, transfer_number, from_warehouse_id, to_warehouse_id, sku_code, quantity, reason, status, created_at) VALUES (?, 'org_default', ?, ?, ?, ?, ?, ?, 'completed', ?)",
@@ -972,8 +981,8 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 items = req.get("items", [])
                 grn_id = f"grn_{int(time.time()*1000)}"
                 grn_num = f"GRN-{int(time.time())}"
-                today = datetime.utcnow().strftime("%Y-%m-%d")
-                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                today = utc_today_str()
+                now = utcnow_str()
 
                 conn.execute(
                     "INSERT INTO goods_receipt_notes (id, org_id, grn_number, po_id, warehouse_id, received_date, carrier_tracking, inspector_name, notes, items_json, status, created_at) VALUES (?, 'org_default', ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?)",
@@ -1001,7 +1010,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 amt_cents = int(amt * 100)
                 due = req.get("due_date", "")
                 sb_id = f"sb_{int(time.time()*1000)}"
-                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                now = utcnow_str()
 
                 conn.execute(
                     "INSERT INTO supplier_bills (id, org_id, bill_number, supplier_id, po_id, grn_id, amount, amount_cents, match_status, due_date, status, created_at) VALUES (?, 'org_default', ?, ?, ?, ?, ?, ?, 'pending', ?, 'open', ?)",
@@ -1028,7 +1037,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
 
                 status = "matched" if diff <= 50.0 else "variance_flagged"
                 conn.execute("UPDATE supplier_bills SET match_status = ? WHERE id = ?", (status, bill_id))
-                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                now = utcnow_str()
 
                 if status == "variance_flagged":
                     appr_id = f"appr_{int(time.time()*1000)}"
@@ -1070,7 +1079,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 subtotal_cents = int(round(subtotal * 100))
                 tax_cents = int(round(tax * 100))
                 total_cents = subtotal_cents + tax_cents
-                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                now = utcnow_str()
 
                 conn.execute("""
                     INSERT INTO credit_notes (id, org_id, credit_note_number, invoice_id, customer_id, currency, subtotal, tax_amount, total_amount, total_cents, reason, status, items_json, created_at)
@@ -1081,7 +1090,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 try:
                     je_id = f"je_{int(time.time()*1000)}"
                     je_num = f"JE-CN-{int(time.time())}"
-                    today = datetime.utcnow().strftime("%Y-%m-%d")
+                    today = utc_today_str()
                     conn.execute("""
                         INSERT INTO journal_entries (id, org_id, entry_number, date, memo, source, source_id, posted_by, posted_at)
                         VALUES (?, 'org_default', ?, ?, ?, 'credit_note', ?, 'web_user', ?)
@@ -1120,7 +1129,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                     return self.send_json({"error": "target_currency and positive rate required"}, 400)
 
                 rate_id = f"fx_{base_cur}_{target_cur}".lower()
-                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                now = utcnow_str()
                 conn.execute("""
                     INSERT INTO exchange_rates (id, org_id, base_currency, target_currency, rate, updated_at)
                     VALUES (?, 'org_default', ?, ?, ?, ?)
