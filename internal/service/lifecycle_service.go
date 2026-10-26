@@ -24,18 +24,7 @@ var (
 	ErrTimesheetNotFound = errors.New("timesheet not found")
 )
 
-type CompanyProfile struct {
-	OrgID               string    `json:"org_id"`
-	CompanyName         string    `json:"company_name"`
-	Currency            string    `json:"currency"`
-	Timezone            string    `json:"timezone"`
-	TaxRate             float64   `json:"tax_rate"`
-	Address             string    `json:"address"`
-	Phone               string    `json:"phone"`
-	Website             string    `json:"website"`
-	OnboardingCompleted bool      `json:"onboarding_completed"`
-	UpdatedAt           time.Time `json:"updated_at"`
-}
+type CompanyProfile = db.CompanyProfile
 
 type Quote struct {
 	ID          string    `json:"id"`

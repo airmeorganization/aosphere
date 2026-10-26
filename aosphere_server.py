@@ -104,6 +104,49 @@ def ensure_schema(conn):
     VALUES ('wh_main_org_default', 'org_default', 'Central Distribution Center', 'WH-MAIN', 'Austin, TX', 'Primary central inventory hub');
     INSERT OR IGNORE INTO warehouses (id, org_id, name, code, location, description)
     VALUES ('wh_east_org_default', 'org_default', 'Eastern Regional Depo', 'WH-EAST', 'Boston, MA', 'Secondary eastern regional hub');
+
+    CREATE TABLE IF NOT EXISTS credit_notes (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        credit_note_number TEXT NOT NULL,
+        invoice_id TEXT DEFAULT '',
+        customer_id TEXT NOT NULL,
+        currency TEXT NOT NULL DEFAULT 'USD',
+        subtotal REAL NOT NULL DEFAULT 0.0,
+        tax_amount REAL NOT NULL DEFAULT 0.0,
+        total_amount REAL NOT NULL DEFAULT 0.0,
+        total_cents INTEGER NOT NULL DEFAULT 0,
+        reason TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'issued',
+        items_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS exchange_rates (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        base_currency TEXT NOT NULL DEFAULT 'USD',
+        target_currency TEXT NOT NULL,
+        rate REAL NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(org_id, base_currency, target_currency)
+    );
+
+    INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate) VALUES ('fx_INR_org_default', 'org_default', 'USD', 'INR', 83.50);
+    INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate) VALUES ('fx_JPY_org_default', 'org_default', 'USD', 'JPY', 153.20);
+    INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate) VALUES ('fx_CNY_org_default', 'org_default', 'USD', 'CNY', 7.23);
+    INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate) VALUES ('fx_SGD_org_default', 'org_default', 'USD', 'SGD', 1.32);
+    INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate) VALUES ('fx_AED_org_default', 'org_default', 'USD', 'AED', 3.67);
+    INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate) VALUES ('fx_SAR_org_default', 'org_default', 'USD', 'SAR', 3.75);
+    INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate) VALUES ('fx_HKD_org_default', 'org_default', 'USD', 'HKD', 7.78);
+    INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate) VALUES ('fx_KRW_org_default', 'org_default', 'USD', 'KRW', 1380.0);
+    INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate) VALUES ('fx_THB_org_default', 'org_default', 'USD', 'THB', 36.80);
+    INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate) VALUES ('fx_IDR_org_default', 'org_default', 'USD', 'IDR', 15850.0);
+    INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate) VALUES ('fx_MYR_org_default', 'org_default', 'USD', 'MYR', 4.45);
+    INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate) VALUES ('fx_PHP_org_default', 'org_default', 'USD', 'PHP', 58.20);
+    INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate) VALUES ('fx_VND_org_default', 'org_default', 'USD', 'VND', 25400.0);
+    INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate) VALUES ('fx_EUR_org_default', 'org_default', 'USD', 'EUR', 0.92);
+    INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate) VALUES ('fx_GBP_org_default', 'org_default', 'USD', 'GBP', 0.77);
     """)
     conn.commit()
     _schema_initialized = True
@@ -338,6 +381,153 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                     rows = conn.execute("SELECT * FROM batch_lots ORDER BY created_at DESC").fetchall()
                     conn.close()
                     return self.send_json([dict(r) for r in rows])
+
+                elif path == "/api/credit-notes":
+                    rows = conn.execute("""
+                        SELECT cn.*, COALESCE(inv.invoice_number, '') as invoice_number, COALESCE(c.name, '') as customer_name
+                        FROM credit_notes cn
+                        LEFT JOIN invoices inv ON cn.invoice_id = inv.id
+                        LEFT JOIN customers c ON cn.customer_id = c.id
+                        ORDER BY cn.created_at DESC
+                    """).fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path == "/api/ledger/accounts":
+                    rows = conn.execute("""
+                        SELECT a.id, a.org_id, a.code, a.name, a.type, a.normal_balance, a.is_active,
+                            COALESCE(SUM(CASE WHEN jl.entry_type = 'debit' THEN jl.amount_cents ELSE 0 END), 0) AS debit_cents,
+                            COALESCE(SUM(CASE WHEN jl.entry_type = 'credit' THEN jl.amount_cents ELSE 0 END), 0) AS credit_cents
+                        FROM accounts a
+                        LEFT JOIN journal_lines jl ON a.id = jl.account_id
+                        GROUP BY a.id, a.org_id, a.code, a.name, a.type, a.normal_balance, a.is_active
+                        ORDER BY a.code ASC
+                    """).fetchall()
+                    res = []
+                    for r in rows:
+                        d = dict(r)
+                        if d.get("normal_balance") == "debit":
+                            d["net_balance"] = (d["debit_cents"] - d["credit_cents"]) / 100.0
+                        else:
+                            d["net_balance"] = (d["credit_cents"] - d["debit_cents"]) / 100.0
+                        res.append(d)
+                    conn.close()
+                    return self.send_json(res)
+
+                elif path == "/api/ledger/entries":
+                    entries = conn.execute("SELECT * FROM journal_entries ORDER BY posted_at DESC LIMIT 100").fetchall()
+                    res = []
+                    for e in entries:
+                        ed = dict(e)
+                        lines = conn.execute("""
+                            SELECT jl.*, a.code as account_code, a.name as account_name
+                            FROM journal_lines jl
+                            JOIN accounts a ON jl.account_id = a.id
+                            WHERE jl.entry_id = ? ORDER BY jl.entry_type DESC
+                        """, (ed["id"],)).fetchall()
+                        ed["lines"] = [dict(l) for l in lines]
+                        res.append(ed)
+                    conn.close()
+                    return self.send_json(res)
+
+                elif path == "/api/ledger/trial-balance":
+                    rows = conn.execute("""
+                        SELECT a.code, a.name, a.type,
+                            COALESCE(SUM(CASE WHEN jl.entry_type = 'debit' THEN jl.amount_cents ELSE 0 END), 0) AS debit_cents,
+                            COALESCE(SUM(CASE WHEN jl.entry_type = 'credit' THEN jl.amount_cents ELSE 0 END), 0) AS credit_cents
+                        FROM accounts a
+                        LEFT JOIN journal_lines jl ON a.id = jl.account_id
+                        GROUP BY a.code, a.name, a.type
+                        ORDER BY a.code ASC
+                    """).fetchall()
+                    tot_debits = sum(r["debit_cents"] for r in rows)
+                    tot_credits = sum(r["credit_cents"] for r in rows)
+                    conn.close()
+                    return self.send_json({
+                        "org_id": "org_default",
+                        "as_of": datetime.utcnow().isoformat(),
+                        "accounts": [dict(r) for r in rows],
+                        "total_debits_cents": tot_debits,
+                        "total_credits_cents": tot_credits,
+                        "is_balanced": (tot_debits == tot_credits)
+                    })
+
+                elif path == "/api/currencies":
+                    rates_rows = conn.execute("SELECT target_currency, rate FROM exchange_rates").fetchall()
+                    rates_map = {r["target_currency"]: float(r["rate"]) for r in rates_rows}
+                    conn.close()
+
+                    all_currencies = [
+                        # South Asia
+                        {"code": "INR", "name": "Indian Rupee", "symbol": "₹", "decimals": 2, "region": "South Asia", "default_rate": rates_map.get("INR", 83.50)},
+                        {"code": "PKR", "name": "Pakistani Rupee", "symbol": "₨", "decimals": 2, "region": "South Asia", "default_rate": rates_map.get("PKR", 278.50)},
+                        {"code": "BDT", "name": "Bangladeshi Taka", "symbol": "৳", "decimals": 2, "region": "South Asia", "default_rate": rates_map.get("BDT", 119.50)},
+                        {"code": "LKR", "name": "Sri Lankan Rupee", "symbol": "Rs", "decimals": 2, "region": "South Asia", "default_rate": rates_map.get("LKR", 293.00)},
+                        {"code": "NPR", "name": "Nepalese Rupee", "symbol": "रू", "decimals": 2, "region": "South Asia", "default_rate": rates_map.get("NPR", 133.50)},
+                        {"code": "BTN", "name": "Bhutanese Ngultrum", "symbol": "Nu.", "decimals": 2, "region": "South Asia", "default_rate": rates_map.get("BTN", 83.50)},
+                        {"code": "MVR", "name": "Maldivian Rufiyaa", "symbol": "Rf", "decimals": 2, "region": "South Asia", "default_rate": rates_map.get("MVR", 15.45)},
+                        {"code": "AFN", "name": "Afghan Afghani", "symbol": "؋", "decimals": 2, "region": "South Asia", "default_rate": rates_map.get("AFN", 67.50)},
+
+                        # East Asia
+                        {"code": "JPY", "name": "Japanese Yen", "symbol": "¥", "decimals": 0, "region": "East Asia", "default_rate": rates_map.get("JPY", 153.20)},
+                        {"code": "CNY", "name": "Chinese Yuan", "symbol": "¥", "decimals": 2, "region": "East Asia", "default_rate": rates_map.get("CNY", 7.23)},
+                        {"code": "HKD", "name": "Hong Kong Dollar", "symbol": "HK$", "decimals": 2, "region": "East Asia", "default_rate": rates_map.get("HKD", 7.78)},
+                        {"code": "TWD", "name": "New Taiwan Dollar", "symbol": "NT$", "decimals": 2, "region": "East Asia", "default_rate": rates_map.get("TWD", 32.20)},
+                        {"code": "KRW", "name": "South Korean Won", "symbol": "₩", "decimals": 0, "region": "East Asia", "default_rate": rates_map.get("KRW", 1380.00)},
+                        {"code": "MOP", "name": "Macanese Pataca", "symbol": "MOP$", "decimals": 2, "region": "East Asia", "default_rate": rates_map.get("MOP", 8.01)},
+                        {"code": "MNT", "name": "Mongolian Tögrög", "symbol": "₮", "decimals": 2, "region": "East Asia", "default_rate": rates_map.get("MNT", 3450.00)},
+
+                        # Southeast Asia
+                        {"code": "SGD", "name": "Singapore Dollar", "symbol": "S$", "decimals": 2, "region": "Southeast Asia", "default_rate": rates_map.get("SGD", 1.32)},
+                        {"code": "MYR", "name": "Malaysian Ringgit", "symbol": "RM", "decimals": 2, "region": "Southeast Asia", "default_rate": rates_map.get("MYR", 4.45)},
+                        {"code": "THB", "name": "Thai Baht", "symbol": "฿", "decimals": 2, "region": "Southeast Asia", "default_rate": rates_map.get("THB", 36.80)},
+                        {"code": "IDR", "name": "Indonesian Rupiah", "symbol": "Rp", "decimals": 0, "region": "Southeast Asia", "default_rate": rates_map.get("IDR", 15850.00)},
+                        {"code": "PHP", "name": "Philippine Peso", "symbol": "₱", "decimals": 2, "region": "Southeast Asia", "default_rate": rates_map.get("PHP", 58.20)},
+                        {"code": "VND", "name": "Vietnamese Dong", "symbol": "₫", "decimals": 0, "region": "Southeast Asia", "default_rate": rates_map.get("VND", 25400.00)},
+                        {"code": "KHR", "name": "Cambodian Riel", "symbol": "៛", "decimals": 0, "region": "Southeast Asia", "default_rate": rates_map.get("KHR", 4050.00)},
+                        {"code": "LAK", "name": "Lao Kip", "symbol": "₭", "decimals": 0, "region": "Southeast Asia", "default_rate": rates_map.get("LAK", 21800.00)},
+                        {"code": "MMK", "name": "Myanmar Kyat", "symbol": "K", "decimals": 0, "region": "Southeast Asia", "default_rate": rates_map.get("MMK", 2095.00)},
+                        {"code": "BND", "name": "Brunei Dollar", "symbol": "B$", "decimals": 2, "region": "Southeast Asia", "default_rate": rates_map.get("BND", 1.32)},
+
+                        # Middle East
+                        {"code": "AED", "name": "UAE Dirham", "symbol": "AED", "decimals": 2, "region": "Middle East", "default_rate": rates_map.get("AED", 3.67)},
+                        {"code": "SAR", "name": "Saudi Riyal", "symbol": "SAR", "decimals": 2, "region": "Middle East", "default_rate": rates_map.get("SAR", 3.75)},
+                        {"code": "QAR", "name": "Qatari Riyal", "symbol": "QAR", "decimals": 2, "region": "Middle East", "default_rate": rates_map.get("QAR", 3.64)},
+                        {"code": "KWD", "name": "Kuwaiti Dinar", "symbol": "KWD", "decimals": 3, "region": "Middle East", "default_rate": rates_map.get("KWD", 0.31)},
+                        {"code": "BHD", "name": "Bahraini Dinar", "symbol": "BHD", "decimals": 3, "region": "Middle East", "default_rate": rates_map.get("BHD", 0.38)},
+                        {"code": "OMR", "name": "Omani Rial", "symbol": "OMR", "decimals": 3, "region": "Middle East", "default_rate": rates_map.get("OMR", 0.38)},
+                        {"code": "JOD", "name": "Jordanian Dinar", "symbol": "JOD", "decimals": 3, "region": "Middle East", "default_rate": rates_map.get("JOD", 0.71)},
+                        {"code": "ILS", "name": "Israeli New Shekel", "symbol": "₪", "decimals": 2, "region": "Middle East", "default_rate": rates_map.get("ILS", 3.72)},
+
+                        # Central Asia
+                        {"code": "KZT", "name": "Kazakhstani Tenge", "symbol": "₸", "decimals": 2, "region": "Central Asia", "default_rate": rates_map.get("KZT", 488.00)},
+                        {"code": "UZS", "name": "Uzbekistani Som", "symbol": "so'm", "decimals": 0, "region": "Central Asia", "default_rate": rates_map.get("UZS", 12800.00)},
+
+                        # Global Base
+                        {"code": "USD", "name": "US Dollar", "symbol": "$", "decimals": 2, "region": "Global", "default_rate": 1.00},
+                        {"code": "EUR", "name": "Euro", "symbol": "€", "decimals": 2, "region": "Global", "default_rate": rates_map.get("EUR", 0.92)},
+                        {"code": "GBP", "name": "British Pound", "symbol": "£", "decimals": 2, "region": "Global", "default_rate": rates_map.get("GBP", 0.77)},
+                        {"code": "CAD", "name": "Canadian Dollar", "symbol": "C$", "decimals": 2, "region": "Global", "default_rate": rates_map.get("CAD", 1.38)},
+                        {"code": "AUD", "name": "Australian Dollar", "symbol": "A$", "decimals": 2, "region": "Global", "default_rate": rates_map.get("AUD", 1.51)}
+                    ]
+                    return self.send_json({
+                        "base_currency": "USD",
+                        "currencies": all_currencies,
+                        "rates": rates_map
+                    })
+
+                elif path == "/api/invoices/pdf" or path == "/api/purchase-orders/pdf" or path == "/api/credit-notes/pdf":
+                    doc_id = query.get("id", [""])[0]
+                    conn.close()
+                    # Return HTML printable representation for browser preview
+                    html = f"<!DOCTYPE html><html><head><title>Document Preview</title><style>body{{font-family:sans-serif;padding:40px;}}table{{width:100%;border-collapse:collapse;}}th,td{{border:1px solid #ddd;padding:8px;}}</style></head><body><h2>AO SPHERE BOS DOCUMENT PREVIEW</h2><p>Document ID: {doc_id}</p><button onclick='window.print()'>Print / Save as PDF</button></body></html>"
+                    body = html.encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
 
                 conn.close()
                 return self.send_json({"error": "Endpoint not found"}, 404)
@@ -852,6 +1042,96 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 conn.close()
                 broadcast("bill_matched", {"bill_id": bill_id, "status": status})
                 return self.send_json({"status": status, "bill_id": bill_id, "diff": diff})
+
+            elif path == "/api/credit-notes":
+                inv_id = req.get("invoice_id", "")
+                cust_id = req.get("customer_id", "")
+                reason = req.get("reason", "billing_error")
+                currency = req.get("currency", "USD")
+                items = req.get("items_json", "[]")
+                if isinstance(items, (list, dict)):
+                    items = json.dumps(items)
+
+                subtotal = float(req.get("subtotal") or req.get("amount", 0.0))
+                tax = float(req.get("tax_amount", 0.0))
+                total = float(req.get("total_amount") or (subtotal + tax))
+                if subtotal == 0.0 and total > 0.0:
+                    subtotal = total - tax
+
+                if inv_id and not cust_id:
+                    inv_row = conn.execute("SELECT customer_id, currency FROM invoices WHERE id = ?", (inv_id,)).fetchone()
+                    if inv_row:
+                        cust_id = inv_row["customer_id"]
+                        if not req.get("currency") and inv_row["currency"]:
+                            currency = inv_row["currency"]
+
+                cn_id = f"cn_{int(time.time()*1000)}"
+                cn_num = f"CN-{int(time.time())}"
+                subtotal_cents = int(round(subtotal * 100))
+                tax_cents = int(round(tax * 100))
+                total_cents = subtotal_cents + tax_cents
+                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+                conn.execute("""
+                    INSERT INTO credit_notes (id, org_id, credit_note_number, invoice_id, customer_id, currency, subtotal, tax_amount, total_amount, total_cents, reason, status, items_json, created_at)
+                    VALUES (?, 'org_default', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'issued', ?, ?)
+                """, (cn_id, cn_num, inv_id, cust_id, currency, subtotal, tax, total, total_cents, reason, items, now))
+
+                # Double-entry ledger reversal if accounts table exists
+                try:
+                    je_id = f"je_{int(time.time()*1000)}"
+                    je_num = f"JE-CN-{int(time.time())}"
+                    today = datetime.utcnow().strftime("%Y-%m-%d")
+                    conn.execute("""
+                        INSERT INTO journal_entries (id, org_id, entry_number, date, memo, source, source_id, posted_by, posted_at)
+                        VALUES (?, 'org_default', ?, ?, ?, 'credit_note', ?, 'web_user', ?)
+                    """, (je_id, je_num, today, f"Reversal for Credit Note {cn_num}", cn_id, now))
+
+                    # Fetch account IDs
+                    ar_row = conn.execute("SELECT id FROM accounts WHERE code = '1100'").fetchone()
+                    rev_row = conn.execute("SELECT id FROM accounts WHERE code = '4000'").fetchone()
+                    tax_row = conn.execute("SELECT id FROM accounts WHERE code = '2100'").fetchone()
+
+                    if rev_row and subtotal_cents > 0:
+                        conn.execute("INSERT INTO journal_lines (id, entry_id, account_id, entry_type, amount_cents, description) VALUES (?, ?, ?, 'debit', ?, 'Revenue Reversal')",
+                            (f"jl_{int(time.time()*1000)}_1", je_id, rev_row["id"], subtotal_cents))
+                    if tax_row and tax_cents > 0:
+                        conn.execute("INSERT INTO journal_lines (id, entry_id, account_id, entry_type, amount_cents, description) VALUES (?, ?, ?, 'debit', ?, 'Sales Tax Reversal')",
+                            (f"jl_{int(time.time()*1000)}_2", je_id, tax_row["id"], tax_cents))
+                    if ar_row and total_cents > 0:
+                        conn.execute("INSERT INTO journal_lines (id, entry_id, account_id, entry_type, amount_cents, description) VALUES (?, ?, ?, 'credit', ?, 'AR Credit Reversal')",
+                            (f"jl_{int(time.time()*1000)}_3", je_id, ar_row["id"], total_cents))
+                except Exception as e:
+                    pass
+
+                log_audit(conn, "human", "web_user", "ISSUE_CREDIT_NOTE", "credit_notes", cn_id, f"Issued credit note {cn_num} for {currency} {total:.2f} ({reason})", items)
+                conn.commit()
+                row = conn.execute("SELECT cn.*, COALESCE(inv.invoice_number, '') as invoice_number, COALESCE(c.name, '') as customer_name FROM credit_notes cn LEFT JOIN invoices inv ON cn.invoice_id = inv.id LEFT JOIN customers c ON cn.customer_id = c.id WHERE cn.id = ?", (cn_id,)).fetchone()
+                conn.close()
+                broadcast("credit_note_issued", {"credit_note_number": cn_num, "total": total, "currency": currency})
+                return self.send_json(dict(row) if row else {"id": cn_id, "credit_note_number": cn_num}, 201)
+
+            elif path == "/api/currencies/rate":
+                target_cur = req.get("target_currency", "").upper()
+                base_cur = req.get("base_currency", "USD").upper()
+                rate = float(req.get("rate", 0.0))
+                if not target_cur or rate <= 0:
+                    conn.close()
+                    return self.send_json({"error": "target_currency and positive rate required"}, 400)
+
+                rate_id = f"fx_{base_cur}_{target_cur}".lower()
+                now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                conn.execute("""
+                    INSERT INTO exchange_rates (id, org_id, base_currency, target_currency, rate, updated_at)
+                    VALUES (?, 'org_default', ?, ?, ?, ?)
+                    ON CONFLICT(org_id, base_currency, target_currency) DO UPDATE SET rate = excluded.rate, updated_at = excluded.updated_at
+                """, (rate_id, base_cur, target_cur, rate, now))
+
+                log_audit(conn, "human", "web_user", "UPDATE_EXCHANGE_RATE", "exchange_rates", rate_id, f"Updated FX rate 1 {base_cur} = {rate:.4f} {target_cur}")
+                conn.commit()
+                conn.close()
+                broadcast("exchange_rate_updated", {"currency": target_cur, "rate": rate, "base_currency": base_cur})
+                return self.send_json({"status": "ok", "currency": target_cur, "rate": rate})
 
             conn.close()
             return self.send_json({"error": "Unknown endpoint"}, 404)

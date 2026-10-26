@@ -83,6 +83,49 @@
           <span>Live Sync</span>
         </div>
 
+        <!-- Global Multi-Currency Selector (INR & All Asian Currencies) -->
+        <div class="currency-picker-container" title="Select Valuation Currency (Default: Indian Rupee ₹ / All Asian Currencies Supported)">
+          <i data-lucide="coins" class="w-4 h-4 text-amber-500"></i>
+          <select id="global-currency-picker" class="currency-select-input" onchange="app.setCurrency(this.value)">
+            <option value="INR" selected>₹ INR (Indian Rupee)</option>
+            <option value="USD">$ USD (US Dollar)</option>
+            <option value="EUR">€ EUR (Euro)</option>
+            <option value="GBP">£ GBP (British Pound)</option>
+            <option value="JPY">¥ JPY (Japanese Yen)</option>
+            <option value="CNY">¥ CNY (Chinese Yuan)</option>
+            <option value="SGD">S$ SGD (Singapore Dollar)</option>
+            <option value="AED">د.إ AED (UAE Dirham)</option>
+            <option value="SAR">﷼ SAR (Saudi Riyal)</option>
+            <option value="QAR">QR QAR (Qatari Riyal)</option>
+            <option value="KWD">KD KWD (Kuwaiti Dinar)</option>
+            <option value="BHD">BD BHD (Bahraini Dinar)</option>
+            <option value="OMR">OMR (Omani Rial)</option>
+            <option value="HKD">HK$ HKD (Hong Kong Dollar)</option>
+            <option value="KRW">₩ KRW (South Korean Won)</option>
+            <option value="TWD">NT$ TWD (New Taiwan Dollar)</option>
+            <option value="THB">฿ THB (Thai Baht)</option>
+            <option value="IDR">Rp IDR (Indonesian Rupiah)</option>
+            <option value="MYR">RM MYR (Malaysian Ringgit)</option>
+            <option value="PHP">₱ PHP (Philippine Peso)</option>
+            <option value="VND">₫ VND (Vietnamese Dong)</option>
+            <option value="BDT">৳ BDT (Bangladeshi Taka)</option>
+            <option value="PKR">₨ PKR (Pakistani Rupee)</option>
+            <option value="LKR">Rs LKR (Sri Lankan Rupee)</option>
+            <option value="NPR">Rs NPR (Nepalese Rupee)</option>
+            <option value="BTN">Nu. BTN (Bhutanese Ngultrum)</option>
+            <option value="MVR">Rf MVR (Maldivian Rufiyaa)</option>
+            <option value="AFN">؋ AFN (Afghan Afghani)</option>
+            <option value="KHR">៛ KHR (Cambodian Riel)</option>
+            <option value="LAK">₭ LAK (Lao Kip)</option>
+            <option value="MMK">K MMK (Myanmar Kyat)</option>
+            <option value="BND">B$ BND (Brunei Dollar)</option>
+            <option value="KZT">₸ KZT (Kazakhstani Tenge)</option>
+            <option value="UZS">UZS (Uzbekistani Som)</option>
+            <option value="CAD">C$ CAD (Canadian Dollar)</option>
+            <option value="AUD">A$ AUD (Australian Dollar)</option>
+          </select>
+        </div>
+
         <!-- Pending Approvals Badge Button -->
         <button class="icon-btn approval-btn" onclick="app.setTab('approvals')" title="Approval Inbox">
           <i data-lucide="shield-check" class="w-4 h-4 text-slate-600"></i>

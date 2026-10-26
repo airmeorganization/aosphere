@@ -273,6 +273,131 @@ var Migrations = []Migration{
 		FROM organizations;
 		`,
 	},
+	{
+		Version: 7,
+		Name:    "007_phase4_finances_and_currencies",
+		SQL: `
+		CREATE TABLE IF NOT EXISTS credit_notes (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			credit_note_number TEXT NOT NULL,
+			invoice_id TEXT REFERENCES invoices(id),
+			customer_id TEXT NOT NULL REFERENCES customers(id),
+			currency TEXT NOT NULL DEFAULT 'USD',
+			subtotal REAL NOT NULL DEFAULT 0.0,
+			tax_amount REAL NOT NULL DEFAULT 0.0,
+			total_amount REAL NOT NULL DEFAULT 0.0,
+			total_cents INTEGER NOT NULL DEFAULT 0,
+			reason TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'issued',
+			items_json TEXT NOT NULL DEFAULT '[]',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(org_id, credit_note_number)
+		);
+
+		CREATE TABLE IF NOT EXISTS exchange_rates (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			base_currency TEXT NOT NULL DEFAULT 'USD',
+			target_currency TEXT NOT NULL,
+			rate REAL NOT NULL,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(org_id, base_currency, target_currency)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_credit_notes_org ON credit_notes(org_id, customer_id);
+		CREATE INDEX IF NOT EXISTS idx_exchange_rates_org ON exchange_rates(org_id, target_currency);
+
+		-- Seed standard accounts if not existing
+		INSERT OR IGNORE INTO accounts (id, org_id, code, name, type, normal_balance, is_active)
+		SELECT 'acc_1000_' || id, id, '1000', 'Operating Cash / Bank', 'asset', 'debit', 1 FROM organizations;
+
+		INSERT OR IGNORE INTO accounts (id, org_id, code, name, type, normal_balance, is_active)
+		SELECT 'acc_1100_' || id, id, '1100', 'Accounts Receivable (AR)', 'asset', 'debit', 1 FROM organizations;
+
+		INSERT OR IGNORE INTO accounts (id, org_id, code, name, type, normal_balance, is_active)
+		SELECT 'acc_1200_' || id, id, '1200', 'Inventory Asset', 'asset', 'debit', 1 FROM organizations;
+
+		INSERT OR IGNORE INTO accounts (id, org_id, code, name, type, normal_balance, is_active)
+		SELECT 'acc_2000_' || id, id, '2000', 'Accounts Payable (AP)', 'liability', 'credit', 1 FROM organizations;
+
+		INSERT OR IGNORE INTO accounts (id, org_id, code, name, type, normal_balance, is_active)
+		SELECT 'acc_2100_' || id, id, '2100', 'Sales Tax Payable', 'liability', 'credit', 1 FROM organizations;
+
+		INSERT OR IGNORE INTO accounts (id, org_id, code, name, type, normal_balance, is_active)
+		SELECT 'acc_2110_' || id, id, '2110', 'Goods Received Not Billed (GRNB)', 'liability', 'credit', 1 FROM organizations;
+
+		INSERT OR IGNORE INTO accounts (id, org_id, code, name, type, normal_balance, is_active)
+		SELECT 'acc_3000_' || id, id, '3000', 'Retained Earnings', 'equity', 'credit', 1 FROM organizations;
+
+		INSERT OR IGNORE INTO accounts (id, org_id, code, name, type, normal_balance, is_active)
+		SELECT 'acc_4000_' || id, id, '4000', 'Sales Revenue', 'revenue', 'credit', 1 FROM organizations;
+
+		INSERT OR IGNORE INTO accounts (id, org_id, code, name, type, normal_balance, is_active)
+		SELECT 'acc_5000_' || id, id, '5000', 'Cost of Goods Sold (COGS)', 'expense', 'debit', 1 FROM organizations;
+
+		INSERT OR IGNORE INTO accounts (id, org_id, code, name, type, normal_balance, is_active)
+		SELECT 'acc_5100_' || id, id, '5100', 'Operating Expenses', 'expense', 'debit', 1 FROM organizations;
+
+		INSERT OR IGNORE INTO accounts (id, org_id, code, name, type, normal_balance, is_active)
+		SELECT 'acc_7000_' || id, id, '7000', 'Realized FX Gain/Loss', 'revenue', 'credit', 1 FROM organizations;
+
+		-- Seed base exchange rates for Asian and Global currencies
+		INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate)
+		SELECT 'fx_INR_' || id, id, 'USD', 'INR', 83.50 FROM organizations;
+
+		INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate)
+		SELECT 'fx_JPY_' || id, id, 'USD', 'JPY', 153.20 FROM organizations;
+
+		INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate)
+		SELECT 'fx_CNY_' || id, id, 'USD', 'CNY', 7.23 FROM organizations;
+
+		INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate)
+		SELECT 'fx_SGD_' || id, id, 'USD', 'SGD', 1.32 FROM organizations;
+
+		INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate)
+		SELECT 'fx_AED_' || id, id, 'USD', 'AED', 3.67 FROM organizations;
+
+		INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate)
+		SELECT 'fx_SAR_' || id, id, 'USD', 'SAR', 3.75 FROM organizations;
+
+		INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate)
+		SELECT 'fx_HKD_' || id, id, 'USD', 'HKD', 7.78 FROM organizations;
+
+		INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate)
+		SELECT 'fx_KRW_' || id, id, 'USD', 'KRW', 1380.0 FROM organizations;
+
+		INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate)
+		SELECT 'fx_THB_' || id, id, 'USD', 'THB', 36.80 FROM organizations;
+
+		INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate)
+		SELECT 'fx_IDR_' || id, id, 'USD', 'IDR', 15850.0 FROM organizations;
+
+		INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate)
+		SELECT 'fx_MYR_' || id, id, 'USD', 'MYR', 4.45 FROM organizations;
+
+		INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate)
+		SELECT 'fx_PHP_' || id, id, 'USD', 'PHP', 58.20 FROM organizations;
+
+		INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate)
+		SELECT 'fx_VND_' || id, id, 'USD', 'VND', 25400.0 FROM organizations;
+
+		INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate)
+		SELECT 'fx_BDT_' || id, id, 'USD', 'BDT', 119.50 FROM organizations;
+
+		INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate)
+		SELECT 'fx_PKR_' || id, id, 'USD', 'PKR', 278.50 FROM organizations;
+
+		INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate)
+		SELECT 'fx_LKR_' || id, id, 'USD', 'LKR', 293.0 FROM organizations;
+
+		INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate)
+		SELECT 'fx_EUR_' || id, id, 'USD', 'EUR', 0.92 FROM organizations;
+
+		INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate)
+		SELECT 'fx_GBP_' || id, id, 'USD', 'GBP', 0.77 FROM organizations;
+		`,
+	},
 }
 
 // RunMigrations applies all pending migrations in sequential order

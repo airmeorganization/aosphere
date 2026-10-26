@@ -1423,3 +1423,208 @@ func (s *Store) CreateBatchLotForOrg(orgID, skuID, batchNumber, expiryDate strin
 		CreatedAt:     now,
 	}, nil
 }
+
+// ----------------- PHASE 4: CREDIT NOTES & REVERSALS -----------------
+
+func (s *Store) GetCreditNotesForOrg(orgID string) ([]db.CreditNote, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	rows, err := s.db.Query(`
+		SELECT cn.id, cn.org_id, cn.credit_note_number, cn.invoice_id, COALESCE(inv.invoice_number, '') as invoice_number,
+			cn.customer_id, COALESCE(c.name, '') as customer_name, cn.currency, cn.subtotal, cn.tax_amount,
+			cn.total_amount, cn.total_cents, cn.reason, cn.status, cn.items_json, cn.created_at
+		FROM credit_notes cn
+		LEFT JOIN invoices inv ON cn.invoice_id = inv.id
+		LEFT JOIN customers c ON cn.customer_id = c.id
+		WHERE cn.org_id = ?
+		ORDER BY cn.created_at DESC`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var notes []db.CreditNote
+	for rows.Next() {
+		var cn db.CreditNote
+		if err := rows.Scan(&cn.ID, &cn.OrgID, &cn.CreditNoteNumber, &cn.InvoiceID, &cn.InvoiceNumber,
+			&cn.CustomerID, &cn.CustomerName, &cn.Currency, &cn.Subtotal, &cn.TaxAmount,
+			&cn.TotalAmount, &cn.TotalCents, &cn.Reason, &cn.Status, &cn.ItemsJSON, &cn.CreatedAt); err != nil {
+			return nil, err
+		}
+		notes = append(notes, cn)
+	}
+	return notes, nil
+}
+
+func (s *Store) GetCreditNoteByIDForOrg(orgID, id string) (*db.CreditNote, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	var cn db.CreditNote
+	err := s.db.QueryRow(`
+		SELECT cn.id, cn.org_id, cn.credit_note_number, cn.invoice_id, COALESCE(inv.invoice_number, '') as invoice_number,
+			cn.customer_id, COALESCE(c.name, '') as customer_name, cn.currency, cn.subtotal, cn.tax_amount,
+			cn.total_amount, cn.total_cents, cn.reason, cn.status, cn.items_json, cn.created_at
+		FROM credit_notes cn
+		LEFT JOIN invoices inv ON cn.invoice_id = inv.id
+		LEFT JOIN customers c ON cn.customer_id = c.id
+		WHERE cn.org_id = ? AND cn.id = ?`, orgID, id).Scan(
+		&cn.ID, &cn.OrgID, &cn.CreditNoteNumber, &cn.InvoiceID, &cn.InvoiceNumber,
+		&cn.CustomerID, &cn.CustomerName, &cn.Currency, &cn.Subtotal, &cn.TaxAmount,
+		&cn.TotalAmount, &cn.TotalCents, &cn.Reason, &cn.Status, &cn.ItemsJSON, &cn.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &cn, nil
+}
+
+func (s *Store) CreateCreditNoteForOrg(orgID, invoiceID, customerID, currency, reason, itemsJSON string, subtotal, taxAmount, totalAmount float64, totalCents int64, actorType, actorID string) (*db.CreditNote, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	if currency == "" {
+		currency = "USD"
+	}
+	id := "cn_" + uuid.New().String()[:8]
+	cnNumber := fmt.Sprintf("CN-%d", time.Now().Unix())
+	now := time.Now()
+
+	_, err := s.db.Exec(`
+		INSERT INTO credit_notes (id, org_id, credit_note_number, invoice_id, customer_id, currency, subtotal, tax_amount, total_amount, total_cents, reason, status, items_json, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'issued', ?, ?)`,
+		id, orgID, cnNumber, invoiceID, customerID, currency, subtotal, taxAmount, totalAmount, totalCents, reason, itemsJSON, now)
+	if err != nil {
+		return nil, err
+	}
+
+	_ = s.LogAuditForOrg(orgID, actorType, actorID, "CREATE_CREDIT_NOTE", "credit_notes", id,
+		fmt.Sprintf("Issued credit note %s (%s %.2f) for reason %s", cnNumber, currency, totalAmount, reason), itemsJSON)
+
+	return s.GetCreditNoteByIDForOrg(orgID, id)
+}
+
+// ----------------- PHASE 4: MULTI-CURRENCY EXCHANGE RATES -----------------
+
+func (s *Store) GetExchangeRatesForOrg(orgID string) ([]db.ExchangeRate, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	rows, err := s.db.Query(`
+		SELECT id, org_id, base_currency, target_currency, rate, updated_at
+		FROM exchange_rates WHERE org_id = ? ORDER BY target_currency ASC`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rates []db.ExchangeRate
+	for rows.Next() {
+		var r db.ExchangeRate
+		if err := rows.Scan(&r.ID, &r.OrgID, &r.BaseCurrency, &r.TargetCurrency, &r.Rate, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		rates = append(rates, r)
+	}
+	return rates, nil
+}
+
+func (s *Store) SetExchangeRateForOrg(orgID, baseCur, targetCur string, rate float64) error {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	id := fmt.Sprintf("fx_%s_%s", targetCur, orgID)
+	now := time.Now()
+
+	_, err := s.db.Exec(`
+		INSERT INTO exchange_rates (id, org_id, base_currency, target_currency, rate, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(org_id, base_currency, target_currency) DO UPDATE SET rate = excluded.rate, updated_at = excluded.updated_at`,
+		id, orgID, baseCur, targetCur, rate, now)
+	return err
+}
+
+// ----------------- PHASE 4: CHART OF ACCOUNTS & GENERAL LEDGER -----------------
+
+func (s *Store) GetAccountsForOrg(orgID string) ([]db.Account, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	query := `
+		SELECT a.id, a.org_id, a.code, a.name, a.type, a.normal_balance, a.is_active, a.created_at,
+			COALESCE(SUM(CASE WHEN jl.entry_type = 'debit' THEN jl.amount_cents ELSE 0 END), 0) AS total_debits,
+			COALESCE(SUM(CASE WHEN jl.entry_type = 'credit' THEN jl.amount_cents ELSE 0 END), 0) AS total_credits
+		FROM accounts a
+		LEFT JOIN journal_lines jl ON a.id = jl.account_id AND jl.org_id = a.org_id
+		LEFT JOIN journal_entries je ON jl.entry_id = je.id AND je.status = 'posted'
+		WHERE a.org_id = ? AND a.is_active = 1
+		GROUP BY a.id, a.org_id, a.code, a.name, a.type, a.normal_balance, a.is_active, a.created_at
+		ORDER BY a.code ASC`
+
+	rows, err := s.db.Query(query, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var accounts []db.Account
+	for rows.Next() {
+		var a db.Account
+		if err := rows.Scan(&a.ID, &a.OrgID, &a.Code, &a.Name, &a.Type, &a.NormalBalance, &a.IsActive, &a.CreatedAt, &a.DebitCents, &a.CreditCents); err != nil {
+			return nil, err
+		}
+		if a.NormalBalance == "debit" {
+			a.NetBalance = float64(a.DebitCents-a.CreditCents) / 100.0
+		} else {
+			a.NetBalance = float64(a.CreditCents-a.DebitCents) / 100.0
+		}
+		accounts = append(accounts, a)
+	}
+	return accounts, nil
+}
+
+func (s *Store) GetJournalEntriesForOrg(orgID string, limit int) ([]db.JournalEntry, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+
+	rows, err := s.db.Query(`
+		SELECT id, org_id, entry_number, source_type, COALESCE(source_id, ''), memo, status, posted_at, created_by, created_at
+		FROM journal_entries WHERE org_id = ? ORDER BY posted_at DESC, rowid DESC LIMIT ?`, orgID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []db.JournalEntry
+	for rows.Next() {
+		var je db.JournalEntry
+		if err := rows.Scan(&je.ID, &je.OrgID, &je.EntryNumber, &je.SourceType, &je.SourceID, &je.Memo, &je.Status, &je.PostedAt, &je.CreatedBy, &je.CreatedAt); err != nil {
+			return nil, err
+		}
+
+		// Fetch lines for this entry
+		lineRows, err := s.db.Query(`
+			SELECT jl.id, jl.org_id, jl.entry_id, jl.account_id, a.code, a.name, jl.entry_type, jl.amount_cents, jl.description, jl.created_at
+			FROM journal_lines jl
+			JOIN accounts a ON jl.account_id = a.id
+			WHERE jl.entry_id = ? ORDER BY jl.entry_type DESC, jl.rowid ASC`, je.ID)
+		if err == nil {
+			for lineRows.Next() {
+				var l db.JournalLine
+				if err := lineRows.Scan(&l.ID, &l.OrgID, &l.EntryID, &l.AccountID, &l.AccountCode, &l.AccountName, &l.EntryType, &l.AmountCents, &l.Description, &l.CreatedAt); err == nil {
+					l.Amount = float64(l.AmountCents) / 100.0
+					je.Lines = append(je.Lines, l)
+				}
+			}
+			lineRows.Close()
+		}
+
+		entries = append(entries, je)
+	}
+	return entries, nil
+}
+

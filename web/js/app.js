@@ -7,6 +7,7 @@ const app = {
   activeTab: 'dashboard',
   activeERPSubTab: 'skus',
   activeFinanceSubTab: 'invoices',
+  activeCurrency: localStorage.getItem('aosphere_currency') || 'INR',
   drawerTab: 'stream',
   theme: 'light',
   apiKey: localStorage.getItem('aosphere_api_key') || 'ao_sk_agent_default_token_12345',
@@ -22,6 +23,26 @@ const app = {
     batchLots: [],
     deals: [],
     invoices: [],
+    creditNotes: [],
+    accounts: [],
+    journalEntries: [],
+    currencies: [],
+    exchangeRates: {
+      INR: 83.50, USD: 1.0, EUR: 0.92, GBP: 0.78, JPY: 155.0, CNY: 7.23, SGD: 1.35,
+      AED: 3.6725, SAR: 3.75, QAR: 3.64, KWD: 0.31, BHD: 0.376, OMR: 0.385, HKD: 7.82,
+      KRW: 1370.0, TWD: 32.4, THB: 36.8, IDR: 16200.0, MYR: 4.71, PHP: 58.2, VND: 25400.0,
+      BDT: 117.5, PKR: 278.5, LKR: 302.0, NPR: 133.6, BTN: 83.5, MVR: 15.4, AFN: 71.5,
+      KHR: 4100.0, LAK: 21800.0, MMK: 2100.0, BND: 1.35, KZT: 448.0, UZS: 12650.0,
+      CAD: 1.37, AUD: 1.52
+    },
+    currencySymbols: {
+      INR: '₹', USD: '$', EUR: '€', GBP: '£', JPY: '¥', CNY: '¥', SGD: 'S$',
+      AED: 'د.إ', SAR: '﷼', QAR: 'QR', KWD: 'KD', BHD: 'BD', OMR: 'OMR', HKD: 'HK$',
+      KRW: '₩', TWD: 'NT$', THB: '฿', IDR: 'Rp', MYR: 'RM', PHP: '₱', VND: '₫',
+      BDT: '৳', PKR: '₨', LKR: 'Rs', NPR: 'Rs', BTN: 'Nu.', MVR: 'Rf', AFN: '؋',
+      KHR: '៛', LAK: '₭', MMK: 'K', BND: 'B$', KZT: '₸', UZS: 'UZS', CAD: 'C$', AUD: 'A$'
+    },
+    zeroDecimalCurrencies: ['JPY', 'KRW', 'VND', 'IDR', 'KHR', 'LAK', 'MMK', 'UZS'],
     expenses: [],
     summary: null,
     employees: [],
@@ -37,12 +58,67 @@ const app = {
 
   init() {
     this.setupTheme();
+    this.setupCurrency();
     this.setupShortcuts();
     this.setupSSE();
     this.loadAllData();
     if (window.lucide) {
       lucide.createIcons();
     }
+  },
+
+  setupCurrency() {
+    const saved = localStorage.getItem('aosphere_currency') || 'INR';
+    this.activeCurrency = saved;
+    const picker = document.getElementById('global-currency-picker');
+    if (picker) picker.value = saved;
+  },
+
+  setCurrency(cur) {
+    this.activeCurrency = cur;
+    localStorage.setItem('aosphere_currency', cur);
+    const picker = document.getElementById('global-currency-picker');
+    if (picker) picker.value = cur;
+    this.showToast(`Valuation currency set to ${cur}`);
+    this.render();
+  },
+
+  setERPSubTab(subTab) {
+    this.activeERPSubTab = subTab;
+    this.render();
+    if (window.lucide) lucide.createIcons();
+  },
+
+  setFinanceSubTab(subTab) {
+    this.activeFinanceSubTab = subTab;
+    this.render();
+    if (window.lucide) lucide.createIcons();
+  },
+
+  formatMoney(amountInUSD, targetCur = null) {
+    const cur = targetCur || this.activeCurrency || 'INR';
+    const rate = (this.data.exchangeRates && this.data.exchangeRates[cur]) ? this.data.exchangeRates[cur] : 1.0;
+    const symbol = (this.data.currencySymbols && this.data.currencySymbols[cur]) ? this.data.currencySymbols[cur] : cur + ' ';
+    const isZeroDecimal = (this.data.zeroDecimalCurrencies && this.data.zeroDecimalCurrencies.includes(cur));
+
+    const converted = (parseFloat(amountInUSD) || 0) * rate;
+
+    if (cur === 'INR') {
+      const isNegative = converted < 0;
+      const absVal = Math.abs(converted);
+      const [intPart, decPart] = absVal.toFixed(2).split('.');
+      const lastThree = intPart.slice(-3);
+      const otherNumbers = intPart.slice(0, -3);
+      const formatted = otherNumbers !== '' ? otherNumbers.replace(/\B(?=(\d{2})+(?!\d))/g, ",") + "," + lastThree : lastThree;
+      return `${isNegative ? '-' : ''}${symbol}${formatted}.${decPart}`;
+    }
+
+    if (isZeroDecimal) {
+      const rounded = Math.round(converted);
+      return `${symbol}${rounded.toLocaleString('en-US')}`;
+    }
+
+    return `${symbol}${converted.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   },
 
   onApiKeyChange(val) {
@@ -150,7 +226,9 @@ const app = {
         nap_synced: ['listings'],
         review_replied: ['reviews'],
         approval_decided: ['approvals', 'skus', 'purchaseOrders', 'supplierBills'],
-        approval_required: ['approvals']
+        approval_required: ['approvals'],
+        credit_note_issued: ['creditNotes', 'accounts', 'journalEntries', 'invoices', 'summary'],
+        exchange_rate_updated: ['currencies']
       };
 
       Object.keys(eventEntityMap).forEach(evtName => {
@@ -182,6 +260,10 @@ const app = {
       batchLots: '/api/batch-lots',
       deals: '/api/deals',
       invoices: '/api/invoices',
+      creditNotes: '/api/credit-notes',
+      accounts: '/api/ledger/accounts',
+      journalEntries: '/api/ledger/entries',
+      currencies: '/api/currencies',
       summary: '/api/financial-summary',
       employees: '/api/employees',
       shifts: '/api/shifts',
@@ -195,7 +277,13 @@ const app = {
     try {
       const res = await fetch(endpoints[name]);
       if (res.ok) {
-        this.data[name] = await res.json();
+        const payload = await res.json();
+        if (name === 'currencies' && payload.rates) {
+          this.data.exchangeRates = Object.assign({}, this.data.exchangeRates, payload.rates);
+          this.data.currencies = payload.currencies || [];
+        } else {
+          this.data[name] = payload;
+        }
         this.updateBadges();
         this.render();
         if (name === 'auditLogs') this.renderDrawerTimeline();
@@ -220,6 +308,10 @@ const app = {
         batchLots,
         deals,
         invoices,
+        creditNotes,
+        accounts,
+        journalEntries,
+        currenciesResp,
         summary,
         employees,
         shifts,
@@ -240,6 +332,10 @@ const app = {
         fetch('/api/batch-lots').then(r => r.json()).catch(() => []),
         fetch('/api/deals').then(r => r.json()).catch(() => []),
         fetch('/api/invoices').then(r => r.json()).catch(() => []),
+        fetch('/api/credit-notes').then(r => r.json()).catch(() => []),
+        fetch('/api/ledger/accounts').then(r => r.json()).catch(() => []),
+        fetch('/api/ledger/entries').then(r => r.json()).catch(() => []),
+        fetch('/api/currencies').then(r => r.json()).catch(() => null),
         fetch('/api/financial-summary').then(r => r.json()).catch(() => null),
         fetch('/api/employees').then(r => r.json()).catch(() => []),
         fetch('/api/shifts').then(r => r.json()).catch(() => []),
@@ -261,6 +357,13 @@ const app = {
       this.data.batchLots = batchLots;
       this.data.deals = deals;
       this.data.invoices = invoices;
+      this.data.creditNotes = creditNotes;
+      this.data.accounts = accounts;
+      this.data.journalEntries = journalEntries;
+      if (currenciesResp && currenciesResp.rates) {
+        this.data.exchangeRates = Object.assign({}, this.data.exchangeRates, currenciesResp.rates);
+        this.data.currencies = currenciesResp.currencies || [];
+      }
       this.data.summary = summary;
       this.data.employees = employees;
       this.data.shifts = shifts;
@@ -269,6 +372,9 @@ const app = {
       this.data.reviews = reviews;
       this.data.approvals = approvals;
       this.data.auditLogs = auditLogs;
+
+      const picker = document.getElementById('global-currency-picker');
+      if (picker) picker.value = this.activeCurrency;
 
       this.updateBadges();
       this.render();
@@ -686,7 +792,7 @@ const app = {
                     <tr>
                       <td><span class="mono-code">${po.id}</span></td>
                       <td><strong>${sup.name}</strong></td>
-                      <td><strong style="color:#059669; font-size:14px;">$${po.total.toLocaleString('en-US', { minimumFractionDigits: 2 })}</strong></td>
+                      <td><strong style="color:#059669; font-size:14px;">${this.formatMoney(po.total_amount ?? po.total ?? 0)}</strong></td>
                       <td>
                         <span class="badge" style="background:${
                           po.status === 'received' ? '#ECFDF5' :
@@ -705,15 +811,20 @@ const app = {
                       <td class="text-slate-500 font-medium">${po.notes || '—'}</td>
                       <td class="text-slate-400 font-mono text-[12px]">${new Date(po.created_at).toLocaleDateString()}</td>
                       <td>
-                        ${isReceivable ? `
-                          <button class="btn-press btn btn-primary btn-sm" onclick="app.openReceiveGRNModal('${po.id}')">
-                            <i data-lucide="package-check" class="w-3.5 h-3.5"></i> Receive GRN
-                          </button>
-                        ` : po.status === 'received' ? `
-                          <span class="badge badge-matched"><i data-lucide="check" class="w-3 h-3 inline"></i> Received</span>
-                        ` : `
-                          <span class="badge badge-pending">${po.status}</span>
-                        `}
+                        <div style="display:flex; align-items:center; gap:6px;">
+                          <a href="/api/purchase-orders/pdf?id=${po.id}&currency=${app.activeCurrency}" target="_blank" class="btn-pdf" title="Download Vector Purchase Order PDF">
+                            <i data-lucide="file-down" class="w-3.5 h-3.5"></i> PDF
+                          </a>
+                          ${isReceivable ? `
+                            <button class="btn-press btn btn-primary btn-sm" onclick="app.openReceiveGRNModal('${po.id}')">
+                              <i data-lucide="package-check" class="w-3.5 h-3.5"></i> GRN
+                            </button>
+                          ` : po.status === 'received' ? `
+                            <span class="badge badge-matched"><i data-lucide="check" class="w-3 h-3 inline"></i> Received</span>
+                          ` : `
+                            <span class="badge badge-pending">${po.status}</span>
+                          `}
+                        </div>
                       </td>
                     </tr>
                   `;
@@ -1012,7 +1123,7 @@ const app = {
     });
   },
 
-  // ---------------- Module 4: Finance, Invoicing & 3-Way Match ----------------
+  // ---------------- Module 4: Finance, General Ledger & Multi-Currency ----------------
   renderFinance() {
     const s = this.data.summary || { total_revenue: 0, total_expense: 0, net_profit: 0, unpaid_total: 0 };
     const subTab = this.activeFinanceSubTab || 'invoices';
@@ -1024,10 +1135,22 @@ const app = {
           <i data-lucide="plus" class="w-4 h-4"></i> Create Invoice
         </button>
       `;
-    } else {
+    } else if (subTab === 'bills') {
       actionButton = `
         <button class="btn-press btn btn-primary" onclick="app.openNewSupplierBillModal()">
           <i data-lucide="plus" class="w-4 h-4"></i> Add Supplier Bill
+        </button>
+      `;
+    } else if (subTab === 'credit_notes') {
+      actionButton = `
+        <button class="btn-press btn btn-primary" onclick="app.openNewCreditNoteModal()">
+          <i data-lucide="plus" class="w-4 h-4"></i> Issue Credit Note
+        </button>
+      `;
+    } else if (subTab === 'ledger') {
+      actionButton = `
+        <button class="btn-press btn btn-secondary" onclick="app.reloadEntity('accounts'); app.reloadEntity('journalEntries'); app.showToast('Trial Balance & Ledgers synced');">
+          <i data-lucide="refresh-cw" class="w-4 h-4"></i> Refresh Ledger
         </button>
       `;
     }
@@ -1038,23 +1161,23 @@ const app = {
         <div class="stats-grid">
           <div class="stat-card mockup-item">
             <div class="flex justify-between items-start mb-2">
-              <div class="stat-title">Cash Revenue</div>
+              <div class="stat-title">Cash Revenue (${this.activeCurrency})</div>
               <div class="w-10 h-10 bg-blue-50 rounded-xl flex items-center justify-center">
                 <i data-lucide="trending-up" class="w-5 h-5 text-brand-blue"></i>
               </div>
             </div>
-            <div class="stat-value">$${s.total_revenue.toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
+            <div class="stat-value">${this.formatMoney(s.total_revenue)}</div>
             <div class="stat-trend trend-up">✓ Collected</div>
           </div>
 
           <div class="stat-card mockup-item">
             <div class="flex justify-between items-start mb-2">
-              <div class="stat-title">Operating Expenses</div>
+              <div class="stat-title">Operating Expenses (${this.activeCurrency})</div>
               <div class="w-10 h-10 bg-purple-50 rounded-xl flex items-center justify-center">
                 <i data-lucide="pie-chart" class="w-5 h-5 text-purple-600"></i>
               </div>
             </div>
-            <div class="stat-value">$${s.total_expense.toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
+            <div class="stat-value">${this.formatMoney(s.total_expense)}</div>
             <div class="stat-trend text-slate-500 font-medium">Procurement & Operations</div>
           </div>
 
@@ -1065,18 +1188,18 @@ const app = {
                 <i data-lucide="check" class="w-5 h-5 text-emerald-500"></i>
               </div>
             </div>
-            <div class="stat-value" style="color:#059669;">$${s.net_profit.toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
+            <div class="stat-value" style="color:#059669;">${this.formatMoney(s.net_profit)}</div>
             <div class="stat-trend trend-up">P&L Margin: Healthy</div>
           </div>
 
           <div class="stat-card mockup-item">
             <div class="flex justify-between items-start mb-2">
-              <div class="stat-title">Pending Receivables</div>
+              <div class="stat-title">Pending Receivables (${this.activeCurrency})</div>
               <div class="w-10 h-10 bg-amber-50 rounded-xl flex items-center justify-center">
                 <i data-lucide="clock" class="w-5 h-5 text-amber-500"></i>
               </div>
             </div>
-            <div class="stat-value" style="color:#D97706;">$${s.unpaid_total.toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
+            <div class="stat-value" style="color:#D97706;">${this.formatMoney(s.unpaid_total)}</div>
             <div class="stat-trend trend-amber">Uncollected Due</div>
           </div>
         </div>
@@ -1094,9 +1217,10 @@ const app = {
                 <th>Issue Date</th>
                 <th>Due Date</th>
                 <th>Subtotal</th>
-                <th>Tax (8%)</th>
-                <th>Total Amount</th>
+                <th>Tax</th>
+                <th>Total (${this.activeCurrency})</th>
                 <th>Status</th>
+                <th>Official Document</th>
               </tr>
             </thead>
             <tbody>
@@ -1106,13 +1230,18 @@ const app = {
                   <td><strong>${inv.customer_name || 'Client'}</strong></td>
                   <td class="text-slate-500">${inv.issue_date}</td>
                   <td class="text-slate-500">${inv.due_date}</td>
-                  <td class="font-medium">$${inv.subtotal.toFixed(2)}</td>
-                  <td class="text-slate-400">$${inv.tax_amount.toFixed(2)}</td>
-                  <td><strong style="color:#059669; font-size:14px;">$${inv.total_amount.toFixed(2)}</strong></td>
+                  <td class="font-medium">${this.formatMoney(inv.subtotal)}</td>
+                  <td class="text-slate-400">${this.formatMoney(inv.tax_amount)}</td>
+                  <td><strong style="color:#059669; font-size:14px;">${this.formatMoney(inv.total_amount)}</strong></td>
                   <td>
                     <span class="badge" style="background:${inv.status === 'paid' ? '#ECFDF5' : '#FEF3C7'}; color:${inv.status === 'paid' ? '#047857' : '#B45309'}; border:1px solid ${inv.status === 'paid' ? '#A7F3D0' : '#FDE68A'};">
                       ${inv.status.toUpperCase()}
                     </span>
+                  </td>
+                  <td>
+                    <a href="/api/invoices/pdf?id=${inv.id}&currency=${app.activeCurrency}" target="_blank" class="btn-pdf" title="Download Vector PDF Invoice">
+                      <i data-lucide="file-down" class="w-3.5 h-3.5"></i> PDF
+                    </a>
                   </td>
                 </tr>
               `).join('')}
@@ -1147,7 +1276,7 @@ const app = {
                 <th>Supplier</th>
                 <th>Purchase Order</th>
                 <th>GRN Reference</th>
-                <th>Billed Total</th>
+                <th>Billed Total (${this.activeCurrency})</th>
                 <th>Due Date</th>
                 <th>3-Way Match Status</th>
                 <th>Verification Action</th>
@@ -1173,7 +1302,7 @@ const app = {
                       <td><strong>${sup.name}</strong></td>
                       <td><span class="mono-code">${b.po_id || '—'}</span></td>
                       <td><span class="mono-code">${b.grn_id || '—'}</span></td>
-                      <td><strong style="color:#0F172A; font-size:14px;">$${b.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })}</strong></td>
+                      <td><strong style="color:#0F172A; font-size:14px;">${this.formatMoney(b.amount)}</strong></td>
                       <td class="text-slate-500">${b.due_date}</td>
                       <td>${badge}</td>
                       <td>
@@ -1181,6 +1310,184 @@ const app = {
                           <i data-lucide="scan" class="w-3.5 h-3.5 text-blue-600"></i> Verify Match
                         </button>
                       </td>
+                    </tr>
+                  `;
+                }).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    } else if (subTab === 'credit_notes') {
+      subTabContent = `
+        <div style="background:#EFF6FF; border:1px solid #BFDBFE; border-radius:16px; padding:18px 22px; margin-bottom:20px; display:flex; align-items:flex-start; gap:16px;">
+          <div class="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center shrink-0 shadow-sm">
+            <i data-lucide="file-minus" class="w-5 h-5"></i>
+          </div>
+          <div>
+            <h3 class="font-bold text-[15px] text-blue-950 mb-1">Credit Notes & Double-Entry Reversal Engine</h3>
+            <p class="text-[13px] text-blue-800 leading-relaxed">
+              Issuing a credit note automatically records an immutable general ledger reversal: <strong>Debiting Sales Revenue (Account 4000)</strong> and <strong>Sales Tax Payable (Account 2100)</strong> while <strong>Crediting Accounts Receivable (Account 1100)</strong>. Vector PDF documents can be generated and emailed to customers instantly.
+            </p>
+          </div>
+        </div>
+
+        <div class="table-container mockup-item">
+          <div class="table-filter-bar">
+            <input type="text" class="table-filter-input" placeholder="Search credit notes by #, customer, invoice..." oninput="app.filterTable('credit-notes-table', this.value)">
+            <span class="text-[12px] text-slate-400 font-medium">Credit Notes Issued: <strong>${(this.data.creditNotes || []).length}</strong></span>
+          </div>
+          <table class="data-table" id="credit-notes-table">
+            <thead>
+              <tr>
+                <th>Credit Note #</th>
+                <th>Original Invoice</th>
+                <th>Customer</th>
+                <th>Reason</th>
+                <th>Subtotal</th>
+                <th>Tax</th>
+                <th>Total Reversal</th>
+                <th>Status</th>
+                <th>Date</th>
+                <th>Official Document</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${(this.data.creditNotes || []).length === 0 ? `<tr><td colspan="10" class="text-center py-6 text-slate-400">No credit notes issued yet. Click "+ Issue Credit Note" to issue a billing reversal.</td></tr>` :
+                this.data.creditNotes.map(cn => `
+                  <tr>
+                    <td><span class="mono-code font-bold text-rose-600">${cn.credit_note_number}</span></td>
+                    <td><span class="mono-code">${cn.invoice_number || cn.invoice_id || '—'}</span></td>
+                    <td><strong>${cn.customer_name || 'Customer'}</strong></td>
+                    <td><span class="badge badge-credit-note">${(cn.reason || 'billing_error').replace('_', ' ').toUpperCase()}</span></td>
+                    <td class="font-medium text-slate-600">${this.formatMoney(cn.subtotal, cn.currency || this.activeCurrency)}</td>
+                    <td class="text-slate-400">${this.formatMoney(cn.tax_amount, cn.currency || this.activeCurrency)}</td>
+                    <td><strong class="text-rose-600 font-bold" style="font-size:14px;">-${this.formatMoney(cn.total_amount, cn.currency || this.activeCurrency)}</strong></td>
+                    <td><span class="badge badge-credit-issued">${(cn.status || 'ISSUED').toUpperCase()}</span></td>
+                    <td class="text-slate-500 font-mono text-[12px]">${new Date(cn.created_at).toLocaleDateString()}</td>
+                    <td>
+                      <a href="/api/credit-notes/pdf?id=${cn.id}&currency=${cn.currency || this.activeCurrency}" target="_blank" class="btn-pdf" title="Download Vector Credit Note PDF">
+                        <i data-lucide="file-down" class="w-3.5 h-3.5"></i> PDF
+                      </a>
+                    </td>
+                  </tr>
+                `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    } else if (subTab === 'ledger') {
+      const accounts = this.data.accounts || [];
+      const entries = this.data.journalEntries || [];
+      const totalDebits = accounts.reduce((sum, a) => sum + (a.debit_cents || 0), 0) / 100.0;
+      const totalCredits = accounts.reduce((sum, a) => sum + (a.credit_cents || 0), 0) / 100.0;
+      const isBalanced = Math.abs(totalDebits - totalCredits) < 0.01;
+
+      subTabContent = `
+        <!-- Trial Balance Invariant Status Banner -->
+        <div class="trial-balance-banner">
+          <div style="display:flex; align-items:center; gap:14px;">
+            <div class="w-10 h-10 rounded-xl ${isBalanced ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'} flex items-center justify-center shrink-0 shadow-sm">
+              <i data-lucide="${isBalanced ? 'check-check' : 'alert-circle'}" class="w-5 h-5"></i>
+            </div>
+            <div>
+              <h3 class="font-bold text-[15px] text-slate-800 mb-0.5">Trial Balance Invariant Status: ${isBalanced ? '<span class="text-emerald-600">PERFECTLY BALANCED</span>' : '<span class="text-rose-600">UNBALANCED</span>'}</h3>
+              <p class="text-[12.5px] text-slate-500">
+                Mathematical accounting identity: <code>Debits = Credits</code>. Total Debits: <strong>${this.formatMoney(totalDebits)}</strong> • Total Credits: <strong>${this.formatMoney(totalCredits)}</strong> • Net Difference: <strong>$0.00</strong>
+              </p>
+            </div>
+          </div>
+          <div>
+            <span class="badge ${isBalanced ? 'badge-matched' : 'badge-variance-price'}" style="font-size:12px; padding:6px 12px;">
+              ${isBalanced ? '✓ DOUBLE-ENTRY BALANCED' : '⚠️ RECONCILIATION NEEDED'}
+            </span>
+          </div>
+        </div>
+
+        <!-- Chart of Accounts Grid -->
+        <div class="table-container mockup-item mb-6">
+          <div class="table-filter-bar">
+            <span class="font-bold text-[14px] text-slate-800">Chart of Accounts (${accounts.length} Ledgers)</span>
+            <input type="text" class="table-filter-input" placeholder="Search account by code, name, type..." oninput="app.filterTable('coa-table', this.value)">
+          </div>
+          <table class="data-table" id="coa-table">
+            <thead>
+              <tr>
+                <th>Code</th>
+                <th>Account Name</th>
+                <th>Classification</th>
+                <th>Normal Balance</th>
+                <th>Total Debits</th>
+                <th>Total Credits</th>
+                <th>Net Balance (${this.activeCurrency})</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${accounts.length === 0 ? `<tr><td colspan="7" class="text-center py-6 text-slate-400">Loading Chart of Accounts...</td></tr>` :
+                accounts.map(acc => {
+                  const deb = (acc.debit_cents || 0) / 100.0;
+                  const cred = (acc.credit_cents || 0) / 100.0;
+                  const net = acc.net_balance !== undefined ? acc.net_balance : (acc.normal_balance === 'debit' ? (deb - cred) : (cred - deb));
+                  return `
+                    <tr>
+                      <td><span class="mono-code font-bold text-brand-blue">${acc.code}</span></td>
+                      <td><strong>${acc.name}</strong></td>
+                      <td><span class="badge" style="background:#F1F5F9; color:#475569;">${acc.type.toUpperCase()}</span></td>
+                      <td><span class="mono-code text-[11px] uppercase">${acc.normal_balance}</span></td>
+                      <td class="font-mono text-[13px] text-blue-600">${this.formatMoney(deb)}</td>
+                      <td class="font-mono text-[13px] text-emerald-600">${this.formatMoney(cred)}</td>
+                      <td><strong class="font-mono text-[13.5px] ${net >= 0 ? 'text-slate-800' : 'text-rose-600'}">${this.formatMoney(net)}</strong></td>
+                    </tr>
+                  `;
+                }).join('')}
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Live Posted Journal Entries Stream -->
+        <div class="table-container mockup-item">
+          <div class="table-filter-bar">
+            <span class="font-bold text-[14px] text-slate-800">Live Posted Journal Entries (${entries.length} Entries)</span>
+            <span class="text-[12px] text-slate-400">Strict Double-Entry Audit Trail</span>
+          </div>
+          <table class="data-table" id="journal-entries-table">
+            <thead>
+              <tr>
+                <th>Entry #</th>
+                <th>Date</th>
+                <th>Source</th>
+                <th>Memo / Description</th>
+                <th>Debits</th>
+                <th>Credits</th>
+                <th>Posted By</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${entries.length === 0 ? `<tr><td colspan="7" class="text-center py-6 text-slate-400">No journal entries posted yet. Transactions from Invoices and Credit Notes will appear here automatically.</td></tr>` :
+                entries.map(je => {
+                  const lines = je.lines || [];
+                  const debitLines = lines.filter(l => l.entry_type === 'debit');
+                  const creditLines = lines.filter(l => l.entry_type === 'credit');
+                  return `
+                    <tr>
+                      <td><span class="mono-code font-bold text-brand-blue">${je.entry_number}</span></td>
+                      <td class="text-slate-500 font-mono text-[12px]">${je.date || new Date(je.posted_at).toLocaleDateString()}</td>
+                      <td><span class="badge" style="background:#F8FAFC; color:#64748B;">${(je.source || 'manual').toUpperCase()}</span></td>
+                      <td class="font-medium text-slate-700">${je.memo || 'Transaction'}</td>
+                      <td>
+                        ${debitLines.map(dl => `
+                          <div style="margin-bottom:3px;">
+                            <span class="debit-tag">Dr</span> <span class="mono-code text-[11px]">${dl.account_code || ''}</span> <strong>${this.formatMoney((dl.amount_cents || 0)/100.0)}</strong>
+                          </div>
+                        `).join('')}
+                      </td>
+                      <td>
+                        ${creditLines.map(cl => `
+                          <div style="margin-bottom:3px;">
+                            <span class="credit-tag">Cr</span> <span class="mono-code text-[11px]">${cl.account_code || ''}</span> <strong>${this.formatMoney((cl.amount_cents || 0)/100.0)}</strong>
+                          </div>
+                        `).join('')}
+                      </td>
+                      <td class="text-slate-400 font-mono text-[11.5px]">${je.posted_by || 'system'}</td>
                     </tr>
                   `;
                 }).join('')}
@@ -1197,7 +1504,7 @@ const app = {
             <i data-lucide="pie-chart" class="w-3.5 h-3.5"></i> Stability & Capital
           </div>
           <h1 class="page-title">Financial & Administrative</h1>
-          <p class="page-sub">Oversee automated P&L statements, multi-line tax invoices, and 3-Way Matching reconciliation.</p>
+          <p class="page-sub">General Ledger accounting, multi-currency reporting (${this.activeCurrency}), credit notes, and 3-Way Matching.</p>
         </div>
         <div class="page-actions">
           ${actionButton}
@@ -1210,6 +1517,12 @@ const app = {
         </button>
         <button class="subnav-pill ${subTab === 'bills' ? 'active' : ''}" onclick="app.setFinanceSubTab('bills')">
           <i data-lucide="scale" class="w-4 h-4"></i> Supplier Bills & 3-Way Match (${this.data.supplierBills.length})
+        </button>
+        <button class="subnav-pill ${subTab === 'credit_notes' ? 'active' : ''}" onclick="app.setFinanceSubTab('credit_notes')">
+          <i data-lucide="file-minus" class="w-4 h-4"></i> Credit Notes & Reversals (${(this.data.creditNotes || []).length})
+        </button>
+        <button class="subnav-pill ${subTab === 'ledger' ? 'active' : ''}" onclick="app.setFinanceSubTab('ledger')">
+          <i data-lucide="book-open" class="w-4 h-4"></i> General Ledger & COA (${(this.data.accounts || []).length})
         </button>
       </div>
 
@@ -2991,6 +3304,170 @@ const app = {
 
       await this.reloadEntity('supplierBills');
       await this.reloadEntity('approvals');
+      await this.reloadEntity('auditLogs');
+    } catch (e) {
+      this.showToast('Error: ' + e.message);
+    }
+  },
+
+  openNewCreditNoteModal() {
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    modal.querySelector('.modal-window').style.maxWidth = '560px';
+
+    const invoiceOptions = (this.data.invoices || []).map(inv => `
+      <option value="${inv.id}" data-customer="${inv.customer_id}" data-total="${inv.total_amount}" data-subtotal="${inv.subtotal}" data-tax="${inv.tax_amount}" data-currency="${inv.currency || 'USD'}">
+        ${inv.invoice_number} — ${inv.customer_name || 'Client'} (${this.formatMoney(inv.total_amount, inv.currency || this.activeCurrency)})
+      </option>
+    `).join('') || '<option value="">No invoices found</option>';
+
+    const custOptions = (this.data.customers || []).map(c => `<option value="${c.id}">${c.name}</option>`).join('') ||
+      (this.data.invoices || []).map(inv => `<option value="${inv.customer_id}">${inv.customer_name || inv.customer_id}</option>`).join('') ||
+      '<option value="cust_01">Primary Enterprise Client</option>';
+
+    content.innerHTML = `
+      <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px;">
+        <div class="w-10 h-10 rounded-xl bg-rose-100 text-rose-700 flex items-center justify-center shrink-0">
+          <i data-lucide="file-minus" class="w-5 h-5"></i>
+        </div>
+        <div>
+          <h3 style="font-size:18px; font-weight:800; color:var(--text-main);">Issue Credit Note</h3>
+          <p style="font-size:13px; color:var(--text-muted);">Double-entry billing adjustment and sales reversal document.</p>
+        </div>
+      </div>
+
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <div>
+          <label for="cn-invoice" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Select Related Invoice</label>
+          <select id="cn-invoice" class="form-input" onchange="app.onCreditNoteInvoiceChange(this)">
+            ${invoiceOptions}
+          </select>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="cn-customer" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Customer</label>
+            <select id="cn-customer" class="form-input">
+              ${custOptions}
+            </select>
+          </div>
+          <div>
+            <label for="cn-reason" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Reason Code</label>
+            <select id="cn-reason" class="form-input">
+              <option value="billing_error">Billing / Pricing Error</option>
+              <option value="goods_returned">Goods Damaged / Returned</option>
+              <option value="discount_adjustment">Post-Sale Discount / Rebate</option>
+              <option value="cancellation">Order Cancellation</option>
+              <option value="goodwill">Goodwill Concession</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="cn-amount" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Subtotal Reversal Amount ($)</label>
+            <input type="number" id="cn-amount" class="form-input" value="100.00" step="0.5" oninput="app.recalcCreditNoteTotal()">
+          </div>
+          <div>
+            <label for="cn-tax" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Tax Reversal ($)</label>
+            <input type="number" id="cn-tax" class="form-input" value="8.00" step="0.1" oninput="app.recalcCreditNoteTotal()">
+          </div>
+        </div>
+
+        <div style="padding:10px 14px; background:var(--bg-tertiary); border:1px solid var(--border-subtle); border-radius:10px; display:flex; justify-content:space-between; align-items:center;">
+          <span style="font-size:13px; font-weight:600; color:var(--text-muted);">Total Reversal Credited:</span>
+          <span id="cn-total-display" style="font-size:16px; font-weight:800; color:#DC2626;">$108.00</span>
+        </div>
+
+        <label for="cn-notes" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Memo / Audit Reason</label>
+        <input type="text" id="cn-notes" class="form-input" value="Credit adjustment per mutual agreement with client">
+
+        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
+          <button class="btn-press btn btn-secondary" onclick="app.closeModal()">Cancel</button>
+          <button class="btn-press btn btn-primary" onclick="app.submitCreditNote()">
+            <i data-lucide="check" class="w-4 h-4"></i> Issue & Post to Ledger
+          </button>
+        </div>
+      </div>
+    `;
+
+    modal.classList.add('active');
+    if (window.lucide) lucide.createIcons();
+    this.onCreditNoteInvoiceChange(document.getElementById('cn-invoice'));
+  },
+
+  onCreditNoteInvoiceChange(selectEl) {
+    if (!selectEl || !selectEl.options || selectEl.selectedIndex < 0) return;
+    const opt = selectEl.options[selectEl.selectedIndex];
+    if (!opt) return;
+    const custId = opt.getAttribute('data-customer');
+    const subtotal = parseFloat(opt.getAttribute('data-subtotal') || 0);
+    const tax = parseFloat(opt.getAttribute('data-tax') || 0);
+
+    const custEl = document.getElementById('cn-customer');
+    if (custEl && custId) custEl.value = custId;
+
+    const amtEl = document.getElementById('cn-amount');
+    const taxEl = document.getElementById('cn-tax');
+    if (amtEl && subtotal > 0) amtEl.value = (subtotal * 0.5).toFixed(2);
+    if (taxEl && tax > 0) taxEl.value = (tax * 0.5).toFixed(2);
+    this.recalcCreditNoteTotal();
+  },
+
+  recalcCreditNoteTotal() {
+    const amt = parseFloat(document.getElementById('cn-amount')?.value || 0);
+    const tax = parseFloat(document.getElementById('cn-tax')?.value || 0);
+    const total = amt + tax;
+    const display = document.getElementById('cn-total-display');
+    if (display) display.textContent = `$${total.toFixed(2)}`;
+  },
+
+  async submitCreditNote() {
+    const invId = document.getElementById('cn-invoice')?.value;
+    const custId = document.getElementById('cn-customer')?.value;
+    const reason = document.getElementById('cn-reason')?.value || 'billing_error';
+    const subtotal = parseFloat(document.getElementById('cn-amount')?.value || 0);
+    const tax = parseFloat(document.getElementById('cn-tax')?.value || 0);
+    const total = subtotal + tax;
+    const memo = document.getElementById('cn-notes')?.value || '';
+
+    if (total <= 0) {
+      this.showToast('Credit note amount must be greater than zero');
+      return;
+    }
+
+    try {
+      this.showToast('Posting Credit Note & General Ledger Reversal...');
+      const res = await fetch('/api/credit-notes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          invoice_id: invId,
+          customer_id: custId,
+          reason,
+          subtotal,
+          tax_amount: tax,
+          total_amount: total,
+          currency: this.activeCurrency,
+          items_json: JSON.stringify([{ description: memo || reason, amount: subtotal, tax }])
+        })
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: res.statusText }));
+        this.showToast('Error: ' + (err.message || 'Failed to issue credit note'));
+        return;
+      }
+
+      const data = await res.json();
+      this.showToast(`Credit Note #${data.credit_note_number} successfully posted to Ledger`);
+      this.closeModal();
+
+      await this.reloadEntity('creditNotes');
+      await this.reloadEntity('accounts');
+      await this.reloadEntity('journalEntries');
+      await this.reloadEntity('invoices');
+      await this.reloadEntity('summary');
       await this.reloadEntity('auditLogs');
     } catch (e) {
       this.showToast('Error: ' + e.message);

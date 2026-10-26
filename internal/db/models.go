@@ -379,4 +379,99 @@ type BatchLot struct {
 	CreatedAt     time.Time `json:"created_at"`
 }
 
+// ----------------- PHASE 4: FINANCES, CREDIT NOTES & GENERAL LEDGER -----------------
+
+type CompanyProfile struct {
+	OrgID               string    `json:"org_id"`
+	CompanyName         string    `json:"company_name"`
+	Currency            string    `json:"currency"`
+	Timezone            string    `json:"timezone"`
+	TaxRate             float64   `json:"tax_rate"`
+	Address             string    `json:"address"`
+	Phone               string    `json:"phone"`
+	Website             string    `json:"website"`
+	OnboardingCompleted bool      `json:"onboarding_completed"`
+	UpdatedAt           time.Time `json:"updated_at"`
+}
+
+type CreditNote struct {
+	ID               string    `json:"id"`
+	OrgID            string    `json:"org_id"`
+	CreditNoteNumber string    `json:"credit_note_number"`
+	InvoiceID        string    `json:"invoice_id"`
+	InvoiceNumber    string    `json:"invoice_number,omitempty"`
+	CustomerID       string    `json:"customer_id"`
+	CustomerName     string    `json:"customer_name,omitempty"`
+	Currency         string    `json:"currency"`
+	Subtotal         float64   `json:"subtotal"`
+	TaxAmount        float64   `json:"tax_amount"`
+	TotalAmount      float64   `json:"total_amount"`
+	TotalCents       int64     `json:"total_cents"`
+	Reason           string    `json:"reason"` // returned_goods, billing_error, discount_adjustment, service_credit
+	Status           string    `json:"status"` // issued, applied, refunded, void
+	ItemsJSON        string    `json:"items_json"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+type ExchangeRate struct {
+	ID             string    `json:"id"`
+	OrgID          string    `json:"org_id"`
+	BaseCurrency   string    `json:"base_currency"`
+	TargetCurrency string    `json:"target_currency"`
+	Rate           float64   `json:"rate"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+type CurrencyInfo struct {
+	Code        string  `json:"code"`
+	Name        string  `json:"name"`
+	Symbol      string  `json:"symbol"`
+	Decimals    int     `json:"decimals"`
+	Region      string  `json:"region"`
+	DefaultRate float64 `json:"default_rate"`
+}
+
+type Account struct {
+	ID            string  `json:"id"`
+	OrgID         string  `json:"org_id"`
+	Code          string  `json:"code"`
+	Name          string  `json:"name"`
+	Type          string  `json:"type"` // asset, liability, equity, revenue, expense
+	NormalBalance string  `json:"normal_balance"` // debit, credit
+	DebitCents    int64   `json:"debit_cents"`
+	CreditCents   int64   `json:"credit_cents"`
+	NetBalance    float64 `json:"net_balance"`
+	IsActive      bool    `json:"is_active"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+type JournalEntry struct {
+	ID          string        `json:"id"`
+	OrgID       string        `json:"org_id"`
+	EntryNumber string        `json:"entry_number"`
+	SourceType  string        `json:"source_type"`
+	SourceID    string        `json:"source_id"`
+	Memo        string        `json:"memo"`
+	Status      string        `json:"status"` // posted, reversed
+	PostedAt    time.Time     `json:"posted_at"`
+	CreatedBy   string        `json:"created_by"`
+	Lines       []JournalLine `json:"lines,omitempty"`
+	CreatedAt   time.Time     `json:"created_at"`
+}
+
+type JournalLine struct {
+	ID          string    `json:"id,omitempty"`
+	OrgID       string    `json:"org_id,omitempty"`
+	EntryID     string    `json:"entry_id,omitempty"`
+	AccountID   string    `json:"account_id,omitempty"`
+	AccountCode string    `json:"account_code"`
+	AccountName string    `json:"account_name,omitempty"`
+	EntryType   string    `json:"entry_type"` // debit, credit
+	AmountCents int64     `json:"amount_cents"`
+	Amount      float64   `json:"amount"`
+	Description string    `json:"description"`
+	CreatedAt   time.Time `json:"created_at,omitempty"`
+}
+
+
 

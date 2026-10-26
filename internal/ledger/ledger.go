@@ -319,3 +319,42 @@ func (l *LedgerService) GetTrialBalance(ctx context.Context, orgID string) (*Tri
 	report.IsBalanced = (report.TotalDebitsCents == report.TotalCreditsCents)
 	return report, nil
 }
+
+// PostCreditNoteIssued records the standard accounting reversal when a credit note is issued:
+// Debit: Sales Revenue (subtotal)
+// Debit: Sales Tax Payable (tax, if any)
+// Credit: Accounts Receivable (total)
+func (l *LedgerService) PostCreditNoteIssued(ctx context.Context, tx *sql.Tx, orgID, creditNoteID, creditNoteNumber, invoiceNumber string, subtotalCents, taxCents, totalCents int64, actor string) (*JournalEntry, error) {
+	lines := []JournalLine{
+		{
+			AccountCode: AccountSalesRevenue,
+			EntryType:   "debit",
+			AmountCents: subtotalCents,
+			Description: fmt.Sprintf("Revenue reversal for Credit Note %s (Invoice %s)", creditNoteNumber, invoiceNumber),
+		},
+	}
+	if taxCents > 0 {
+		lines = append(lines, JournalLine{
+			AccountCode: AccountSalesTaxPayable,
+			EntryType:   "debit",
+			AmountCents: taxCents,
+			Description: fmt.Sprintf("Tax relief on Credit Note %s", creditNoteNumber),
+		})
+	}
+	lines = append(lines, JournalLine{
+		AccountCode: AccountAccountsReceivable,
+		EntryType:   "credit",
+		AmountCents: totalCents,
+		Description: fmt.Sprintf("AR relief for Credit Note %s", creditNoteNumber),
+	})
+
+	return l.PostJournalEntry(ctx, tx, JournalEntry{
+		OrgID:      orgID,
+		SourceType: "credit_note",
+		SourceID:   creditNoteID,
+		Memo:       fmt.Sprintf("Credit Note %s Issued against Invoice %s (%s)", creditNoteNumber, invoiceNumber, finance.FormatUSD(totalCents)),
+		CreatedBy:  actor,
+		Lines:      lines,
+	})
+}
+

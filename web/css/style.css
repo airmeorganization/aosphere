@@ -1432,4 +1432,114 @@ body.theme-dark .bg-blob {
   border: 1px solid #E2E8F0;
 }
 
+/* Phase 4: Multi-Currency Header Picker */
+.currency-picker-container {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 4px 10px;
+  transition: all 0.2s ease;
+}
+.currency-picker-container:hover {
+  border-color: var(--brand-blue);
+  background: var(--bg-card);
+}
+.currency-select-input {
+  background: transparent;
+  border: none;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-main);
+  outline: none;
+  cursor: pointer;
+  padding-right: 4px;
+}
+.theme-dark .currency-select-input option {
+  background: #1E293B;
+  color: #F8FAFC;
+}
+
+/* Phase 4: Credit Note Badges */
+.badge-credit-note {
+  background: #EFF6FF;
+  color: #1D4ED8;
+  border: 1px solid #BFDBFE;
+}
+.badge-credit-issued {
+  background: #FEF2F2;
+  color: #DC2626;
+  border: 1px solid #FECACA;
+}
+
+/* Phase 4: General Ledger Trial Balance & Journals */
+.trial-balance-banner {
+  background: linear-gradient(135deg, rgba(37,99,235,0.06), rgba(16,185,129,0.06));
+  border: 1px solid rgba(37,99,235,0.18);
+  border-radius: 14px;
+  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+.theme-dark .trial-balance-banner {
+  background: rgba(30, 41, 59, 0.7);
+  border-color: rgba(96, 165, 250, 0.2);
+}
+
+.debit-tag {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  background: #EFF6FF;
+  color: #2563EB;
+  border: 1px solid #BFDBFE;
+}
+.credit-tag {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  background: #ECFDF5;
+  color: #059669;
+  border: 1px solid #A7F3D0;
+}
+
+.btn-pdf {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  font-size: 11.5px;
+  font-weight: 700;
+  border-radius: 7px;
+  background: #EFF6FF;
+  color: #2563EB;
+  border: 1px solid #DBEAFE;
+  text-decoration: none;
+  transition: all 0.15s ease;
+}
+.btn-pdf:hover {
+  background: #2563EB;
+  color: #FFFFFF;
+}
+.theme-dark .btn-pdf {
+  background: rgba(37, 99, 235, 0.15);
+  color: #93C5FD;
+  border-color: rgba(37, 99, 235, 0.3);
+}
+.theme-dark .btn-pdf:hover {
+  background: #2563EB;
+  color: #FFFFFF;
+}
+
+
 

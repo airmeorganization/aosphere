@@ -10,8 +10,11 @@ import (
 	"time"
 
 	"aosphere/internal/auth"
+	"aosphere/internal/db"
+	"aosphere/internal/finance"
 	"aosphere/internal/mcp"
 	"aosphere/internal/metrics"
+	"aosphere/internal/pdf"
 	"aosphere/internal/service"
 	"aosphere/internal/store"
 	"github.com/google/uuid"
@@ -966,6 +969,304 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 		}
 		writeJSON(w, report)
 	})
+
+	// PDF GENERATION: INVOICES
+	mux.HandleFunc("/api/invoices/pdf", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		invID := r.URL.Query().Get("id")
+		if invID == "" {
+			http.Error(w, "missing invoice id", http.StatusBadRequest)
+			return
+		}
+		invs, err := a.store.GetInvoicesForOrg(authCtx.OrgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		var targetInv *db.Invoice
+		for _, inv := range invs {
+			if inv.ID == invID || inv.InvoiceNumber == invID {
+				targetInv = &inv
+				break
+			}
+		}
+		if targetInv == nil {
+			http.Error(w, "invoice not found", http.StatusNotFound)
+			return
+		}
+
+		var cust db.Customer
+		custs, _ := a.store.GetCustomersForOrg(authCtx.OrgID)
+		for _, c := range custs {
+			if c.ID == targetInv.CustomerID {
+				cust = c
+				break
+			}
+		}
+
+		comp, _ := a.service.GetCompanyProfile(r.Context(), authCtx.OrgID)
+		if comp == nil {
+			comp = &db.CompanyProfile{
+				CompanyName: "AO Sphere Enterprise",
+				Address:     "100 Innovation Way, Suite 400",
+				Phone:       "+1 (555) 019-2834",
+			}
+		}
+
+		curCode := r.URL.Query().Get("currency")
+		if curCode == "" {
+			curCode = comp.Currency
+		}
+		if curCode == "" {
+			curCode = "USD"
+		}
+		curInfo := finance.GetCurrency(curCode)
+
+		pdfBytes, err := pdf.GenerateInvoicePDF(*targetInv, cust, *comp, curInfo)
+		if err != nil {
+			http.Error(w, "failed to generate invoice PDF: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/pdf")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=\"invoice-%s.pdf\"", targetInv.InvoiceNumber))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(pdfBytes)
+	})
+
+	// PDF GENERATION: PURCHASE ORDERS
+	mux.HandleFunc("/api/purchase-orders/pdf", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		poID := r.URL.Query().Get("id")
+		if poID == "" {
+			http.Error(w, "missing purchase order id", http.StatusBadRequest)
+			return
+		}
+		pos, err := a.store.GetPurchaseOrdersForOrg(authCtx.OrgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		var targetPO *db.PurchaseOrder
+		for _, p := range pos {
+			if p.ID == poID || p.PONumber == poID {
+				targetPO = &p
+				break
+			}
+		}
+		if targetPO == nil {
+			http.Error(w, "purchase order not found", http.StatusNotFound)
+			return
+		}
+
+		var sup db.Supplier
+		sups, _ := a.store.GetSuppliersForOrg(authCtx.OrgID)
+		for _, s := range sups {
+			if s.ID == targetPO.SupplierID {
+				sup = s
+				break
+			}
+		}
+
+		comp, _ := a.service.GetCompanyProfile(r.Context(), authCtx.OrgID)
+		if comp == nil {
+			comp = &db.CompanyProfile{
+				CompanyName: "AO Sphere Enterprise",
+				Address:     "100 Innovation Way, Suite 400",
+			}
+		}
+
+		curCode := r.URL.Query().Get("currency")
+		if curCode == "" {
+			curCode = "USD"
+		}
+		curInfo := finance.GetCurrency(curCode)
+
+		pdfBytes, err := pdf.GeneratePurchaseOrderPDF(*targetPO, sup, *comp, curInfo)
+		if err != nil {
+			http.Error(w, "failed to generate purchase order PDF: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/pdf")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=\"po-%s.pdf\"", targetPO.PONumber))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(pdfBytes)
+	})
+
+	// PDF GENERATION: CREDIT NOTES
+	mux.HandleFunc("/api/credit-notes/pdf", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		cnID := r.URL.Query().Get("id")
+		if cnID == "" {
+			http.Error(w, "missing credit note id", http.StatusBadRequest)
+			return
+		}
+		cn, err := a.store.GetCreditNoteByIDForOrg(authCtx.OrgID, cnID)
+		if err != nil || cn == nil {
+			http.Error(w, "credit note not found", http.StatusNotFound)
+			return
+		}
+
+		var cust db.Customer
+		custs, _ := a.store.GetCustomersForOrg(authCtx.OrgID)
+		for _, c := range custs {
+			if c.ID == cn.CustomerID {
+				cust = c
+				break
+			}
+		}
+
+		comp, _ := a.service.GetCompanyProfile(r.Context(), authCtx.OrgID)
+		if comp == nil {
+			comp = &db.CompanyProfile{CompanyName: "AO Sphere Enterprise"}
+		}
+		curInfo := finance.GetCurrency(cn.Currency)
+
+		pdfBytes, err := pdf.GenerateCreditNotePDF(*cn, cust, *comp, curInfo)
+		if err != nil {
+			http.Error(w, "failed to generate credit note PDF: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/pdf")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=\"credit-note-%s.pdf\"", cn.CreditNoteNumber))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(pdfBytes)
+	})
+
+	// CREDIT NOTES CRUD
+	mux.HandleFunc("/api/credit-notes", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			authCtx, ok := a.requireAuth(w, r, auth.PermManageFinance)
+			if !ok {
+				return
+			}
+			var req service.CreateCreditNoteRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			idempKey := r.Header.Get("Idempotency-Key")
+			cn, err := a.service.IssueCreditNote(r.Context(), authCtx.OrgID, req, authCtx, idempKey)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			a.BroadcastForOrg(authCtx.OrgID, "credit_note_issued", fmt.Sprintf("{\"credit_note_number\":\"%s\",\"total\":%.2f}", cn.CreditNoteNumber, cn.TotalAmount))
+			w.WriteHeader(http.StatusCreated)
+			writeJSON(w, cn)
+			return
+		}
+
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		notes, err := a.store.GetCreditNotesForOrg(authCtx.OrgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, notes)
+	})
+
+	// GENERAL LEDGER: CHART OF ACCOUNTS
+	mux.HandleFunc("/api/ledger/accounts", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		accounts, err := a.store.GetAccountsForOrg(authCtx.OrgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, accounts)
+	})
+
+	// GENERAL LEDGER: JOURNAL ENTRIES
+	mux.HandleFunc("/api/ledger/entries", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		entries, err := a.store.GetJournalEntriesForOrg(authCtx.OrgID, 100)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, entries)
+	})
+
+	// MULTI-CURRENCY: ALL SUPPORTED ASIAN & GLOBAL CURRENCIES
+	mux.HandleFunc("/api/currencies", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		rates, _ := a.store.GetExchangeRatesForOrg(authCtx.OrgID)
+		ratesMap := make(map[string]float64)
+		for _, r := range rates {
+			ratesMap[r.TargetCurrency] = r.Rate
+		}
+
+		allCurs := finance.GetAllCurrencies()
+		for i := range allCurs {
+			if liveRate, ok := ratesMap[allCurs[i].Code]; ok && liveRate > 0 {
+				allCurs[i].DefaultRate = liveRate
+			}
+		}
+
+		writeJSON(w, map[string]interface{}{
+			"base_currency": "USD",
+			"currencies":    allCurs,
+			"rates":         ratesMap,
+		})
+	})
+
+	mux.HandleFunc("/api/currencies/rate", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		authCtx, ok := a.requireAuth(w, r, auth.PermManageFinance)
+		if !ok {
+			return
+		}
+		var req struct {
+			BaseCurrency   string  `json:"base_currency"`
+			TargetCurrency string  `json:"target_currency"`
+			Rate           float64 `json:"rate"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.TargetCurrency == "" || req.Rate <= 0 {
+			http.Error(w, "target_currency and positive rate required", http.StatusBadRequest)
+			return
+		}
+		if req.BaseCurrency == "" {
+			req.BaseCurrency = "USD"
+		}
+		if err := a.store.SetExchangeRateForOrg(authCtx.OrgID, req.BaseCurrency, req.TargetCurrency, req.Rate); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		a.BroadcastForOrg(authCtx.OrgID, "exchange_rate_updated", fmt.Sprintf("{\"currency\":\"%s\",\"rate\":%.4f}", req.TargetCurrency, req.Rate))
+		writeJSON(w, map[string]interface{}{"status": "ok", "currency": req.TargetCurrency, "rate": req.Rate})
+	})
+
 
 	mux.HandleFunc("/api/expenses", func(w http.ResponseWriter, r *http.Request) {
 		authCtx, ok := a.requireAuth(w, r, auth.PermRead)

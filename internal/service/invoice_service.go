@@ -240,3 +240,123 @@ func (s *WorkflowService) PayInvoice(ctx context.Context, orgID, invoiceID strin
 
 	return &inv, nil
 }
+
+// ----------------- CREDIT NOTE SERVICE -----------------
+
+type CreateCreditNoteRequest struct {
+	InvoiceID  string  `json:"invoice_id"`
+	CustomerID string  `json:"customer_id"`
+	Currency   string  `json:"currency"`
+	Reason     string  `json:"reason"`
+	Amount     float64 `json:"amount"`
+	TaxAmount  float64 `json:"tax_amount"`
+	ItemsJSON  string  `json:"items_json"`
+}
+
+func (s *WorkflowService) IssueCreditNote(ctx context.Context, orgID string, req CreateCreditNoteRequest, authCtx *auth.AuthContext, idempotencyKey string) (*db.CreditNote, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+
+	tx, err := s.store.DB().BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	invoiceNumber := ""
+	customerID := req.CustomerID
+	currency := req.Currency
+	if currency == "" {
+		currency = "USD"
+	}
+
+	subtotal := req.Amount
+	taxAmount := req.TaxAmount
+	totalAmount := subtotal + taxAmount
+
+	if req.InvoiceID != "" {
+		var inv db.Invoice
+		err := tx.QueryRow(`SELECT id, invoice_number, customer_id, subtotal, tax_amount, total_amount, items_json
+			FROM invoices WHERE id = ? AND org_id = ?`, req.InvoiceID, orgID).
+			Scan(&inv.ID, &inv.InvoiceNumber, &inv.CustomerID, &inv.Subtotal, &inv.TaxAmount, &inv.TotalAmount, &inv.ItemsJSON)
+		if err == nil {
+			invoiceNumber = inv.InvoiceNumber
+			if customerID == "" {
+				customerID = inv.CustomerID
+			}
+			if totalAmount <= 0 {
+				subtotal = inv.Subtotal
+				taxAmount = inv.TaxAmount
+				totalAmount = inv.TotalAmount
+			}
+			if req.ItemsJSON == "" {
+				req.ItemsJSON = inv.ItemsJSON
+			}
+		}
+	}
+
+	if customerID == "" {
+		return nil, fmt.Errorf("customer_id is required to issue a credit note")
+	}
+	if totalAmount <= 0 {
+		return nil, fmt.Errorf("credit note amount must be greater than zero")
+	}
+
+	subtotalCents := finance.DollarsToCents(subtotal)
+	taxCents := finance.DollarsToCents(taxAmount)
+	totalCents := subtotalCents + taxCents
+
+	actorType := "human"
+	actorID := "web_user"
+	if authCtx != nil {
+		actorID = authCtx.Name
+		if authCtx.IsAPIKey {
+			actorType = "agent"
+		}
+	}
+
+	reason := req.Reason
+	if reason == "" {
+		reason = "billing_error"
+	}
+
+	cnID := "cn_" + uuid.New().String()[:8]
+	cnNumber, err := finance.GenerateSequenceNumber(ctx, tx, orgID, "CN")
+	if err != nil {
+		cnNumber = fmt.Sprintf("CN-%d", time.Now().Unix())
+	}
+	now := time.Now()
+
+	_, err = tx.Exec(`
+		INSERT INTO credit_notes (id, org_id, credit_note_number, invoice_id, customer_id, currency, subtotal, tax_amount, total_amount, total_cents, reason, status, items_json, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'issued', ?, ?)`,
+		cnID, orgID, cnNumber, req.InvoiceID, customerID, currency, subtotal, taxAmount, totalAmount, totalCents, reason, req.ItemsJSON, now)
+	if err != nil {
+		return nil, fmt.Errorf("failed to insert credit note: %w", err)
+	}
+
+	// Double-entry ledger reversal: Debit Sales Revenue / Sales Tax, Credit Accounts Receivable
+	if _, err := s.ledger.PostCreditNoteIssued(ctx, tx, orgID, cnID, cnNumber, invoiceNumber, subtotalCents, taxCents, totalCents, actorID); err != nil {
+		return nil, fmt.Errorf("failed to post credit note reversal to general ledger: %w", err)
+	}
+
+	// Transactional outbox event
+	_ = RecordOutboxEvent(ctx, tx, orgID, "credit_note_issued", map[string]interface{}{
+		"credit_note_id":     cnID,
+		"credit_note_number": cnNumber,
+		"invoice_id":         req.InvoiceID,
+		"total_amount":       totalAmount,
+		"currency":           currency,
+	})
+
+	_ = s.store.LogAuditTx(tx, orgID, actorType, actorID, "ISSUE_CREDIT_NOTE", "credit_notes", cnID,
+		fmt.Sprintf("Issued Credit Note %s for %s %.2f (Reason: %s)", cnNumber, currency, totalAmount, reason), req.ItemsJSON)
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit credit note transaction: %w", err)
+	}
+
+	return s.store.GetCreditNoteByIDForOrg(orgID, cnID)
+}
+
