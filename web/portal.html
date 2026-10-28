@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Customer Payment Portal — AO Sphere</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card-bg: #ffffff;
+      --text-main: #0f172a;
+      --text-muted: #64748b;
+      --border: #e2e8f0;
+      --brand: #2563eb;
+      --brand-hover: #1d4ed8;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --radius: 16px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 32px 16px 64px;
+    }
+
+    .portal-container {
+      width: 100%;
+      max-width: 820px;
+    }
+
+    .portal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+    }
+
+    .brand-logo {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 800;
+      font-size: 20px;
+      color: #0f172a;
+    }
+
+    .brand-icon {
+      width: 40px;
+      height: 40px;
+      background: linear-gradient(135deg, #2563eb, #7c3aed);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+    }
+
+    .secure-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: #ecfdf5;
+      color: #059669;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 6px 14px;
+      border-radius: 999px;
+      border: 1px solid #a7f3d0;
+    }
+
+    .invoice-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.02);
+      overflow: hidden;
+      margin-bottom: 24px;
+    }
+
+    .card-banner {
+      padding: 24px 32px;
+      background: linear-gradient(to right, #ffffff, #f1f5f9);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .inv-title {
+      font-size: 24px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+    }
+
+    .inv-meta {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 14px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .status-paid {
+      background: #ecfdf5;
+      color: #059669;
+      border: 1px solid #10b981;
+    }
+
+    .status-due {
+      background: #fffbeb;
+      color: #b45309;
+      border: 1px solid #f59e0b;
+    }
+
+    .card-body {
+      padding: 32px;
+    }
+
+    .info-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      margin-bottom: 32px;
+      padding-bottom: 24px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .info-label {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+
+    .info-val {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-main);
+    }
+
+    .table-container {
+      width: 100%;
+      overflow-x: auto;
+      margin-bottom: 32px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+    }
+
+    th {
+      font-size: 11px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      padding: 12px 16px;
+      border-bottom: 2px solid var(--border);
+    }
+
+    td {
+      padding: 14px 16px;
+      font-size: 14px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .totals-box {
+      margin-left: auto;
+      max-width: 320px;
+      background: #f8fafc;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+    }
+
+    .total-line {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 10px;
+      font-size: 14px;
+      color: var(--text-muted);
+    }
+
+    .total-line.final {
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 2px solid var(--border);
+      font-size: 18px;
+      font-weight: 800;
+      color: var(--text-main);
+    }
+
+    .action-bar {
+      display: flex;
+      justify-content: flex-end;
+      gap: 16px;
+      margin-top: 32px;
+      padding-top: 24px;
+      border-top: 1px solid var(--border);
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 24px;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      text-decoration: none;
+      transition: all 0.2s;
+      border: none;
+    }
+
+    .btn-secondary {
+      background: #f1f5f9;
+      color: var(--text-main);
+      border: 1px solid var(--border);
+    }
+
+    .btn-secondary:hover {
+      background: #e2e8f0;
+    }
+
+    .btn-primary {
+      background: var(--brand);
+      color: white;
+      box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
+    }
+
+    .btn-primary:hover {
+      background: var(--brand-hover);
+    }
+
+    /* Modal for Payment */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.6);
+      backdrop-filter: blur(4px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      z-index: 1000;
+    }
+
+    .modal-box {
+      background: white;
+      border-radius: var(--radius);
+      width: 100%;
+      max-width: 480px;
+      padding: 32px;
+      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
+    }
+
+    .form-group {
+      margin-bottom: 16px;
+    }
+
+    .form-label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+
+    .form-input {
+      width: 100%;
+      padding: 10px 14px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 14px;
+      outline: none;
+    }
+
+    .form-input:focus {
+      border-color: var(--brand);
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+    }
+
+    .success-celebration {
+      text-align: center;
+      padding: 24px;
+      display: none;
+    }
+
+    .success-icon {
+      width: 64px;
+      height: 64px;
+      background: #ecfdf5;
+      color: #10b981;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 16px;
+    }
+
+    @media (max-width: 640px) {
+      .info-grid { grid-template-columns: 1fr; }
+      .totals-box { max-width: 100%; }
+      .action-bar { flex-direction: column-reverse; }
+      .btn { width: 100%; justify-content: center; }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="portal-container">
+    <div class="portal-header">
+      <div class="brand-logo">
+        <div class="brand-icon">
+          <i data-lucide="shield-check" class="w-6 h-6"></i>
+        </div>
+        <span id="brand-name">AO Sphere Enterprise</span>
+      </div>
+      <div class="secure-badge">
+        <i data-lucide="lock" class="w-3.5 h-3.5"></i> 256-Bit SSL Encrypted
+      </div>
+    </div>
+
+    <div class="invoice-card" id="invoice-view">
+      <div class="card-banner">
+        <div>
+          <h1 class="inv-title" id="inv-number">Loading Invoice...</h1>
+          <div class="inv-meta" id="inv-dates">Issue Date: — • Due Date: —</div>
+        </div>
+        <div id="status-container">
+          <span class="status-pill status-due">Loading</span>
+        </div>
+      </div>
+
+      <div class="card-body">
+        <div class="info-grid">
+          <div>
+            <div class="info-label">Billed To</div>
+            <div class="info-val" id="cust-name">—</div>
+            <div style="font-size: 13px; color: var(--text-muted); margin-top: 2px;" id="cust-email">—</div>
+          </div>
+          <div>
+            <div class="info-label">Payable To</div>
+            <div class="info-val" id="company-name">AO Sphere Enterprise Inc.</div>
+            <div style="font-size: 13px; color: var(--text-muted); margin-top: 2px;" id="company-addr">100 Innovation Way, Suite 400</div>
+          </div>
+        </div>
+
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>Description</th>
+                <th style="text-align: center;">Qty</th>
+                <th style="text-align: right;">Unit Price</th>
+                <th style="text-align: right;">Total</th>
+              </tr>
+            </thead>
+            <tbody id="line-items-body">
+              <tr>
+                <td colspan="4" style="text-align: center; color: var(--text-muted); padding: 24px;">Loading invoice details...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="totals-box">
+          <div class="total-line">
+            <span>Subtotal</span>
+            <span id="subtotal-val">$0.00</span>
+          </div>
+          <div class="total-line">
+            <span>Estimated Tax (10%)</span>
+            <span id="tax-val">$0.00</span>
+          </div>
+          <div class="total-line final">
+            <span>Amount Due</span>
+            <span id="grand-total-val" style="color: var(--brand);">$0.00</span>
+          </div>
+        </div>
+
+        <div class="action-bar">
+          <button class="btn btn-secondary" onclick="downloadPDF()">
+            <i data-lucide="download" class="w-4 h-4"></i> Download Vector PDF
+          </button>
+          <button class="btn btn-primary" id="btn-pay" onclick="openPayModal()">
+            <i data-lucide="credit-card" class="w-4 h-4"></i> Pay Now with Card
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div style="text-align: center; font-size: 12px; color: var(--text-muted); margin-top: 16px;">
+      Powered by AO Sphere Business Operating System • Verified Merchant
+    </div>
+  </div>
+
+  <!-- Pay Modal -->
+  <div class="modal-overlay" id="pay-modal">
+    <div class="modal-box">
+      <div id="modal-form-area">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+          <h3 style="font-size: 18px; font-weight: 700;">Secure Card Checkout</h3>
+          <button onclick="closePayModal()" style="background: none; border: none; cursor: pointer; color: var(--text-muted);">
+            <i data-lucide="x" class="w-5 h-5"></i>
+          </button>
+        </div>
+
+        <div style="background: #f1f5f9; padding: 12px 16px; border-radius: 8px; margin-bottom: 20px; display: flex; justify-content: space-between;">
+          <span style="font-size: 13px; color: var(--text-muted);">Total to Charge:</span>
+          <strong id="modal-charge-total" style="font-size: 15px; color: var(--brand);">$0.00</strong>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Name on Card</label>
+          <input type="text" class="form-input" id="card-name" value="Jane Doe" placeholder="John Doe">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Card Number</label>
+          <input type="text" class="form-input" id="card-number" value="•••• •••• •••• 4242" placeholder="4242 •••• •••• ••••">
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+          <div class="form-group">
+            <label class="form-label">Expires</label>
+            <input type="text" class="form-input" id="card-exp" value="12/28" placeholder="MM/YY">
+          </div>
+          <div class="form-group">
+            <label class="form-label">CVC / CVP</label>
+            <input type="text" class="form-input" id="card-cvc" value="888" placeholder="123">
+          </div>
+        </div>
+
+        <button class="btn btn-primary" style="width: 100%; justify-content: center; margin-top: 16px; padding: 14px;" id="btn-submit-pay" onclick="submitPayment()">
+          <i data-lucide="lock" class="w-4 h-4"></i> Authorize & Pay
+        </button>
+      </div>
+
+      <div class="success-celebration" id="modal-success-area">
+        <div class="success-icon">
+          <i data-lucide="check" class="w-8 h-8"></i>
+        </div>
+        <h2 style="font-size: 20px; font-weight: 800; margin-bottom: 8px; color: #0f172a;">Payment Complete!</h2>
+        <p style="font-size: 14px; color: var(--text-muted); margin-bottom: 24px;">Thank you! Your payment has been settled and receipt recorded in the general ledger.</p>
+        <button class="btn btn-secondary" style="width: 100%; justify-content: center;" onclick="closePayModal()">
+          Close Window
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Extract token from URL path: /portal/invoice/:token
+    let token = '';
+    const parts = window.location.pathname.split('/');
+    if (parts.length >= 4 && parts[2] === 'invoice') {
+      token = parts[3];
+    } else {
+      const urlParams = new URLSearchParams(window.location.search);
+      token = urlParams.get('token') || '';
+    }
+
+    let invoiceData = null;
+
+    async function loadInvoice() {
+      try {
+        const res = await fetch(`/api/portal/invoice/${token}`);
+        if (!res.ok) {
+          throw new Error('Invoice not found or invalid token');
+        }
+        invoiceData = await res.json();
+        renderInvoice(invoiceData);
+      } catch (err) {
+        document.getElementById('inv-number').textContent = 'Invoice Not Found';
+        document.getElementById('inv-dates').textContent = err.message;
+        document.getElementById('line-items-body').innerHTML = `
+          <tr><td colspan="4" style="text-align:center; padding:32px; color:#ef4444;">
+            <i data-lucide="alert-circle" style="display:inline-block; margin-bottom:8px;"></i><br>
+            Invalid or expired invoice portal link.
+          </td></tr>`;
+        document.getElementById('btn-pay').style.display = 'none';
+        lucide.createIcons();
+      }
+    }
+
+    function renderInvoice(inv) {
+      document.getElementById('inv-number').textContent = `Invoice ${inv.invoice_number}`;
+      document.getElementById('inv-dates').textContent = `Issued: ${inv.issue_date} • Due: ${inv.due_date}`;
+      document.getElementById('cust-name').textContent = inv.customer_name;
+      document.getElementById('cust-email').textContent = inv.customer_email || 'client@example.com';
+      document.getElementById('company-name').textContent = inv.company_name;
+      document.getElementById('company-addr').textContent = inv.company_address;
+
+      // Status
+      const statusContainer = document.getElementById('status-container');
+      const payBtn = document.getElementById('btn-pay');
+      if (inv.is_paid || inv.status === 'paid') {
+        statusContainer.innerHTML = '<span class="status-pill status-paid"><i data-lucide="check" class="w-3.5 h-3.5 inline"></i> Paid</span>';
+        payBtn.style.display = 'none';
+      } else {
+        statusContainer.innerHTML = '<span class="status-pill status-due"><i data-lucide="clock" class="w-3.5 h-3.5 inline"></i> Payment Due</span>';
+        payBtn.style.display = 'inline-flex';
+      }
+
+      // Line items
+      const items = inv.items || [];
+      const tbody = document.getElementById('line-items-body');
+      if (items.length === 0) {
+        tbody.innerHTML = `<tr>
+          <td>Services / Deliverables Rendered</td>
+          <td style="text-align: center;">1</td>
+          <td style="text-align: right;">$${inv.subtotal.toFixed(2)}</td>
+          <td style="text-align: right; font-weight:600;">$${inv.subtotal.toFixed(2)}</td>
+        </tr>`;
+      } else {
+        tbody.innerHTML = items.map(it => `
+          <tr>
+            <td>
+              <div style="font-weight: 600;">${it.name || it.sku_code || 'Product Item'}</div>
+              <div style="font-size: 12px; color: var(--text-muted);">${it.description || ''}</div>
+            </td>
+            <td style="text-align: center;">${it.qty || 1}</td>
+            <td style="text-align: right;">$${(it.price || it.unit_price || 0).toFixed(2)}</td>
+            <td style="text-align: right; font-weight: 600;">$${((it.qty || 1) * (it.price || it.unit_price || 0)).toFixed(2)}</td>
+          </tr>
+        `).join('');
+      }
+
+      document.getElementById('subtotal-val').textContent = `$${inv.subtotal.toFixed(2)}`;
+      document.getElementById('tax-val').textContent = `$${inv.tax_amount.toFixed(2)}`;
+      document.getElementById('grand-total-val').textContent = `$${inv.total_amount.toFixed(2)}`;
+      document.getElementById('modal-charge-total').textContent = `$${inv.total_amount.toFixed(2)}`;
+
+      lucide.createIcons();
+    }
+
+    function openPayModal() {
+      document.getElementById('pay-modal').style.display = 'flex';
+    }
+
+    function closePayModal() {
+      document.getElementById('pay-modal').style.display = 'none';
+    }
+
+    async function submitPayment() {
+      const btn = document.getElementById('btn-submit-pay');
+      btn.disabled = true;
+      btn.innerHTML = '<i data-lucide="loader" class="w-4 h-4 animate-spin"></i> Processing...';
+      lucide.createIcons();
+
+      try {
+        const res = await fetch('/api/portal/invoice/pay', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: token,
+            payment_method: 'credit_card'
+          })
+        });
+
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.message || 'Payment failed');
+        }
+
+        document.getElementById('modal-form-area').style.display = 'none';
+        document.getElementById('modal-success-area').style.display = 'block';
+        lucide.createIcons();
+
+        // Refresh main card state
+        await loadInvoice();
+      } catch (err) {
+        alert('Payment Error: ' + err.message);
+        btn.disabled = false;
+        btn.innerHTML = '<i data-lucide="lock" class="w-4 h-4"></i> Authorize & Pay';
+        lucide.createIcons();
+      }
+    }
+
+    function downloadPDF() {
+      if (invoiceData && invoiceData.invoice_id) {
+        window.open(`/api/invoices/pdf?id=${invoiceData.invoice_id}`, '_blank');
+      }
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      lucide.createIcons();
+      loadInvoice();
+    });
+  </script>
+</body>
+</html>

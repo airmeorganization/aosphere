@@ -156,7 +156,120 @@ def ensure_schema(conn):
     INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate) VALUES ('fx_VND_org_default', 'org_default', 'USD', 'VND', 25400.0);
     INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate) VALUES ('fx_EUR_org_default', 'org_default', 'USD', 'EUR', 0.92);
     INSERT OR IGNORE INTO exchange_rates (id, org_id, base_currency, target_currency, rate) VALUES ('fx_GBP_org_default', 'org_default', 'USD', 'GBP', 0.77);
+
+    CREATE TABLE IF NOT EXISTS pipelines (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        code TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        is_default INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(org_id, code)
+    );
+    CREATE TABLE IF NOT EXISTS pipeline_stages (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        pipeline_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        code TEXT NOT NULL,
+        position INTEGER NOT NULL DEFAULT 0,
+        probability_pct INTEGER NOT NULL DEFAULT 50,
+        decay_days_threshold INTEGER NOT NULL DEFAULT 14,
+        color TEXT NOT NULL DEFAULT '#3b82f6',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(pipeline_id, code)
+    );
+    CREATE TABLE IF NOT EXISTS customer_activities (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        customer_id TEXT NOT NULL,
+        deal_id TEXT,
+        activity_type TEXT NOT NULL,
+        author_type TEXT NOT NULL DEFAULT 'human',
+        author_id TEXT NOT NULL DEFAULT 'admin',
+        author_name TEXT NOT NULL DEFAULT 'Operations Team',
+        summary TEXT NOT NULL,
+        content TEXT NOT NULL DEFAULT '',
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS inbound_leads (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL,
+        company TEXT NOT NULL DEFAULT '',
+        phone TEXT NOT NULL DEFAULT '',
+        message TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'website_form',
+        status TEXT NOT NULL DEFAULT 'new',
+        assigned_to TEXT NOT NULL DEFAULT 'unassigned',
+        converted_customer_id TEXT,
+        converted_deal_id TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS email_outbox (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        recipient_email TEXT NOT NULL,
+        recipient_name TEXT NOT NULL DEFAULT '',
+        subject TEXT NOT NULL,
+        body_html TEXT NOT NULL,
+        body_text TEXT NOT NULL DEFAULT '',
+        template_name TEXT NOT NULL DEFAULT 'custom',
+        related_entity_type TEXT NOT NULL DEFAULT 'invoice',
+        related_entity_id TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'sent',
+        error_message TEXT NOT NULL DEFAULT '',
+        sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS invoice_portal_tokens (
+        token TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        invoice_id TEXT NOT NULL,
+        expires_at TEXT,
+        view_count INTEGER NOT NULL DEFAULT 0,
+        last_viewed_at TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(org_id, invoice_id)
+    );
+
+    INSERT OR IGNORE INTO pipelines (id, org_id, name, code, description, is_default) VALUES
+    ('pipe_std_org_default', 'org_default', 'Standard Sales', 'STANDARD', 'Standard B2B sales pipeline for qualified direct opportunities', 1),
+    ('pipe_ent_org_default', 'org_default', 'Enterprise Solutions', 'ENTERPRISE', 'High-ACV multi-stakeholder enterprise solution engagements', 0),
+    ('pipe_saas_org_default', 'org_default', 'SaaS Subscriptions', 'SAAS', 'Self-serve trial onboarding and recurring expansion pipeline', 0);
+
+    INSERT OR IGNORE INTO pipeline_stages (id, org_id, pipeline_id, name, code, position, probability_pct, decay_days_threshold, color) VALUES
+    ('stg_std_lead_org_default', 'org_default', 'pipe_std_org_default', 'New Leads', 'lead', 1, 10, 7, '#64748b'),
+    ('stg_std_qual_org_default', 'org_default', 'pipe_std_org_default', 'Qualified', 'qualified', 2, 25, 10, '#3b82f6'),
+    ('stg_std_prop_org_default', 'org_default', 'pipe_std_org_default', 'Proposal Sent', 'proposal', 3, 60, 14, '#8b5cf6'),
+    ('stg_std_nego_org_default', 'org_default', 'pipe_std_org_default', 'Negotiation', 'negotiation', 4, 80, 7, '#f59e0b'),
+    ('stg_std_won_org_default', 'org_default', 'pipe_std_org_default', 'Won', 'won', 5, 100, 0, '#10b981'),
+
+    ('stg_ent_disc_org_default', 'org_default', 'pipe_ent_org_default', 'Discovery', 'discovery', 1, 15, 14, '#64748b'),
+    ('stg_ent_tech_org_default', 'org_default', 'pipe_ent_org_default', 'Tech Validation', 'tech_eval', 2, 40, 21, '#0284c7'),
+    ('stg_ent_exec_org_default', 'org_default', 'pipe_ent_org_default', 'Executive Review', 'exec_review', 3, 70, 14, '#7c3aed'),
+    ('stg_ent_proc_org_default', 'org_default', 'pipe_ent_org_default', 'Legal & Procurement', 'procurement', 4, 90, 30, '#d97706'),
+    ('stg_ent_won_org_default', 'org_default', 'pipe_ent_org_default', 'Closed Won', 'won', 5, 100, 0, '#059669'),
+
+    ('stg_saas_trial_org_default', 'org_default', 'pipe_saas_org_default', 'Trial Active', 'trial', 1, 20, 7, '#0ea5e9'),
+    ('stg_saas_onb_org_default', 'org_default', 'pipe_saas_org_default', 'Onboarding', 'onboarding', 2, 50, 5, '#6366f1'),
+    ('stg_saas_exp_org_default', 'org_default', 'pipe_saas_org_default', 'Expansion', 'expansion', 3, 80, 10, '#ec4899'),
+    ('stg_saas_won_org_default', 'org_default', 'pipe_saas_org_default', 'Active ARR', 'won', 4, 100, 0, '#10b981');
     """)
+
+    try:
+        conn.execute("ALTER TABLE deals ADD COLUMN pipeline_id TEXT DEFAULT 'pipe_std_org_default';")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE deals ADD COLUMN stage_updated_at TEXT DEFAULT '';")
+        conn.execute("UPDATE deals SET stage_updated_at = created_at WHERE stage_updated_at IS NULL OR stage_updated_at = '';")
+    except Exception:
+        pass
+
     conn.commit()
     _schema_initialized = True
 
@@ -525,6 +638,153 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                         "rates": rates_map
                     })
 
+                elif path == "/api/pipelines":
+                    pipe_rows = conn.execute("SELECT * FROM pipelines ORDER BY is_default DESC, name ASC").fetchall()
+                    pipes = []
+                    for pr in pipe_rows:
+                        p = dict(pr)
+                        stages = conn.execute("SELECT * FROM pipeline_stages WHERE pipeline_id = ? ORDER BY position ASC", (p["id"],)).fetchall()
+                        p["stages"] = [dict(s) for s in stages]
+                        pipes.append(p)
+                    conn.close()
+                    return self.send_json(pipes)
+
+                elif path == "/api/deals/decay-alerts":
+                    rows = conn.execute("""
+                        SELECT d.id, d.title, d.value, d.stage, d.probability,
+                               COALESCE(d.pipeline_id, 'pipe_std_org_default') as pipeline_id,
+                               COALESCE(p.name, 'Standard Sales') as pipeline_name,
+                               COALESCE(c.name, 'Client') as customer_name,
+                               COALESCE(c.company, '') as customer_company,
+                               COALESCE(ps.name, d.stage) as stage_name,
+                               COALESCE(ps.decay_days_threshold, 14) as decay_threshold,
+                               COALESCE(d.stage_updated_at, d.created_at) as updated_at
+                        FROM deals d
+                        LEFT JOIN customers c ON d.customer_id = c.id
+                        LEFT JOIN pipelines p ON d.pipeline_id = p.id
+                        LEFT JOIN pipeline_stages ps ON ps.pipeline_id = d.pipeline_id AND ps.code = d.stage
+                        WHERE d.stage NOT IN ('won', 'lost')
+                        ORDER BY d.value DESC
+                    """).fetchall()
+                    conn.close()
+                    alerts = []
+                    now = datetime.now(timezone.utc)
+                    for r in rows:
+                        d = dict(r)
+                        up_str = d.get("updated_at") or ""
+                        try:
+                            if "T" in up_str:
+                                dt = datetime.fromisoformat(up_str.replace("Z", "+00:00"))
+                            else:
+                                dt = datetime.strptime(up_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                            days = max(0, int((now - dt).total_seconds() / 86400))
+                        except Exception:
+                            days = 5
+                        d["days_in_stage"] = days
+                        thresh = d.get("decay_threshold", 14)
+                        if thresh > 0 and days >= thresh:
+                            d["decay_severity"] = "critical" if days >= thresh * 2 else "warning"
+                            alerts.append(d)
+                    return self.send_json(alerts)
+
+                elif path == "/api/customers/360":
+                    cust_id = query.get("id", [""])[0]
+                    if not cust_id:
+                        conn.close()
+                        return self.send_json({"error": "id parameter required"}, 400)
+                    cust_row = conn.execute("SELECT * FROM customers WHERE id = ?", (cust_id,)).fetchone()
+                    if not cust_row:
+                        conn.close()
+                        return self.send_json({"error": "Customer not found"}, 404)
+
+                    inv_rows = conn.execute("SELECT * FROM invoices WHERE customer_id = ? ORDER BY created_at DESC", (cust_id,)).fetchall()
+                    cn_rows = conn.execute("SELECT * FROM credit_notes WHERE customer_id = ? ORDER BY created_at DESC", (cust_id,)).fetchall()
+                    deal_rows = conn.execute("""
+                        SELECT d.*, COALESCE(p.name, 'Standard Sales') as pipeline_name
+                        FROM deals d LEFT JOIN pipelines p ON d.pipeline_id = p.id
+                        WHERE d.customer_id = ? ORDER BY d.created_at DESC
+                    """, (cust_id,)).fetchall()
+                    qte_rows = conn.execute("SELECT * FROM quotes WHERE customer_id = ? ORDER BY created_at DESC", (cust_id,)).fetchall()
+                    act_rows = conn.execute("SELECT * FROM customer_activities WHERE customer_id = ? ORDER BY created_at DESC LIMIT 50", (cust_id,)).fetchall()
+
+                    tot_paid = sum(float(i["total_amount"]) for i in inv_rows if i["status"] == "paid")
+                    ar_open = sum(float(i["total_amount"]) for i in inv_rows if i["status"] != "paid")
+                    tot_cn = sum(float(c["total_amount"]) for c in cn_rows)
+
+                    res = {
+                        "customer": dict(cust_row),
+                        "total_ltv": float(cust_row["lifetime_value"] or 0.0),
+                        "total_paid": tot_paid,
+                        "outstanding_ar": ar_open,
+                        "total_credit_notes": tot_cn,
+                        "kpis": {
+                            "lifetime_value": float(cust_row["lifetime_value"] or 0.0),
+                            "total_revenue": tot_paid,
+                            "unpaid_balance": ar_open,
+                            "open_pipeline_value": sum(float(d["value"] or 0.0) for d in deal_rows if d["stage"] not in ("won", "lost"))
+                        },
+                        "invoices": [dict(i) for i in inv_rows],
+                        "credit_notes": [dict(c) for c in cn_rows],
+                        "deals": [dict(d) for d in deal_rows],
+                        "quotes": [dict(q) for q in qte_rows],
+                        "activities": [dict(a) for a in act_rows]
+                    }
+                    conn.close()
+                    return self.send_json(res)
+
+                elif path == "/api/leads":
+                    rows = conn.execute("SELECT * FROM inbound_leads ORDER BY created_at DESC").fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path == "/api/emails/outbox":
+                    rows = conn.execute("SELECT * FROM email_outbox ORDER BY sent_at DESC LIMIT 50").fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path.startswith("/api/portal/invoice/"):
+                    ptoken = path[len("/api/portal/invoice/"):]
+                    tok_row = conn.execute("SELECT * FROM invoice_portal_tokens WHERE token = ?", (ptoken,)).fetchone()
+                    if not tok_row:
+                        conn.close()
+                        return self.send_json({"error": "Invalid or expired portal token"}, 404)
+                    conn.execute("UPDATE invoice_portal_tokens SET view_count = view_count + 1, last_viewed_at = CURRENT_TIMESTAMP WHERE token = ?", (ptoken,))
+                    conn.commit()
+
+                    inv = conn.execute("""
+                        SELECT i.*, COALESCE(c.name, 'Client') as customer_name, COALESCE(c.email, '') as customer_email
+                        FROM invoices i LEFT JOIN customers c ON i.customer_id = c.id
+                        WHERE i.id = ?
+                    """, (tok_row["invoice_id"],)).fetchone()
+                    conn.close()
+                    if not inv:
+                        return self.send_json({"error": "Invoice not found"}, 404)
+
+                    try:
+                        items = json.loads(inv["items_json"] or "[]")
+                    except Exception:
+                        items = []
+
+                    return self.send_json({
+                        "token": ptoken,
+                        "invoice_id": inv["id"],
+                        "invoice_number": inv["invoice_number"],
+                        "issue_date": inv["issue_date"],
+                        "due_date": inv["due_date"],
+                        "status": inv["status"],
+                        "subtotal": float(inv["subtotal"]),
+                        "tax_amount": float(inv["tax_amount"]),
+                        "total_amount": float(inv["total_amount"]),
+                        "currency": "USD",
+                        "items": items,
+                        "customer_name": inv["customer_name"],
+                        "customer_email": inv["customer_email"],
+                        "company_name": "AO Sphere Enterprise",
+                        "company_address": "100 Innovation Way, Suite 400",
+                        "company_website": "https://aosphere.local",
+                        "is_paid": inv["status"] == "paid"
+                    })
+
                 elif path == "/api/invoices/pdf" or path == "/api/purchase-orders/pdf" or path == "/api/credit-notes/pdf":
                     doc_id = query.get("id", [""])[0]
                     conn.close()
@@ -545,7 +805,9 @@ class AOSphereHandler(BaseHTTPRequestHandler):
 
         # 3. Static Files
         clean_path = path.lstrip("/")
-        if not clean_path or clean_path == "index.html":
+        if path.startswith("/portal/invoice/"):
+            file_path = os.path.join(WEB_DIR, "portal.html")
+        elif not clean_path or clean_path == "index.html":
             file_path = os.path.join(WEB_DIR, "index.html")
         else:
             file_path = os.path.join(WEB_DIR, clean_path)
@@ -712,18 +974,40 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 broadcast("po_created", {"po_number": po_num})
                 return self.send_json(dict(row))
 
+            elif path == "/api/customers":
+                name = req.get("name")
+                company = req.get("company", "")
+                email = req.get("email", "")
+                phone = req.get("phone", "")
+                if not name:
+                    conn.close()
+                    return self.send_json({"error": "name is required"}, 400)
+                cust_id = f"cust_{int(time.time()*1000)}"
+                now = utcnow_str()
+                conn.execute(
+                    "INSERT INTO customers (id, org_id, name, company, email, phone, status, lifetime_value, tags, created_at) VALUES (?, 'org_default', ?, ?, ?, ?, 'active', 0.0, '[]', ?)",
+                    (cust_id, name, company, email, phone, now)
+                )
+                log_audit(conn, "human", "web_user", "CREATE_CUSTOMER", "customers", cust_id, f"Created customer '{name}' ({company})")
+                conn.commit()
+                row = conn.execute("SELECT * FROM customers WHERE id = ?", (cust_id,)).fetchone()
+                conn.close()
+                broadcast("customer_created", {"customer_id": cust_id})
+                return self.send_json(dict(row))
+
             elif path == "/api/deals":
                 title = req.get("title")
                 cust_id = req.get("customer_id")
                 value = float(req.get("value", 0.0))
                 stage = req.get("stage", "lead")
+                pipeline_id = req.get("pipeline_id", "pipe_std_org_default")
                 close_date = req.get("expected_close_date", "")
                 deal_id = f"deal_{int(time.time()*1000)}"
                 now = utcnow_str()
 
                 conn.execute(
-                    "INSERT INTO deals (id, title, customer_id, value, stage, probability, expected_close_date, created_at) VALUES (?, ?, ?, ?, ?, 60, ?, ?)",
-                    (deal_id, title, cust_id, value, stage, close_date, now)
+                    "INSERT INTO deals (id, title, customer_id, value, stage, probability, expected_close_date, pipeline_id, stage_updated_at, created_at) VALUES (?, ?, ?, ?, ?, 60, ?, ?, ?, ?)",
+                    (deal_id, title, cust_id, value, stage, close_date, pipeline_id, now, now)
                 )
                 log_audit(conn, "human", "web_user", "CREATE_DEAL", "deals", deal_id, f"Created deal '{title}' (${value:.2f})")
                 conn.commit()
@@ -1141,6 +1425,188 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 conn.close()
                 broadcast("exchange_rate_updated", {"currency": target_cur, "rate": rate, "base_currency": base_cur})
                 return self.send_json({"status": "ok", "currency": target_cur, "rate": rate})
+
+            elif path == "/api/deals/stage":
+                deal_id = req.get("deal_id")
+                stage = req.get("stage")
+                if not deal_id or not stage:
+                    conn.close()
+                    return self.send_json({"error": "deal_id and stage required"}, 400)
+                now = utcnow_str()
+                conn.execute("UPDATE deals SET stage = ?, stage_updated_at = ? WHERE id = ?", (stage, now, deal_id))
+                deal = conn.execute("SELECT d.*, c.name as customer_name FROM deals d LEFT JOIN customers c ON d.customer_id = c.id WHERE d.id = ?", (deal_id,)).fetchone()
+                if deal and deal["customer_id"]:
+                    act_id = f"act_{int(time.time()*1000)}"
+                    conn.execute("""
+                        INSERT INTO customer_activities (id, org_id, customer_id, deal_id, activity_type, author_type, author_id, author_name, summary, content, created_at)
+                        VALUES (?, 'org_default', ?, ?, 'stage_change', 'human', 'web_user', 'Sales Workflow', ?, ?, ?)
+                    """, (act_id, deal["customer_id"], deal_id, f"Deal progressed to stage '{stage}'", f"Deal {deal['title']} stage updated to {stage}.", now))
+                log_audit(conn, "human", "web_user", "UPDATE_DEAL_STAGE", "deals", deal_id, f"Moved deal {deal_id} to stage {stage}")
+                conn.commit()
+                conn.close()
+                broadcast("deal_stage_changed", {"deal_id": deal_id, "stage": stage})
+                return self.send_json({"status": "ok", "deal_id": deal_id, "stage": stage})
+
+            elif path == "/api/customers/activities":
+                cust_id = req.get("customer_id")
+                deal_id = req.get("deal_id")
+                act_type = req.get("activity_type", "note")
+                summary = req.get("summary", "")
+                content = req.get("content", "")
+                author_name = req.get("author_name", "Operations Team")
+                if not cust_id or not summary:
+                    conn.close()
+                    return self.send_json({"error": "customer_id and summary required"}, 400)
+                act_id = f"act_{int(time.time()*1000)}"
+                now = utcnow_str()
+                conn.execute("""
+                    INSERT INTO customer_activities (id, org_id, customer_id, deal_id, activity_type, author_type, author_id, author_name, summary, content, created_at)
+                    VALUES (?, 'org_default', ?, ?, ?, 'human', 'web_user', ?, ?, ?, ?)
+                """, (act_id, cust_id, deal_id, act_type, author_name, summary, content, now))
+                log_audit(conn, "human", "web_user", "LOG_CUSTOMER_ACTIVITY", "customers", cust_id, f"Logged {act_type}: {summary}")
+                conn.commit()
+                conn.close()
+                broadcast("customer_activity_logged", {"customer_id": cust_id, "type": act_type})
+                return self.send_json({"id": act_id, "status": "ok"}, 201)
+
+            elif path == "/api/v1/leads/capture":
+                name = req.get("name", "")
+                email = req.get("email", "")
+                company = req.get("company", "")
+                phone = req.get("phone", "")
+                msg = req.get("message", "")
+                source = req.get("source", "website_form")
+                if not name or not email:
+                    conn.close()
+                    return self.send_json({"error": "name and email required"}, 400)
+                lead_id = f"lead_{int(time.time()*1000)}"
+                now = utcnow_str()
+                conn.execute("""
+                    INSERT INTO inbound_leads (id, org_id, name, email, company, phone, message, source, status, assigned_to, created_at)
+                    VALUES (?, 'org_default', ?, ?, ?, ?, ?, ?, 'new', 'AI Qualification Agent', ?)
+                """, (lead_id, name, email, company, phone, msg, source, now))
+                conn.commit()
+                conn.close()
+                broadcast("lead_captured", {"lead_id": lead_id, "name": name, "company": company})
+                return self.send_json({"status": "received", "id": lead_id, "lead_id": lead_id}, 201)
+
+            elif path == "/api/leads/convert":
+                lead_id = req.get("lead_id")
+                pipeline_id = req.get("pipeline_id") or "pipe_std_org_default"
+                deal_val = float(req.get("deal_value") or 15000.0)
+                lead = conn.execute("SELECT * FROM inbound_leads WHERE id = ?", (lead_id,)).fetchone()
+                if not lead:
+                    conn.close()
+                    return self.send_json({"error": "Lead not found"}, 404)
+
+                cust = conn.execute("SELECT id FROM customers WHERE email = ?", (lead["email"],)).fetchone()
+                if cust:
+                    cust_id = cust["id"]
+                else:
+                    cust_id = f"cust_{int(time.time()*1000)}"
+                    conn.execute("INSERT INTO customers (id, org_id, name, company, email, phone, status, lifetime_value, created_at) VALUES (?, 'org_default', ?, ?, ?, ?, 'active', 0.0, ?)",
+                        (cust_id, lead["name"], lead["company"], lead["email"], lead["phone"], utcnow_str()))
+
+                deal_id = f"deal_{int(time.time()*1000)}"
+                deal_title = f"{lead['company'] or lead['name']} Inbound Deal"
+                now = utcnow_str()
+                conn.execute("""
+                    INSERT INTO deals (id, org_id, title, customer_id, value, stage, probability, pipeline_id, stage_updated_at, created_at)
+                    VALUES (?, 'org_default', ?, ?, ?, 'lead', 20, ?, ?, ?)
+                """, (deal_id, deal_title, cust_id, deal_val, pipeline_id, now, now))
+
+                conn.execute("UPDATE inbound_leads SET status = 'converted', converted_customer_id = ?, converted_deal_id = ? WHERE id = ?",
+                    (cust_id, deal_id, lead_id))
+
+                act_id = f"act_{int(time.time()*1000)}"
+                conn.execute("""
+                    INSERT INTO customer_activities (id, org_id, customer_id, deal_id, activity_type, author_type, author_id, author_name, summary, content, created_at)
+                    VALUES (?, 'org_default', ?, ?, 'lead_converted', 'human', 'web_user', 'Sales Rep', ?, ?, ?)
+                """, (act_id, cust_id, deal_id, f"Converted Inbound Lead {lead['name']}", lead["message"] or "Converted from contact form.", now))
+
+                conn.commit()
+                conn.close()
+                broadcast("lead_converted", {"lead_id": lead_id, "customer_id": cust_id, "deal_id": deal_id})
+                return self.send_json({"customer_id": cust_id, "deal_id": deal_id})
+
+            elif path == "/api/invoices/send-email":
+                inv_id = req.get("invoice_id")
+                inv = conn.execute("""
+                    SELECT i.*, COALESCE(c.name, 'Client') as customer_name, COALESCE(c.email, 'client@example.com') as customer_email
+                    FROM invoices i LEFT JOIN customers c ON i.customer_id = c.id
+                    WHERE i.id = ?
+                """, (inv_id,)).fetchone()
+                if not inv:
+                    conn.close()
+                    return self.send_json({"error": "Invoice not found"}, 404)
+
+                tok_row = conn.execute("SELECT token FROM invoice_portal_tokens WHERE invoice_id = ?", (inv_id,)).fetchone()
+                if tok_row:
+                    ptoken = tok_row["token"]
+                else:
+                    import secrets
+                    ptoken = "ptok_" + secrets.token_hex(16)
+                    conn.execute("INSERT INTO invoice_portal_tokens (token, org_id, invoice_id, expires_at, created_at) VALUES (?, 'org_default', ?, datetime('now', '+90 days'), CURRENT_TIMESTAMP)", (ptoken, inv_id))
+
+                host = self.headers.get("Host", "localhost:8080")
+                portal_url = f"http://{host}/portal/invoice/{ptoken}"
+                subj = f"Invoice {inv['invoice_number']} from AO Sphere Enterprise — Amount: ${float(inv['total_amount']):.2f}"
+                body_html = f"<h2>Invoice from AO Sphere Enterprise</h2><p>Dear {inv['customer_name']},</p><p>Please review and pay your invoice online: <a href='{portal_url}'>{portal_url}</a></p>"
+
+                eml_id = f"eml_{int(time.time()*1000)}"
+                now = utcnow_str()
+                conn.execute("""
+                    INSERT INTO email_outbox (id, org_id, recipient_email, recipient_name, subject, body_html, body_text, template_name, related_entity_type, related_entity_id, status, sent_at, created_at)
+                    VALUES (?, 'org_default', ?, ?, ?, ?, ?, 'invoice_notification', 'invoice', ?, 'sent', ?, ?)
+                """, (eml_id, inv["customer_email"], inv["customer_name"], subj, body_html, portal_url, inv_id, now, now))
+                conn.commit()
+                conn.close()
+                broadcast("email_dispatched", {"email_id": eml_id, "recipient": inv["customer_email"], "portal_url": portal_url})
+                return self.send_json({"email_id": eml_id, "status": "sent", "portal_token": ptoken, "portal_url": portal_url})
+
+            elif path == "/api/portal/invoice/pay":
+                ptoken = req.get("token")
+                method = req.get("payment_method", "credit_card")
+                tok_row = conn.execute("SELECT invoice_id FROM invoice_portal_tokens WHERE token = ?", (ptoken,)).fetchone()
+                if not tok_row:
+                    conn.close()
+                    return self.send_json({"error": "Invalid portal token"}, 404)
+
+                inv_id = tok_row["invoice_id"]
+                inv = conn.execute("SELECT * FROM invoices WHERE id = ?", (inv_id,)).fetchone()
+                if not inv:
+                    conn.close()
+                    return self.send_json({"error": "Invoice not found"}, 404)
+
+                if inv["status"] != "paid":
+                    conn.execute("UPDATE invoices SET status = 'paid', version = version + 1 WHERE id = ?", (inv_id,))
+                    tot_cents = int(float(inv["total_amount"]) * 100)
+                    now = utcnow_str()
+                    today = utc_today_str()
+                    je_id = f"je_portal_{int(time.time()*1000)}"
+                    je_num = f"JE-PORTAL-{int(time.time())}"
+
+                    try:
+                        conn.execute("""
+                            INSERT INTO journal_entries (id, org_id, entry_number, date, memo, source, source_id, posted_by, posted_at)
+                            VALUES (?, 'org_default', ?, ?, ?, 'portal_payment', ?, 'client_portal', ?)
+                        """, (je_id, je_num, today, f"Client Portal Settlement for {inv['invoice_number']}", inv_id, now))
+
+                        cash_row = conn.execute("SELECT id FROM accounts WHERE code = '1000'").fetchone()
+                        ar_row = conn.execute("SELECT id FROM accounts WHERE code = '1100'").fetchone()
+
+                        if cash_row and ar_row and tot_cents > 0:
+                            conn.execute("INSERT INTO journal_lines (id, entry_id, account_id, entry_type, amount_cents, description) VALUES (?, ?, ?, 'debit', ?, 'Cash Received via Portal')",
+                                (f"jl_{int(time.time()*1000)}_1", je_id, cash_row["id"], tot_cents))
+                            conn.execute("INSERT INTO journal_lines (id, entry_id, account_id, entry_type, amount_cents, description) VALUES (?, ?, ?, 'credit', ?, 'AR Cleared via Portal')",
+                                (f"jl_{int(time.time()*1000)}_2", je_id, ar_row["id"], tot_cents))
+                    except Exception:
+                        pass
+
+                conn.commit()
+                conn.close()
+                broadcast("invoice_paid", {"invoice_id": inv_id, "token": ptoken})
+                return self.send_json({"status": "paid"})
 
             conn.close()
             return self.send_json({"error": "Unknown endpoint"}, 404)

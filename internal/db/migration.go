@@ -398,6 +398,161 @@ var Migrations = []Migration{
 		SELECT 'fx_GBP_' || id, id, 'USD', 'GBP', 0.77 FROM organizations;
 		`,
 	},
+	{
+		Version: 8,
+		Name:    "008_phase5_crm_customer360",
+		SQL: `
+		CREATE TABLE IF NOT EXISTS pipelines (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			name TEXT NOT NULL,
+			code TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			is_default BOOLEAN NOT NULL DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(org_id, code)
+		);
+
+		CREATE TABLE IF NOT EXISTS pipeline_stages (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			pipeline_id TEXT NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+			name TEXT NOT NULL,
+			code TEXT NOT NULL,
+			position INTEGER NOT NULL DEFAULT 0,
+			probability_pct INTEGER NOT NULL DEFAULT 50,
+			decay_days_threshold INTEGER NOT NULL DEFAULT 14,
+			color TEXT NOT NULL DEFAULT '#3b82f6',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(pipeline_id, code)
+		);
+
+		CREATE TABLE IF NOT EXISTS customer_activities (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			customer_id TEXT NOT NULL REFERENCES customers(id),
+			deal_id TEXT REFERENCES deals(id),
+			activity_type TEXT NOT NULL, -- note, call, meeting, email
+			author_type TEXT NOT NULL DEFAULT 'human', -- human, agent
+			author_id TEXT NOT NULL DEFAULT 'admin',
+			author_name TEXT NOT NULL DEFAULT 'Operations Team',
+			summary TEXT NOT NULL,
+			content TEXT NOT NULL DEFAULT '',
+			metadata_json TEXT NOT NULL DEFAULT '{}',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS inbound_leads (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			name TEXT NOT NULL,
+			email TEXT NOT NULL,
+			company TEXT NOT NULL DEFAULT '',
+			phone TEXT NOT NULL DEFAULT '',
+			message TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL DEFAULT 'website_form',
+			status TEXT NOT NULL DEFAULT 'new', -- new, qualified, contacted, converted, rejected
+			assigned_to TEXT NOT NULL DEFAULT 'unassigned',
+			converted_customer_id TEXT REFERENCES customers(id),
+			converted_deal_id TEXT REFERENCES deals(id),
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS email_outbox (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			recipient_email TEXT NOT NULL,
+			recipient_name TEXT NOT NULL DEFAULT '',
+			subject TEXT NOT NULL,
+			body_html TEXT NOT NULL,
+			body_text TEXT NOT NULL DEFAULT '',
+			template_name TEXT NOT NULL DEFAULT 'custom',
+			related_entity_type TEXT NOT NULL DEFAULT 'invoice', -- invoice, quote, receipt
+			related_entity_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'sent', -- queued, sent, failed
+			error_message TEXT NOT NULL DEFAULT '',
+			sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS invoice_portal_tokens (
+			token TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			invoice_id TEXT NOT NULL REFERENCES invoices(id),
+			expires_at DATETIME,
+			view_count INTEGER NOT NULL DEFAULT 0,
+			last_viewed_at DATETIME,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(org_id, invoice_id)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_pipelines_org ON pipelines(org_id);
+		CREATE INDEX IF NOT EXISTS idx_pipeline_stages_pipe ON pipeline_stages(pipeline_id, position);
+		CREATE INDEX IF NOT EXISTS idx_customer_activities_cust ON customer_activities(org_id, customer_id, created_at);
+		CREATE INDEX IF NOT EXISTS idx_inbound_leads_org ON inbound_leads(org_id, status);
+		CREATE INDEX IF NOT EXISTS idx_email_outbox_org ON email_outbox(org_id, status);
+		CREATE INDEX IF NOT EXISTS idx_invoice_portal_inv ON invoice_portal_tokens(invoice_id);
+
+		ALTER TABLE deals ADD COLUMN pipeline_id TEXT DEFAULT 'pipe_std_org_default';
+		ALTER TABLE deals ADD COLUMN stage_updated_at DATETIME DEFAULT '';
+		UPDATE deals SET stage_updated_at = created_at WHERE stage_updated_at IS NULL OR stage_updated_at = '';
+
+		-- Seed Default Pipelines
+		INSERT OR IGNORE INTO pipelines (id, org_id, name, code, description, is_default)
+		SELECT 'pipe_std_' || id, id, 'Standard Sales', 'STANDARD', 'Standard B2B sales pipeline for qualified direct opportunities', 1 FROM organizations;
+
+		INSERT OR IGNORE INTO pipelines (id, org_id, name, code, description, is_default)
+		SELECT 'pipe_ent_' || id, id, 'Enterprise Solutions', 'ENTERPRISE', 'High-ACV multi-stakeholder enterprise solution engagements', 0 FROM organizations;
+
+		INSERT OR IGNORE INTO pipelines (id, org_id, name, code, description, is_default)
+		SELECT 'pipe_saas_' || id, id, 'SaaS Subscriptions', 'SAAS', 'Self-serve trial onboarding and recurring expansion pipeline', 0 FROM organizations;
+
+		-- Seed Stages for Standard Sales
+		INSERT OR IGNORE INTO pipeline_stages (id, org_id, pipeline_id, name, code, position, probability_pct, decay_days_threshold, color)
+		SELECT 'stg_std_lead_' || id, id, 'pipe_std_' || id, 'New Leads', 'lead', 1, 10, 7, '#64748b' FROM organizations;
+
+		INSERT OR IGNORE INTO pipeline_stages (id, org_id, pipeline_id, name, code, position, probability_pct, decay_days_threshold, color)
+		SELECT 'stg_std_qual_' || id, id, 'pipe_std_' || id, 'Qualified', 'qualified', 2, 25, 10, '#3b82f6' FROM organizations;
+
+		INSERT OR IGNORE INTO pipeline_stages (id, org_id, pipeline_id, name, code, position, probability_pct, decay_days_threshold, color)
+		SELECT 'stg_std_prop_' || id, id, 'pipe_std_' || id, 'Proposal Sent', 'proposal', 3, 60, 14, '#8b5cf6' FROM organizations;
+
+		INSERT OR IGNORE INTO pipeline_stages (id, org_id, pipeline_id, name, code, position, probability_pct, decay_days_threshold, color)
+		SELECT 'stg_std_nego_' || id, id, 'pipe_std_' || id, 'Negotiation', 'negotiation', 4, 80, 7, '#f59e0b' FROM organizations;
+
+		INSERT OR IGNORE INTO pipeline_stages (id, org_id, pipeline_id, name, code, position, probability_pct, decay_days_threshold, color)
+		SELECT 'stg_std_won_' || id, id, 'pipe_std_' || id, 'Won', 'won', 5, 100, 0, '#10b981' FROM organizations;
+
+		-- Seed Stages for Enterprise Solutions
+		INSERT OR IGNORE INTO pipeline_stages (id, org_id, pipeline_id, name, code, position, probability_pct, decay_days_threshold, color)
+		SELECT 'stg_ent_disc_' || id, id, 'pipe_ent_' || id, 'Discovery', 'discovery', 1, 15, 14, '#64748b' FROM organizations;
+
+		INSERT OR IGNORE INTO pipeline_stages (id, org_id, pipeline_id, name, code, position, probability_pct, decay_days_threshold, color)
+		SELECT 'stg_ent_tech_' || id, id, 'pipe_ent_' || id, 'Tech Validation', 'tech_eval', 2, 40, 21, '#0284c7' FROM organizations;
+
+		INSERT OR IGNORE INTO pipeline_stages (id, org_id, pipeline_id, name, code, position, probability_pct, decay_days_threshold, color)
+		SELECT 'stg_ent_exec_' || id, id, 'pipe_ent_' || id, 'Executive Review', 'exec_review', 3, 70, 14, '#7c3aed' FROM organizations;
+
+		INSERT OR IGNORE INTO pipeline_stages (id, org_id, pipeline_id, name, code, position, probability_pct, decay_days_threshold, color)
+		SELECT 'stg_ent_proc_' || id, id, 'pipe_ent_' || id, 'Legal & Procurement', 'procurement', 4, 90, 30, '#d97706' FROM organizations;
+
+		INSERT OR IGNORE INTO pipeline_stages (id, org_id, pipeline_id, name, code, position, probability_pct, decay_days_threshold, color)
+		SELECT 'stg_ent_won_' || id, id, 'pipe_ent_' || id, 'Closed Won', 'won', 5, 100, 0, '#059669' FROM organizations;
+
+		-- Seed Stages for SaaS Subscriptions
+		INSERT OR IGNORE INTO pipeline_stages (id, org_id, pipeline_id, name, code, position, probability_pct, decay_days_threshold, color)
+		SELECT 'stg_saas_trial_' || id, id, 'pipe_saas_' || id, 'Trial Active', 'trial', 1, 20, 7, '#0ea5e9' FROM organizations;
+
+		INSERT OR IGNORE INTO pipeline_stages (id, org_id, pipeline_id, name, code, position, probability_pct, decay_days_threshold, color)
+		SELECT 'stg_saas_onb_' || id, id, 'pipe_saas_' || id, 'Onboarding', 'onboarding', 2, 50, 5, '#6366f1' FROM organizations;
+
+		INSERT OR IGNORE INTO pipeline_stages (id, org_id, pipeline_id, name, code, position, probability_pct, decay_days_threshold, color)
+		SELECT 'stg_saas_exp_' || id, id, 'pipe_saas_' || id, 'Expansion', 'expansion', 3, 80, 10, '#ec4899' FROM organizations;
+
+		INSERT OR IGNORE INTO pipeline_stages (id, org_id, pipeline_id, name, code, position, probability_pct, decay_days_threshold, color)
+		SELECT 'stg_saas_won_' || id, id, 'pipe_saas_' || id, 'Active ARR', 'won', 4, 100, 0, '#10b981' FROM organizations;
+		`,
+	},
 }
 
 // RunMigrations applies all pending migrations in sequential order

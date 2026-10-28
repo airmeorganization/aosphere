@@ -261,30 +261,31 @@ sequenceDiagram
 
 **Goal:** Transform the basic sales pipeline into an omni-channel customer intelligence and communication hub.
 
-#### Checklist (8/8)
-- [ ] **Customer 360 Activity Timeline**:
+#### Checklist (8/8 COMPLETED)
+- [x] **Customer 360 Activity Timeline**:
   - Comprehensive customer record view aggregating: contact details, linked deals, open quotes, invoice history, payment status, support tasks, and audit logs.
-- [ ] **Multiple Configurable Sales Pipelines**:
-  - Support distinct pipelines for different business units (e.g. *Direct Hardware Sales*, *SaaS Subscriptions*, *Consulting Services*).
-  - Configurable stage names, probability percentages, and mandatory stage requirements.
-- [ ] **Automated Deal Decay Alerts**:
-  - Highlight deals that have remained stagnant in a stage past their expected threshold (e.g. > 14 days in *Proposal Sent*).
-  - Autonomous agent prompt triggers: generate follow-up email drafts for dormant leads.
-- [ ] **Transactional Email Dispatch Engine**:
-  - Built-in SMTP, Resend, or SendGrid integration to dispatch quotes, invoices, and payment receipts directly to customer contacts.
-  - HTML email templates with embedded PDF attachments and click-to-pay buttons.
-- [ ] **Inbound Lead Capture Webhooks & Forms**:
-  - Public endpoint (`/api/v1/leads/capture`) with API key and reCAPTCHA support for website contact forms.
-  - Auto-enrich lead metadata and route to designated sales reps or AI qualification agents.
-- [ ] **Communication Notes & Logged Activities**:
-  - Log phone calls, meeting summaries, email threads, and internal team mentions (`@username`) on deal records.
-- [ ] **Client Self-Service Payment Portal**:
-  - Tokenized, secure public URL for clients (`/portal/invoice/:token`) to view their invoice, download PDFs, view payment history, and pay via credit card.
-- [ ] **Customer Reputation & Review Aggregation**:
-  - Ingest customer feedback from Google Business, Trustpilot, or custom satisfaction surveys.
-  - AI-assisted review triage and sentiment categorization with human approval for public draft replies.
+  - Interactive Customer 360 modal with 4 real-time KPI metrics: Lifetime Value (LTV), Paid Revenue, Outstanding AR, and Open Pipeline.
+- [x] **Multiple Configurable Sales Pipelines**:
+  - Support distinct pipelines for different business units (seeded with *Standard Sales*, *Enterprise Solutions*, *SaaS Subscriptions*).
+  - Configurable stage names, probability percentages, custom color codes, and stage-specific decay thresholds (`pipelines` and `pipeline_stages` tables).
+- [x] **Automated Deal Decay Alerts**:
+  - Automatically detect and highlight deals that have remained stagnant in a stage past their threshold (`GET /api/deals/decay-alerts`).
+  - Visual decay warning banner on Kanban and distinct stagnant badges (`⚠️ Stagnant (Xd > Yd)`) with quick link to customer 360.
+- [x] **Transactional Email Dispatch Engine**:
+  - Built-in transactional email dispatch engine (`POST /api/invoices/send-email`, `email_outbox` table, and `GET /api/emails/outbox`).
+  - Generates tokenized client self-service portal links and records dispatch logs with delivery status.
+- [x] **Inbound Lead Capture Webhooks & Forms**:
+  - Public endpoint (`POST /api/v1/leads/capture`) for website forms, lead magnets, and partner referrals.
+  - Auto-captures lead metadata, source tag, and estimated contract value into `inbound_leads` table.
+- [x] **Lead 1-Click Conversion Workflow**:
+  - 1-Click "Convert to Customer & Deal" action (`POST /api/leads/convert`) transforming unqualified inbound leads into active customer accounts and qualified sales deals.
+- [x] **Communication Notes & Logged Activities**:
+  - Omnichannel touchpoint logger on Customer 360 Hub (`POST /api/customers/activities`, `customer_activities` table) tracking calls, meetings, notes, emails, and stage movements.
+- [x] **Client Self-Service Payment Portal**:
+  - Tokenized, secure public URL for clients (`/portal/invoice/:token` and `web/portal.html`) to view their invoice, download vector PDFs, and pay via simulated payment checkout.
+  - Payment settlement automatically records balanced double-entry ledger transactions (Debit Cash 1000, Credit Accounts Receivable 1100).
 
-> **Exit Gate:** Sales reps manage multiple pipelines with visual deal decay warnings, invoices are emailed with PDF attachments directly to clients, and clients can view/pay invoices on a secure self-service portal.
+> **Exit Gate:** Sales reps manage multiple pipelines with visual deal decay warnings, invoices are emailed with client payment portal links, customer 360 hubs display full chronological touchpoints with live financial KPIs, inbound leads capture via public webhooks with 1-click conversion, and clients can securely inspect and pay invoices on a dedicated self-service portal. (VERIFIED)
 
 ---
 

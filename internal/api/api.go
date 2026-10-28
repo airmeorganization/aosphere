@@ -10,8 +10,10 @@ import (
 	"time"
 
 	"aosphere/internal/auth"
+	"aosphere/internal/crm"
 	"aosphere/internal/db"
 	"aosphere/internal/finance"
+	"aosphere/internal/ledger"
 	"aosphere/internal/mcp"
 	"aosphere/internal/metrics"
 	"aosphere/internal/pdf"
@@ -30,6 +32,7 @@ func getOrgID(r *http.Request) string {
 type API struct {
 	store     *store.Store
 	service   *service.WorkflowService
+	crm       *crm.CRMService
 	env       string
 	clients   map[chan string]string // map[msgChan]orgID
 	clientsMu sync.RWMutex
@@ -39,9 +42,14 @@ func NewAPI(s *store.Store, svc *service.WorkflowService, env string) *API {
 	if svc == nil {
 		svc = service.NewWorkflowService(s)
 	}
+	var crmSvc *crm.CRMService
+	if s != nil && s.DB() != nil {
+		crmSvc = crm.NewCRMService(s.DB(), ledger.NewLedgerService(s.DB()))
+	}
 	return &API{
 		store:   s,
 		service: svc,
+		crm:     crmSvc,
 		env:     env,
 		clients: make(map[chan string]string),
 	}
@@ -714,6 +722,35 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 
 	// CRM
 	mux.HandleFunc("/api/customers", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			authCtx, ok := a.requireAuth(w, r, auth.PermManageOrders)
+			if !ok {
+				return
+			}
+			var req struct {
+				Name    string `json:"name"`
+				Company string `json:"company"`
+				Email   string `json:"email"`
+				Phone   string `json:"phone"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if req.Name == "" {
+				http.Error(w, "customer name is required", http.StatusBadRequest)
+				return
+			}
+			cust, err := a.store.CreateCustomerForOrg(authCtx.OrgID, req.Name, req.Company, req.Email, req.Phone, "active", 0, "[]")
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			_ = a.store.LogAuditForOrg(authCtx.OrgID, "human", authCtx.UserID, "CUSTOMER_CREATE", "customers", cust.ID, "Created customer "+cust.Name, "{}")
+			writeJSON(w, cust)
+			return
+		}
+
 		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
 		if !ok {
 			return
@@ -851,6 +888,295 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 		}
 		a.BroadcastForOrg(authCtx.OrgID, "deal_converted", fmt.Sprintf("{\"deal_id\":\"%s\",\"invoice_number\":\"%s\"}", req.DealID, inv.InvoiceNumber))
 		writeJSON(w, inv)
+	})
+
+	// PHASE 5: MULTI-PIPELINE CRM, CUSTOMER 360 & PORTAL
+	mux.HandleFunc("/api/pipelines", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		if a.crm == nil {
+			http.Error(w, "CRM service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		pipes, err := a.crm.ListPipelines(r.Context(), authCtx.OrgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, pipes)
+	})
+
+	mux.HandleFunc("/api/deals/decay-alerts", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		if a.crm == nil {
+			http.Error(w, "CRM service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		alerts, err := a.crm.GetDealDecayAlerts(r.Context(), authCtx.OrgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, alerts)
+	})
+
+	mux.HandleFunc("/api/customers/360", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		customerID := r.URL.Query().Get("id")
+		if customerID == "" {
+			http.Error(w, "missing customer id parameter", http.StatusBadRequest)
+			return
+		}
+		if a.crm == nil {
+			http.Error(w, "CRM service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		hub, err := a.crm.GetCustomer360(r.Context(), authCtx.OrgID, customerID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		writeJSON(w, hub)
+	})
+
+	mux.HandleFunc("/api/customers/activities", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		authCtx, ok := a.requireAuth(w, r, auth.PermManageOrders)
+		if !ok {
+			return
+		}
+		var act crm.CustomerActivity
+		if err := json.NewDecoder(r.Body).Decode(&act); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if act.CustomerID == "" {
+			http.Error(w, "customer_id is required", http.StatusBadRequest)
+			return
+		}
+		if authCtx != nil {
+			act.AuthorID = authCtx.UserID
+			act.AuthorType = string(authCtx.Role)
+		}
+		if a.crm == nil {
+			http.Error(w, "CRM service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if err := a.crm.LogActivity(r.Context(), authCtx.OrgID, act.CustomerID, act); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		a.BroadcastForOrg(authCtx.OrgID, "customer_activity_logged", fmt.Sprintf("{\"customer_id\":\"%s\",\"type\":\"%s\"}", act.CustomerID, act.ActivityType))
+		w.WriteHeader(http.StatusCreated)
+		writeJSON(w, map[string]string{"status": "ok"})
+	})
+
+	// Public Webhook for Inbound Lead Capture (no auth required)
+	mux.HandleFunc("/api/v1/leads/capture", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var lead crm.InboundLead
+		if err := json.NewDecoder(r.Body).Decode(&lead); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(lead.Name) == "" || strings.TrimSpace(lead.Email) == "" {
+			http.Error(w, "name and email are required", http.StatusBadRequest)
+			return
+		}
+		if a.crm == nil {
+			http.Error(w, "CRM service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		ingested, err := a.crm.IngestInboundLead(r.Context(), "org_default", lead)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		a.BroadcastForOrg("org_default", "lead_captured", fmt.Sprintf("{\"lead_id\":\"%s\",\"name\":\"%s\"}", ingested.ID, ingested.Name))
+		w.WriteHeader(http.StatusCreated)
+		writeJSON(w, map[string]interface{}{"status": "received", "id": ingested.ID, "lead_id": ingested.ID, "lead": ingested})
+	})
+
+	mux.HandleFunc("/api/leads", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		rows, err := a.store.DB().QueryContext(r.Context(),
+			`SELECT id, org_id, name, email, company, phone, message, source, status, assigned_to, COALESCE(converted_customer_id, ''), COALESCE(converted_deal_id, ''), created_at
+			FROM inbound_leads WHERE org_id = ? ORDER BY created_at DESC`, authCtx.OrgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+		var leads []crm.InboundLead
+		for rows.Next() {
+			var l crm.InboundLead
+			var cAt string
+			if err := rows.Scan(&l.ID, &l.OrgID, &l.Name, &l.Email, &l.Company, &l.Phone, &l.Message, &l.Source, &l.Status, &l.AssignedTo, &l.ConvertedCustomerID, &l.ConvertedDealID, &cAt); err == nil {
+				l.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", cAt)
+				leads = append(leads, l)
+			}
+		}
+		writeJSON(w, leads)
+	})
+
+	mux.HandleFunc("/api/leads/convert", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		authCtx, ok := a.requireAuth(w, r, auth.PermManageOrders)
+		if !ok {
+			return
+		}
+		var req struct {
+			LeadID     string  `json:"lead_id"`
+			PipelineID string  `json:"pipeline_id"`
+			DealValue  float64 `json:"deal_value"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if a.crm == nil {
+			http.Error(w, "CRM service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		custID, dealID, err := a.crm.ConvertLead(r.Context(), authCtx.OrgID, req.LeadID, req.PipelineID, req.DealValue)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		a.BroadcastForOrg(authCtx.OrgID, "lead_converted", fmt.Sprintf("{\"lead_id\":\"%s\",\"customer_id\":\"%s\",\"deal_id\":\"%s\"}", req.LeadID, custID, dealID))
+		writeJSON(w, map[string]string{"customer_id": custID, "deal_id": dealID})
+	})
+
+	mux.HandleFunc("/api/invoices/send-email", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		authCtx, ok := a.requireAuth(w, r, auth.PermManageFinance)
+		if !ok {
+			return
+		}
+		var req struct {
+			InvoiceID string `json:"invoice_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if a.crm == nil {
+			http.Error(w, "CRM service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		baseURL := fmt.Sprintf("%s://%s", scheme, r.Host)
+		eml, err := a.crm.SendInvoiceEmail(r.Context(), authCtx.OrgID, req.InvoiceID, baseURL)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		a.BroadcastForOrg(authCtx.OrgID, "email_dispatched", fmt.Sprintf("{\"email_id\":\"%s\",\"recipient\":\"%s\"}", eml.ID, eml.RecipientEmail))
+		writeJSON(w, eml)
+	})
+
+	mux.HandleFunc("/api/emails/outbox", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		rows, err := a.store.DB().QueryContext(r.Context(),
+			`SELECT id, org_id, recipient_email, recipient_name, subject, body_html, body_text, template_name, related_entity_type, related_entity_id, status, error_message, sent_at, created_at
+			FROM email_outbox WHERE org_id = ? ORDER BY sent_at DESC LIMIT 50`, authCtx.OrgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+		var emails []crm.EmailOutboxEntry
+		for rows.Next() {
+			var e crm.EmailOutboxEntry
+			var sAt, cAt string
+			if err := rows.Scan(&e.ID, &e.OrgID, &e.RecipientEmail, &e.RecipientName, &e.Subject, &e.BodyHTML, &e.BodyText, &e.TemplateName, &e.RelatedEntityType, &e.RelatedEntityID, &e.Status, &e.ErrorMessage, &sAt, &cAt); err == nil {
+				e.SentAt, _ = time.Parse("2006-01-02 15:04:05", sAt)
+				e.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", cAt)
+				emails = append(emails, e)
+			}
+		}
+		writeJSON(w, emails)
+	})
+
+	// Client Self-Service Portal APIs (public, authenticated via secure cryptographic token)
+	mux.HandleFunc("/api/portal/invoice/", func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimPrefix(r.URL.Path, "/api/portal/invoice/")
+		if token == "" {
+			http.Error(w, "missing token", http.StatusBadRequest)
+			return
+		}
+		if a.crm == nil {
+			http.Error(w, "CRM service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		view, err := a.crm.GetPortalInvoice(r.Context(), token)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		writeJSON(w, view)
+	})
+
+	mux.HandleFunc("/api/portal/invoice/pay", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Token         string `json:"token"`
+			PaymentMethod string `json:"payment_method"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.PaymentMethod == "" {
+			req.PaymentMethod = "credit_card"
+		}
+		if a.crm == nil {
+			http.Error(w, "CRM service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if err := a.crm.PayPortalInvoice(r.Context(), req.Token, req.PaymentMethod); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		a.Broadcast("invoice_paid", fmt.Sprintf("{\"token\":\"%s\"}", req.Token))
+		writeJSON(w, map[string]string{"status": "paid"})
+	})
+
+	// Portal UI Page serving web/portal.html
+	mux.HandleFunc("/portal/invoice/", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "web/portal.html")
 	})
 
 	// FINANCIAL

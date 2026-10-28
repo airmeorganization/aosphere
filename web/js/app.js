@@ -8,6 +8,8 @@ const app = {
   activeERPSubTab: 'skus',
   activeFinanceSubTab: 'invoices',
   activeCurrency: localStorage.getItem('aosphere_currency') || 'INR',
+  activeCRMSubTab: 'kanban',
+  activePipelineId: 'pipe_std_org_default',
   drawerTab: 'stream',
   theme: 'light',
   apiKey: localStorage.getItem('aosphere_api_key') || 'ao_sk_agent_default_token_12345',
@@ -21,7 +23,12 @@ const app = {
     supplierBills: [],
     stockTransfers: [],
     batchLots: [],
+    customers: [],
     deals: [],
+    pipelines: [],
+    decayAlerts: [],
+    inboundLeads: [],
+    emailOutbox: [],
     invoices: [],
     creditNotes: [],
     accounts: [],
@@ -91,6 +98,18 @@ const app = {
 
   setFinanceSubTab(subTab) {
     this.activeFinanceSubTab = subTab;
+    this.render();
+    if (window.lucide) lucide.createIcons();
+  },
+
+  setCRMSubTab(subTab) {
+    this.activeCRMSubTab = subTab;
+    this.render();
+    if (window.lucide) lucide.createIcons();
+  },
+
+  setCRMPipeline(pipeId) {
+    this.activePipelineId = pipeId;
     this.render();
     if (window.lucide) lucide.createIcons();
   },
@@ -258,7 +277,12 @@ const app = {
       supplierBills: '/api/supplier-bills',
       stockTransfers: '/api/stock-transfers',
       batchLots: '/api/batch-lots',
+      customers: '/api/customers',
       deals: '/api/deals',
+      pipelines: '/api/pipelines',
+      decayAlerts: '/api/deals/decay-alerts',
+      inboundLeads: '/api/leads',
+      emailOutbox: '/api/emails/outbox',
       invoices: '/api/invoices',
       creditNotes: '/api/credit-notes',
       accounts: '/api/ledger/accounts',
@@ -306,7 +330,12 @@ const app = {
         supplierBills,
         stockTransfers,
         batchLots,
+        customers,
         deals,
+        pipelines,
+        decayAlerts,
+        inboundLeads,
+        emailOutbox,
         invoices,
         creditNotes,
         accounts,
@@ -330,7 +359,12 @@ const app = {
         fetch('/api/supplier-bills').then(r => r.json()).catch(() => []),
         fetch('/api/stock-transfers').then(r => r.json()).catch(() => []),
         fetch('/api/batch-lots').then(r => r.json()).catch(() => []),
+        fetch('/api/customers').then(r => r.json()).catch(() => []),
         fetch('/api/deals').then(r => r.json()).catch(() => []),
+        fetch('/api/pipelines').then(r => r.json()).catch(() => []),
+        fetch('/api/deals/decay-alerts').then(r => r.json()).catch(() => []),
+        fetch('/api/leads').then(r => r.json()).catch(() => []),
+        fetch('/api/emails/outbox').then(r => r.json()).catch(() => []),
         fetch('/api/invoices').then(r => r.json()).catch(() => []),
         fetch('/api/credit-notes').then(r => r.json()).catch(() => []),
         fetch('/api/ledger/accounts').then(r => r.json()).catch(() => []),
@@ -355,7 +389,15 @@ const app = {
       this.data.supplierBills = supplierBills;
       this.data.stockTransfers = stockTransfers;
       this.data.batchLots = batchLots;
+      this.data.customers = customers;
       this.data.deals = deals;
+      this.data.pipelines = pipelines;
+      this.data.decayAlerts = decayAlerts;
+      this.data.inboundLeads = inboundLeads;
+      this.data.emailOutbox = emailOutbox;
+      if (pipelines && pipelines.length > 0 && (!this.activePipelineId || !pipelines.find(p => p.id === this.activePipelineId))) {
+        this.activePipelineId = pipelines[0].id;
+      }
       this.data.invoices = invoices;
       this.data.creditNotes = creditNotes;
       this.data.accounts = accounts;
@@ -1022,62 +1064,341 @@ const app = {
   },
 
   // ---------------- Module 3: CRM & Deals Visual Pipeline ----------------
+  // ---------------- Module 3: CRM & Multi-Pipeline Visual Operations ----------------
   renderCRM() {
-    const stages = [
-      { id: 'lead', name: 'New Leads' },
-      { id: 'qualified', name: 'Qualified' },
-      { id: 'proposal', name: 'Proposal' },
-      { id: 'negotiation', name: 'Negotiation' },
-      { id: 'won', name: 'Won' }
-    ];
+    const subTab = this.activeCRMSubTab || 'kanban';
+
+    let actionButton = '';
+    if (subTab === 'kanban') {
+      const pipes = this.data.pipelines || [];
+      const pipeOptions = pipes.map(p => `<option value="${p.id}" ${p.id === this.activePipelineId ? 'selected' : ''}>${p.name}</option>`).join('');
+      actionButton = `
+        <div style="display:flex; align-items:center; gap:10px;">
+          <select class="form-input" style="width:230px; font-weight:700; height:38px;" onchange="app.setCRMPipeline(this.value)">
+            ${pipeOptions}
+          </select>
+          <button class="btn-press btn btn-primary" onclick="app.openNewDealModal()">
+            <i data-lucide="plus" class="w-4 h-4"></i> Add Deal
+          </button>
+        </div>
+      `;
+    } else if (subTab === 'customers') {
+      actionButton = `
+        <button class="btn-press btn btn-primary" onclick="app.openNewCustomerModal()">
+          <i data-lucide="user-plus" class="w-4 h-4"></i> Add Customer
+        </button>
+      `;
+    } else if (subTab === 'leads') {
+      actionButton = `
+        <button class="btn-press btn btn-primary" onclick="app.simulateInboundLeadModal()">
+          <i data-lucide="inbox" class="w-4 h-4"></i> Ingest Inbound Lead
+        </button>
+      `;
+    } else if (subTab === 'outbox') {
+      actionButton = `
+        <button class="btn-press btn btn-secondary" onclick="app.reloadEntity('emailOutbox'); app.showToast('Outbox refreshed');">
+          <i data-lucide="refresh-cw" class="w-4 h-4"></i> Refresh Outbox
+        </button>
+      `;
+    }
+
+    let subTabContent = '';
+    if (subTab === 'kanban') {
+      subTabContent = this.renderCRMKanban();
+    } else if (subTab === 'customers') {
+      subTabContent = this.renderCustomer360List();
+    } else if (subTab === 'leads') {
+      subTabContent = this.renderInboundLeads();
+    } else if (subTab === 'outbox') {
+      subTabContent = this.renderEmailOutbox();
+    }
 
     return `
       <div class="page-header">
         <div>
           <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-100 text-emerald-700 text-[11px] font-bold uppercase tracking-widest mb-3">
-            <i data-lucide="users" class="w-3.5 h-3.5"></i> Growth Engine
+            <i data-lucide="users" class="w-3.5 h-3.5"></i> CRM & Omnichannel Operations
           </div>
-          <h1 class="page-title">Customer & Sales Pipeline</h1>
-          <p class="page-sub">Drag and drop deals across stages, track probability and customer relationships.</p>
+          <h1 class="page-title">Customer 360 & Sales Pipelines</h1>
+          <p class="page-sub">Omnichannel customer hub, multi-pipeline deal boards, decay alerts, and lead capture.</p>
         </div>
         <div class="page-actions">
-          <button class="btn-press btn btn-primary" onclick="app.openNewDealModal()">
-            <i data-lucide="plus" class="w-4 h-4"></i> Add New Deal
-          </button>
+          ${actionButton}
         </div>
       </div>
 
+      <div class="subnav-bar">
+        <button class="subnav-pill ${subTab === 'kanban' ? 'active' : ''}" onclick="app.setCRMSubTab('kanban')">
+          <i data-lucide="kanban" class="w-4 h-4"></i> Sales Pipelines
+        </button>
+        <button class="subnav-pill ${subTab === 'customers' ? 'active' : ''}" onclick="app.setCRMSubTab('customers')">
+          <i data-lucide="user-check" class="w-4 h-4"></i> Customer 360 Hub
+        </button>
+        <button class="subnav-pill ${subTab === 'leads' ? 'active' : ''}" onclick="app.setCRMSubTab('leads')">
+          <i data-lucide="arrow-down-left" class="w-4 h-4"></i> Inbound Leads (${(this.data.inboundLeads || []).filter(l => l.status === 'new').length} New)
+        </button>
+        <button class="subnav-pill ${subTab === 'outbox' ? 'active' : ''}" onclick="app.setCRMSubTab('outbox')">
+          <i data-lucide="send" class="w-4 h-4"></i> Email Outbox
+        </button>
+      </div>
+
+      ${subTabContent}
+    `;
+  },
+
+  renderCRMKanban() {
+    const pipes = this.data.pipelines || [];
+    let activePipe = pipes.find(p => p.id === this.activePipelineId);
+    if (!activePipe && pipes.length > 0) {
+      activePipe = pipes[0];
+      this.activePipelineId = activePipe.id;
+    }
+
+    const stages = (activePipe && activePipe.stages && activePipe.stages.length > 0)
+      ? activePipe.stages
+      : [
+          { id: 'lead', name: 'New Leads', probability: 20, decay_threshold_days: 7 },
+          { id: 'qualified', name: 'Qualified', probability: 40, decay_threshold_days: 10 },
+          { id: 'proposal', name: 'Proposal', probability: 60, decay_threshold_days: 14 },
+          { id: 'negotiation', name: 'Negotiation', probability: 80, decay_threshold_days: 10 },
+          { id: 'won', name: 'Won', probability: 100, decay_threshold_days: 30 }
+        ];
+
+    const alerts = this.data.decayAlerts || [];
+    const pipeAlerts = alerts.filter(a => !activePipe || a.pipeline_id === activePipe.id || !a.pipeline_id);
+
+    let decayBanner = '';
+    if (pipeAlerts.length > 0) {
+      decayBanner = `
+        <div class="deal-decay-banner">
+          <div>
+            <div style="font-size:13.5px; font-weight:800; color:#B45309; display:flex; align-items:center; gap:8px;">
+              <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-600"></i>
+              Automated Deal Decay Warning: ${pipeAlerts.length} Stagnant Deal${pipeAlerts.length > 1 ? 's' : ''} in ${activePipe ? activePipe.name : 'Pipeline'}
+            </div>
+            <div style="font-size:12px; color:#92400E; margin-top:3px;">
+              Deals that have stayed in a stage beyond configured policy decay thresholds:
+            </div>
+          </div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            ${pipeAlerts.map(a => `
+              <span class="decay-badge" style="cursor:pointer;" onclick="app.openCustomer360Modal('${a.customer_id}')">
+                ⚠️ <strong>${a.deal_title}</strong>: ${a.days_in_stage}d in ${a.stage_name} (Max ${a.decay_threshold_days}d)
+              </span>
+            `).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    return `
+      ${decayBanner}
       <div class="kanban-board">
         ${stages.map(stage => {
-          const deals = this.data.deals.filter(d => d.stage === stage.id);
-          const colTotal = deals.reduce((sum, d) => sum + d.value, 0);
+          const deals = (this.data.deals || []).filter(d => {
+            const matchesPipe = !d.pipeline_id || !activePipe || d.pipeline_id === activePipe.id;
+            return matchesPipe && d.stage === stage.id;
+          });
+          const colTotal = deals.reduce((sum, d) => sum + (parseFloat(d.value) || 0), 0);
           return `
             <div class="kanban-column" data-stage="${stage.id}">
               <div class="kanban-col-header">
                 <div>
                   <span class="col-title">${stage.name}</span>
-                  <div style="font-size:12px; color:var(--text-muted); font-weight:600; margin-top:2px;">$${colTotal.toLocaleString()}</div>
+                  <div style="font-size:11.5px; color:var(--text-muted); font-weight:700; margin-top:2px;">
+                    ${this.formatMoney(colTotal)} • ${stage.probability}% prob
+                  </div>
+                  <div style="font-size:10px; color:#94A3B8; font-weight:600;">Decay: ${stage.decay_threshold_days}d limit</div>
                 </div>
                 <span class="col-badge">${deals.length}</span>
               </div>
               <div class="kanban-cards-area" id="col-${stage.id}">
-                ${deals.map(deal => `
-                  <div class="deal-card" draggable="true" data-deal-id="${deal.id}">
-                    <div class="deal-title">${deal.title}</div>
-                    <div class="deal-customer">${deal.customer_name || 'Client'} • ${deal.customer_company || ''}</div>
-                    <div class="deal-footer">
-                      <span class="deal-value">$${deal.value.toLocaleString()}</span>
-                      <span style="font-size:11px; font-weight:700; color:#64748B; background:var(--bg-tertiary); padding:2px 6px; border-radius:4px;">${deal.probability}%</span>
+                ${deals.map(deal => {
+                  const alert = alerts.find(a => a.deal_id === deal.id);
+                  return `
+                    <div class="deal-card" draggable="true" data-deal-id="${deal.id}">
+                      <div class="deal-title">${deal.title}</div>
+                      <div class="deal-customer" style="cursor:pointer; color:var(--brand-blue);" onclick="event.stopPropagation(); app.openCustomer360Modal('${deal.customer_id}')">
+                        <i data-lucide="building" class="w-3 h-3 inline"></i> ${deal.customer_name || 'Client'} • ${deal.customer_company || ''}
+                      </div>
+                      ${alert ? `
+                        <div class="decay-badge">
+                          <i data-lucide="clock" class="w-3 h-3"></i> Stagnant (${alert.days_in_stage}d > ${alert.decay_threshold_days}d limit)
+                        </div>
+                      ` : ''}
+                      <div class="deal-footer" style="margin-top:8px;">
+                        <span class="deal-value">${this.formatMoney(deal.value)}</span>
+                        <span style="font-size:11px; font-weight:700; color:#64748B; background:var(--bg-tertiary); padding:2px 6px; border-radius:4px;">${deal.probability || stage.probability}%</span>
+                      </div>
+                      <div style="display:flex; gap:6px; margin-top:8px;">
+                        <button class="btn-press btn btn-secondary btn-sm" style="flex:1; font-size:11px; height:28px;" onclick="event.stopPropagation(); app.openCustomer360Modal('${deal.customer_id}')">
+                          <i data-lucide="user" class="w-3.5 h-3.5 text-blue-500"></i> 360 Hub
+                        </button>
+                        <button class="btn-press btn btn-secondary btn-sm" style="flex:1; font-size:11px; height:28px;" onclick="event.stopPropagation(); app.convertDealToInvoice('${deal.id}')">
+                          <i data-lucide="receipt" class="w-3.5 h-3.5 text-emerald-500"></i> Invoice
+                        </button>
+                      </div>
                     </div>
-                    <button class="btn-press btn btn-secondary btn-sm" style="margin-top:10px; width:100%; font-size:11px; height:28px;" onclick="event.stopPropagation(); app.convertDealToInvoice('${deal.id}')">
-                      <i data-lucide="receipt" class="w-3.5 h-3.5 text-blue-500"></i> Convert to Invoice
-                    </button>
-                  </div>
-                `).join('')}
+                  `;
+                }).join('')}
               </div>
             </div>
           `;
         }).join('')}
+      </div>
+    `;
+  },
+
+  renderCustomer360List() {
+    const customers = this.data.customers || [];
+    return `
+      <div class="table-container mockup-item">
+        <div class="table-filter-bar">
+          <input type="text" class="table-filter-input" placeholder="Search customers by name, company, email..." oninput="app.filterTable('customers-table', this.value)">
+          <span class="text-[12px] text-slate-400 font-medium">Active Accounts: <strong>${customers.length}</strong></span>
+        </div>
+        <table class="data-table" id="customers-table">
+          <thead>
+            <tr>
+              <th>Customer Name</th>
+              <th>Company</th>
+              <th>Contact Info</th>
+              <th>Status</th>
+              <th>Lifetime Value (${this.activeCurrency})</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${customers.map(c => `
+              <tr>
+                <td><strong>${c.name}</strong></td>
+                <td><span class="text-slate-600 font-medium">${c.company || '—'}</span></td>
+                <td>
+                  <div style="font-size:12px; color:var(--text-muted);">${c.email || '—'}</div>
+                  <div style="font-size:11px; color:#94A3B8;">${c.phone || ''}</div>
+                </td>
+                <td>
+                  <span class="badge" style="background:#ECFDF5; color:#047857; border:1px solid #A7F3D0;">
+                    ${(c.status || 'ACTIVE').toUpperCase()}
+                  </span>
+                </td>
+                <td><strong style="color:#059669; font-size:14px;">${this.formatMoney(c.lifetime_value || 0)}</strong></td>
+                <td>
+                  <button class="btn btn-secondary btn-sm" onclick="app.openCustomer360Modal('${c.id}')">
+                    <i data-lucide="layout-dashboard" class="w-3.5 h-3.5 text-blue-500"></i> Open 360 View
+                  </button>
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  },
+
+  renderInboundLeads() {
+    const leads = this.data.inboundLeads || [];
+    return `
+      <div class="table-container mockup-item">
+        <div class="table-filter-bar">
+          <input type="text" class="table-filter-input" placeholder="Search inbound leads..." oninput="app.filterTable('leads-table', this.value)">
+          <div style="display:flex; align-items:center; gap:12px;">
+            <span class="text-[12px] text-slate-400 font-medium">Public Webhook: <code class="mono-code">/api/v1/leads/capture</code></span>
+            <span class="text-[12px] text-slate-400 font-medium">Total Inbound: <strong>${leads.length}</strong></span>
+          </div>
+        </div>
+        <table class="data-table" id="leads-table">
+          <thead>
+            <tr>
+              <th>Lead Name</th>
+              <th>Company</th>
+              <th>Source</th>
+              <th>Contact</th>
+              <th>Est. Value</th>
+              <th>Captured At</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${leads.map(lead => `
+              <tr>
+                <td><strong>${lead.name}</strong></td>
+                <td><span class="text-slate-600 font-medium">${lead.company || '—'}</span></td>
+                <td><span class="mono-code" style="font-size:11px;">${lead.source || 'website'}</span></td>
+                <td>
+                  <div style="font-size:12px; color:var(--text-muted);">${lead.email || '—'}</div>
+                  <div style="font-size:11px; color:#94A3B8;">${lead.phone || ''}</div>
+                </td>
+                <td><strong>${this.formatMoney(lead.estimated_value || 0)}</strong></td>
+                <td class="text-slate-500 text-[12px]">${(lead.created_at || '').slice(0, 19).replace('T', ' ')}</td>
+                <td>
+                  <span class="badge" style="background:${lead.status === 'converted' ? '#ECFDF5' : '#EFF6FF'}; color:${lead.status === 'converted' ? '#047857' : '#1D4ED8'}; border:1px solid ${lead.status === 'converted' ? '#A7F3D0' : '#BFDBFE'};">
+                    ${(lead.status || 'NEW').toUpperCase()}
+                  </span>
+                </td>
+                <td>
+                  ${lead.status !== 'converted' ? `
+                    <button class="btn btn-primary btn-sm" onclick="app.convertLeadAction('${lead.id}')">
+                      <i data-lucide="user-check" class="w-3.5 h-3.5"></i> 1-Click Convert
+                    </button>
+                  ` : `
+                    <span class="text-emerald-600 font-bold text-[12px]">
+                      <i data-lucide="check" class="w-3.5 h-3.5 inline"></i> Converted
+                    </span>
+                  `}
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  },
+
+  renderEmailOutbox() {
+    const emails = this.data.emailOutbox || [];
+    return `
+      <div class="table-container mockup-item">
+        <div class="table-filter-bar">
+          <input type="text" class="table-filter-input" placeholder="Search email logs..." oninput="app.filterTable('outbox-table', this.value)">
+          <span class="text-[12px] text-slate-400 font-medium">Transactional Emails Dispatched: <strong>${emails.length}</strong></span>
+        </div>
+        <table class="data-table" id="outbox-table">
+          <thead>
+            <tr>
+              <th>Dispatched At</th>
+              <th>Recipient</th>
+              <th>Subject</th>
+              <th>Status</th>
+              <th>Client Payment Portal Link</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${emails.map(e => `
+              <tr>
+                <td class="text-slate-500 text-[12px]">${(e.sent_at || e.created_at || '').slice(0, 19).replace('T', ' ')}</td>
+                <td>
+                  <strong>${e.recipient_name || 'Client'}</strong>
+                  <div style="font-size:11.5px; color:var(--text-muted);">${e.recipient_email}</div>
+                </td>
+                <td class="font-medium">${e.subject}</td>
+                <td>
+                  <span class="badge" style="background:#ECFDF5; color:#047857; border:1px solid #A7F3D0;">
+                    ${(e.status || 'DELIVERED').toUpperCase()}
+                  </span>
+                </td>
+                <td>
+                  ${e.portal_url ? `
+                    <a href="${e.portal_url}" target="_blank" class="btn btn-secondary btn-sm" style="display:inline-flex; align-items:center; gap:4px;">
+                      <i data-lucide="external-link" class="w-3.5 h-3.5 text-blue-500"></i> Open Client Portal
+                    </a>
+                  ` : '—'}
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
       </div>
     `;
   },
@@ -1113,9 +1434,10 @@ const app = {
           await fetch('/api/deals/stage', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ deal_id: dealId, stage: targetStage })
+            body: JSON.stringify({ deal_id: dealId, stage: targetStage, pipeline_id: app.activePipelineId })
           });
           await app.reloadEntity('deals');
+          await app.reloadEntity('decayAlerts');
           await app.reloadEntity('summary');
           await app.reloadEntity('auditLogs');
         }
@@ -1239,9 +1561,14 @@ const app = {
                     </span>
                   </td>
                   <td>
-                    <a href="/api/invoices/pdf?id=${inv.id}&currency=${app.activeCurrency}" target="_blank" class="btn-pdf" title="Download Vector PDF Invoice">
-                      <i data-lucide="file-down" class="w-3.5 h-3.5"></i> PDF
-                    </a>
+                    <div style="display:flex; gap:6px; align-items:center;">
+                      <a href="/api/invoices/pdf?id=${inv.id}&currency=${app.activeCurrency}" target="_blank" class="btn-pdf" title="Download Vector PDF Invoice">
+                        <i data-lucide="file-down" class="w-3.5 h-3.5"></i> PDF
+                      </a>
+                      <button class="btn btn-secondary btn-sm" onclick="app.sendInvoiceEmailAction('${inv.id}')" title="Dispatch Client Self-Service Portal Email">
+                        <i data-lucide="mail" class="w-3.5 h-3.5 text-blue-500"></i> Email Link
+                      </button>
+                    </div>
                   </td>
                 </tr>
               `).join('')}
@@ -2279,31 +2606,68 @@ const app = {
   openNewDealModal() {
     const modal = document.getElementById('action-modal');
     const content = document.getElementById('modal-content');
-    modal.querySelector('.modal-window').style.maxWidth = '540px';
+    modal.querySelector('.modal-window').style.maxWidth = '560px';
+
+    const custOptions = (this.data.customers && this.data.customers.length > 0)
+      ? this.data.customers.map(c => `<option value="${c.id}">${c.name} (${c.company || 'Client'})</option>`).join('')
+      : `
+        <option value="cust_01">Acme Corporation</option>
+        <option value="cust_02">Starlight Systems</option>
+        <option value="cust_03">Apex Logistics</option>
+      `;
+
+    const pipes = this.data.pipelines || [];
+    const pipeOptions = pipes.map(p => `<option value="${p.id}" ${p.id === this.activePipelineId ? 'selected' : ''}>${p.name}</option>`).join('');
+
+    const activePipe = pipes.find(p => p.id === this.activePipelineId) || pipes[0];
+    const stages = (activePipe && activePipe.stages) ? activePipe.stages : [
+      { id: 'lead', name: 'New Leads', probability: 20 },
+      { id: 'qualified', name: 'Qualified', probability: 40 },
+      { id: 'proposal', name: 'Proposal', probability: 60 },
+      { id: 'negotiation', name: 'Negotiation', probability: 80 },
+      { id: 'won', name: 'Won', probability: 100 }
+    ];
+    const stageOptions = stages.map(s => `<option value="${s.id}">${s.name} (${s.probability}%)</option>`).join('');
 
     content.innerHTML = `
-      <h3 style="font-size:18px; font-weight:800; margin-bottom:10px; color:var(--text-main);">Create New Deal</h3>
+      <h3 style="font-size:18px; font-weight:800; margin-bottom:10px; color:var(--text-main); display:flex; align-items:center; gap:8px;">
+        <i data-lucide="plus-circle" class="w-5 h-5 text-brand-blue"></i> Create Sales Deal
+      </h3>
       <div style="display:flex; flex-direction:column; gap:12px;">
-        <label for="deal-title" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Deal Title</label>
-        <input type="text" id="deal-title" class="form-input" placeholder="e.g. Enterprise Hardware License">
-        <label for="deal-customer" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Customer</label>
-        <select id="deal-customer" class="form-input">
-          <option value="cust_01">Acme Corporation</option>
-          <option value="cust_02">Starlight Systems</option>
-          <option value="cust_03">Apex Logistics</option>
-        </select>
-        <label for="deal-value" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Deal Value ($)</label>
-        <input type="number" id="deal-value" class="form-input" value="25000">
-        <label for="deal-stage" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Stage</label>
-        <select id="deal-stage" class="form-input">
-          <option value="lead">New Leads</option>
-          <option value="qualified">Qualified</option>
-          <option value="proposal">Proposal</option>
-          <option value="negotiation">Negotiation</option>
-          <option value="won">Won</option>
-        </select>
-        <label for="deal-date" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Close Date</label>
-        <input type="date" id="deal-date" class="form-input" value="2026-11-30">
+        <div>
+          <label for="deal-title" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Deal Title</label>
+          <input type="text" id="deal-title" class="form-input" placeholder="e.g. Enterprise Cloud ERP Deployment" style="margin-top:4px;">
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="deal-pipeline" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Sales Pipeline</label>
+            <select id="deal-pipeline" class="form-input" style="margin-top:4px;" onchange="app.onDealPipelineChange(this.value)">
+              ${pipeOptions}
+            </select>
+          </div>
+          <div>
+            <label for="deal-stage" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Initial Stage</label>
+            <select id="deal-stage" class="form-input" style="margin-top:4px;">
+              ${stageOptions}
+            </select>
+          </div>
+        </div>
+        <div>
+          <label for="deal-customer" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Customer Account</label>
+          <select id="deal-customer" class="form-input" style="margin-top:4px;">
+            ${custOptions}
+          </select>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="deal-value" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Deal Value ($ USD)</label>
+            <input type="number" id="deal-value" class="form-input" value="25000" style="margin-top:4px;">
+          </div>
+          <div>
+            <label for="deal-date" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Target Close Date</label>
+            <input type="date" id="deal-date" class="form-input" value="2026-11-30" style="margin-top:4px;">
+          </div>
+        </div>
         <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
           <button class="btn-press btn btn-secondary" onclick="app.closeModal()">Cancel</button>
           <button class="btn-press btn btn-primary" onclick="app.submitNewDeal()">Create Deal</button>
@@ -2311,25 +2675,43 @@ const app = {
       </div>
     `;
     modal.classList.add('active');
+    if (window.lucide) lucide.createIcons();
+  },
+
+  onDealPipelineChange(pipeId) {
+    const pipe = (this.data.pipelines || []).find(p => p.id === pipeId);
+    const stageSelect = document.getElementById('deal-stage');
+    if (!stageSelect || !pipe || !pipe.stages) return;
+    stageSelect.innerHTML = pipe.stages.map(s => `<option value="${s.id}">${s.name} (${s.probability}%)</option>`).join('');
   },
 
   async submitNewDeal() {
-    const title = document.getElementById('deal-title').value;
+    const title = document.getElementById('deal-title').value.trim();
+    if (!title) {
+      this.showToast('Please enter a deal title');
+      return;
+    }
+    const pipelineId = document.getElementById('deal-pipeline')?.value || this.activePipelineId;
+    const stage = document.getElementById('deal-stage')?.value || 'lead';
     const customerId = document.getElementById('deal-customer')?.value || 'cust_01';
-    const value = parseFloat(document.getElementById('deal-value').value);
-    const stage = document.getElementById('deal-stage').value;
+    const value = parseFloat(document.getElementById('deal-value').value) || 0;
     const closeDate = document.getElementById('deal-date').value;
 
-    await fetch('/api/deals', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title, customer_id: customerId, value, stage, expected_close_date: closeDate })
-    });
-    this.showToast('Deal created successfully');
-    this.closeModal();
-    await this.reloadEntity('deals');
-    await this.reloadEntity('summary');
-    await this.reloadEntity('auditLogs');
+    try {
+      await fetch('/api/deals', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, customer_id: customerId, value, stage, pipeline_id: pipelineId, expected_close_date: closeDate })
+      });
+      this.showToast('Sales deal successfully created');
+      this.closeModal();
+      await this.reloadEntity('deals');
+      await this.reloadEntity('decayAlerts');
+      await this.reloadEntity('summary');
+      await this.reloadEntity('auditLogs');
+    } catch (err) {
+      this.showToast('Failed to create deal: ' + err.message);
+    }
   },
 
   async convertDealToInvoice(dealId) {
@@ -2353,6 +2735,403 @@ const app = {
       await this.reloadEntity('auditLogs');
     } catch (e) {
       this.showToast('Error: ' + e.message);
+    }
+  },
+
+  async openCustomer360Modal(customerId) {
+    if (!customerId) return;
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    modal.querySelector('.modal-window').style.maxWidth = '880px';
+
+    content.innerHTML = `
+      <div style="padding:40px; text-align:center;">
+        <i data-lucide="loader-2" class="w-8 h-8 animate-spin text-blue-500" style="margin:0 auto 12px;"></i>
+        <div style="font-weight:700; color:var(--text-muted);">Loading Omnichannel Customer 360 Profile...</div>
+      </div>
+    `;
+    modal.classList.add('active');
+    if (window.lucide) lucide.createIcons();
+
+    try {
+      const res = await fetch(`/api/customers/360?id=${encodeURIComponent(customerId)}`);
+      if (!res.ok) throw new Error('Customer profile not found');
+      const data = await res.json();
+      const c = data.customer || {};
+      const kpis = data.kpis || { lifetime_value: 0, total_revenue: 0, unpaid_balance: 0, open_pipeline_value: 0 };
+      const acts = data.activities || [];
+      const invs = data.invoices || [];
+      const deals = data.deals || [];
+
+      content.innerHTML = `
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:16px;">
+          <div>
+            <div class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-blue-100 text-blue-700 text-[10px] font-bold uppercase tracking-wider mb-2">
+              <i data-lucide="user-check" class="w-3 h-3"></i> Customer 360 Profile
+            </div>
+            <h2 style="font-size:22px; font-weight:800; color:var(--text-main); margin:0;">${c.name}</h2>
+            <div style="font-size:13px; color:var(--text-muted); margin-top:2px;">
+              <strong>${c.company || 'Individual Client'}</strong> • ${c.email || 'No email registered'} • ${c.phone || 'No phone'}
+            </div>
+          </div>
+          <button class="btn btn-secondary btn-sm" onclick="app.closeModal()">
+            <i data-lucide="x" class="w-4 h-4"></i> Close
+          </button>
+        </div>
+
+        <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:12px; margin-bottom:24px;">
+          <div class="kpi-mini-card">
+            <div class="kpi-mini-label">Lifetime Value</div>
+            <div class="kpi-mini-value" style="color:#2563EB;">${this.formatMoney(kpis.lifetime_value)}</div>
+          </div>
+          <div class="kpi-mini-card">
+            <div class="kpi-mini-label">Paid Revenue</div>
+            <div class="kpi-mini-value" style="color:#059669;">${this.formatMoney(kpis.total_revenue)}</div>
+          </div>
+          <div class="kpi-mini-card">
+            <div class="kpi-mini-label">Outstanding AR</div>
+            <div class="kpi-mini-value" style="color:${kpis.unpaid_balance > 0 ? '#D97706' : '#10B981'};">${this.formatMoney(kpis.unpaid_balance)}</div>
+          </div>
+          <div class="kpi-mini-card">
+            <div class="kpi-mini-label">Open Pipeline</div>
+            <div class="kpi-mini-value" style="color:#7C3AED;">${this.formatMoney(kpis.open_pipeline_value)}</div>
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1.2fr 0.8fr; gap:24px; max-height:480px; overflow-y:auto; padding-right:6px;">
+          <!-- Left Column: Activity Feed & Logger -->
+          <div>
+            <div style="font-size:13px; font-weight:800; color:var(--text-main); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:12px; display:flex; align-items:center; gap:6px;">
+              <i data-lucide="activity" class="w-4 h-4 text-blue-600"></i> Omnichannel Activity Timeline (${acts.length})
+            </div>
+
+            <!-- Quick Activity Form -->
+            <div style="background:var(--bg-tertiary); border:1px solid var(--border-subtle); border-radius:12px; padding:12px; margin-bottom:20px;">
+              <div style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase; margin-bottom:8px;">Log Touchpoint / Interaction</div>
+              <div style="display:flex; gap:8px; margin-bottom:8px;">
+                <select id="c360-act-type" class="form-input" style="width:110px; height:32px; font-size:11px;">
+                  <option value="note">Note</option>
+                  <option value="call">Phone Call</option>
+                  <option value="meeting">Meeting</option>
+                  <option value="email">Email</option>
+                </select>
+                <input type="text" id="c360-act-summary" class="form-input" placeholder="Brief summary (e.g. Q4 pricing review call)" style="flex:1; height:32px; font-size:12px;">
+              </div>
+              <textarea id="c360-act-content" class="form-input" placeholder="Meeting minutes, notes, action items..." style="height:55px; font-size:11.5px; margin-bottom:8px;"></textarea>
+              <div style="text-align:right;">
+                <button class="btn btn-primary btn-sm" onclick="app.submitCustomerActivity('${customerId}')">
+                  <i data-lucide="send" class="w-3.5 h-3.5"></i> Save Activity
+                </button>
+              </div>
+            </div>
+
+            <!-- Activity Stream -->
+            <div class="timeline-stream">
+              ${acts.length === 0 ? `
+                <div style="font-size:12px; color:var(--text-muted); padding:10px 0;">No activities logged yet.</div>
+              ` : acts.map(a => {
+                let icon = 'message-square';
+                if (a.activity_type === 'call') icon = 'phone';
+                else if (a.activity_type === 'meeting') icon = 'calendar';
+                else if (a.activity_type === 'stage_change') icon = 'git-commit';
+                else if (a.activity_type === 'invoice_paid' || a.activity_type === 'invoice_sent') icon = 'receipt';
+                else if (a.activity_type === 'email') icon = 'mail';
+                return `
+                  <div class="timeline-item">
+                    <div class="timeline-dot"><i data-lucide="${icon}" class="w-3 h-3"></i></div>
+                    <div class="timeline-content">
+                      <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:3px;">
+                        <span style="font-weight:700; font-size:12.5px; color:var(--text-main);">${a.summary}</span>
+                        <span style="font-size:10.5px; color:#94A3B8;">${(a.created_at || '').slice(0, 16).replace('T', ' ')}</span>
+                      </div>
+                      ${a.content ? `<div style="font-size:11.5px; color:var(--text-muted); margin-bottom:4px;">${a.content}</div>` : ''}
+                      <div style="font-size:10.5px; color:#94A3B8;">By: <strong>${a.author_name || 'System'}</strong></div>
+                    </div>
+                  </div>
+                `;
+              }).join('')}
+            </div>
+          </div>
+
+          <!-- Right Column: Deals & Invoices -->
+          <div>
+            <div style="font-size:13px; font-weight:800; color:var(--text-main); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:12px; display:flex; align-items:center; gap:6px;">
+              <i data-lucide="briefcase" class="w-4 h-4 text-purple-600"></i> Deals (${deals.length})
+            </div>
+            <div style="display:flex; flex-direction:column; gap:8px; margin-bottom:24px;">
+              ${deals.length === 0 ? `
+                <div style="font-size:12px; color:var(--text-muted);">No deals for this customer.</div>
+              ` : deals.map(d => `
+                <div style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:10px; padding:10px 12px; display:flex; justify-content:space-between; align-items:center;">
+                  <div>
+                    <div style="font-weight:700; font-size:12px; color:var(--text-main);">${d.title}</div>
+                    <div style="font-size:11px; color:#94A3B8; text-transform:uppercase;">Stage: ${d.stage} • ${d.probability || 60}%</div>
+                  </div>
+                  <div style="text-align:right;">
+                    <div style="font-weight:800; font-size:12.5px; color:#059669;">${this.formatMoney(d.value)}</div>
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+
+            <div style="font-size:13px; font-weight:800; color:var(--text-main); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:12px; display:flex; align-items:center; gap:6px;">
+              <i data-lucide="receipt" class="w-4 h-4 text-emerald-600"></i> Invoices (${invs.length})
+            </div>
+            <div style="display:flex; flex-direction:column; gap:8px;">
+              ${invs.length === 0 ? `
+                <div style="font-size:12px; color:var(--text-muted);">No invoices issued yet.</div>
+              ` : invs.map(inv => `
+                <div style="background:var(--bg-card); border:1px solid var(--border-subtle); border-radius:10px; padding:10px 12px; display:flex; justify-content:space-between; align-items:center;">
+                  <div>
+                    <div style="font-weight:700; font-size:12px; color:var(--text-main);">${inv.invoice_number}</div>
+                    <div style="font-size:10.5px; color:#94A3B8;">Due: ${inv.due_date}</div>
+                    <span class="badge" style="font-size:9.5px; padding:1px 6px; margin-top:2px; background:${inv.status === 'paid' ? '#ECFDF5' : '#FEF3C7'}; color:${inv.status === 'paid' ? '#047857' : '#B45309'}; border:1px solid ${inv.status === 'paid' ? '#A7F3D0' : '#FDE68A'};">
+                      ${inv.status.toUpperCase()}
+                    </span>
+                  </div>
+                  <div style="text-align:right;">
+                    <div style="font-weight:800; font-size:12.5px; color:var(--text-main);">${this.formatMoney(inv.total_amount)}</div>
+                    <button class="btn btn-secondary btn-sm" style="font-size:10px; height:24px; padding:0 8px; margin-top:4px;" onclick="app.sendInvoiceEmailAction('${inv.id}')">
+                      <i data-lucide="mail" class="w-3 h-3 text-blue-500"></i> Portal Link
+                    </button>
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        </div>
+      `;
+      if (window.lucide) lucide.createIcons();
+    } catch (err) {
+      content.innerHTML = `
+        <div style="padding:24px; text-align:center;">
+          <div style="color:#DC2626; font-weight:700; margin-bottom:8px;">Failed to load Customer 360 Profile</div>
+          <div style="font-size:12px; color:var(--text-muted); margin-bottom:16px;">${err.message}</div>
+          <button class="btn btn-secondary" onclick="app.closeModal()">Close</button>
+        </div>
+      `;
+      if (window.lucide) lucide.createIcons();
+    }
+  },
+
+  async submitCustomerActivity(customerId) {
+    const actType = document.getElementById('c360-act-type')?.value || 'note';
+    const summary = document.getElementById('c360-act-summary')?.value.trim();
+    const content = document.getElementById('c360-act-content')?.value.trim();
+
+    if (!summary) {
+      this.showToast('Please enter an activity summary');
+      return;
+    }
+
+    try {
+      await fetch('/api/customers/activities', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          customer_id: customerId,
+          activity_type: actType,
+          summary,
+          content,
+          author_name: 'Operations Team'
+        })
+      });
+      this.showToast('Activity logged to Customer 360');
+      await this.openCustomer360Modal(customerId);
+    } catch (err) {
+      this.showToast('Failed to log activity: ' + err.message);
+    }
+  },
+
+  openNewCustomerModal() {
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    modal.querySelector('.modal-window').style.maxWidth = '500px';
+
+    content.innerHTML = `
+      <h3 style="font-size:18px; font-weight:800; margin-bottom:10px; color:var(--text-main); display:flex; align-items:center; gap:8px;">
+        <i data-lucide="user-plus" class="w-5 h-5 text-brand-blue"></i> Add Customer Account
+      </h3>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <div>
+          <label style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Customer / Contact Name</label>
+          <input type="text" id="cust-name" class="form-input" placeholder="e.g. Maya Chen" style="margin-top:4px;">
+        </div>
+        <div>
+          <label style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Company / Organization</label>
+          <input type="text" id="cust-company" class="form-input" placeholder="e.g. Meridian Innovations" style="margin-top:4px;">
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Email Address</label>
+            <input type="email" id="cust-email" class="form-input" placeholder="e.g. m.chen@meridian.io" style="margin-top:4px;">
+          </div>
+          <div>
+            <label style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Phone Number</label>
+            <input type="text" id="cust-phone" class="form-input" placeholder="e.g. +1 555-0199" style="margin-top:4px;">
+          </div>
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
+          <button class="btn-press btn btn-secondary" onclick="app.closeModal()">Cancel</button>
+          <button class="btn-press btn btn-primary" onclick="app.submitNewCustomer()">Save Customer</button>
+        </div>
+      </div>
+    `;
+    modal.classList.add('active');
+    if (window.lucide) lucide.createIcons();
+  },
+
+  async submitNewCustomer() {
+    const name = document.getElementById('cust-name')?.value.trim();
+    if (!name) {
+      this.showToast('Please enter customer name');
+      return;
+    }
+    const company = document.getElementById('cust-company')?.value.trim();
+    const email = document.getElementById('cust-email')?.value.trim();
+    const phone = document.getElementById('cust-phone')?.value.trim();
+
+    try {
+      await fetch('/api/customers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, company, email, phone })
+      });
+      this.showToast(`Customer account '${name}' created`);
+      this.closeModal();
+      await this.reloadEntity('customers');
+      await this.reloadEntity('auditLogs');
+    } catch (err) {
+      this.showToast('Failed to create customer: ' + err.message);
+    }
+  },
+
+  simulateInboundLeadModal() {
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    modal.querySelector('.modal-window').style.maxWidth = '520px';
+
+    content.innerHTML = `
+      <h3 style="font-size:18px; font-weight:800; margin-bottom:8px; color:var(--text-main); display:flex; align-items:center; gap:8px;">
+        <i data-lucide="zap" class="w-5 h-5 text-amber-500"></i> Ingest Inbound Lead Webhook
+      </h3>
+      <p style="font-size:12px; color:var(--text-muted); margin-bottom:14px;">
+        Simulates an incoming lead payload sent to the public ingestion endpoint <code class="mono-code">/api/v1/leads/capture</code>.
+      </p>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Contact Name</label>
+            <input type="text" id="lead-name" class="form-input" value="Alex Rivera" style="margin-top:4px;">
+          </div>
+          <div>
+            <label style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Company</label>
+            <input type="text" id="lead-company" class="form-input" value="Nexus Hypercloud" style="margin-top:4px;">
+          </div>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Email</label>
+            <input type="email" id="lead-email" class="form-input" value="alex@nexushyper.io" style="margin-top:4px;">
+          </div>
+          <div>
+            <label style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Lead Source</label>
+            <select id="lead-source" class="form-input" style="margin-top:4px;">
+              <option value="website_demo">Website Demo Form</option>
+              <option value="api_partner">API Partner Referral</option>
+              <option value="event_summit">Global Tech Summit</option>
+              <option value="inbound_chat">Inbound Chat Widget</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <label style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Estimated Contract Value ($ USD)</label>
+          <input type="number" id="lead-value" class="form-input" value="35000" style="margin-top:4px;">
+        </div>
+        <div>
+          <label style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Inquiry Notes</label>
+          <textarea id="lead-notes" class="form-input" style="height:55px; font-size:12px; margin-top:4px;">Requesting enterprise multi-region deployment and SLA quote.</textarea>
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
+          <button class="btn-press btn btn-secondary" onclick="app.closeModal()">Cancel</button>
+          <button class="btn-press btn btn-primary" onclick="app.submitInboundLead()">Trigger Webhook Ingest</button>
+        </div>
+      </div>
+    `;
+    modal.classList.add('active');
+    if (window.lucide) lucide.createIcons();
+  },
+
+  async submitInboundLead() {
+    const name = document.getElementById('lead-name')?.value.trim();
+    const company = document.getElementById('lead-company')?.value.trim();
+    const email = document.getElementById('lead-email')?.value.trim();
+    const source = document.getElementById('lead-source')?.value || 'website_demo';
+    const estimated_value = parseFloat(document.getElementById('lead-value')?.value) || 0;
+    const notes = document.getElementById('lead-notes')?.value.trim();
+
+    try {
+      const res = await fetch('/api/v1/leads/capture', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, company, email, source, estimated_value, notes })
+      });
+      if (!res.ok) throw new Error('Lead capture failed');
+      this.showToast('Inbound lead captured via public webhook');
+      this.closeModal();
+      await this.reloadEntity('inboundLeads');
+      await this.reloadEntity('auditLogs');
+    } catch (err) {
+      this.showToast('Error: ' + err.message);
+    }
+  },
+
+  async convertLeadAction(leadId) {
+    if (!confirm('Convert this inbound lead into an active Customer account and qualified Sales Deal?')) return;
+    try {
+      const res = await fetch('/api/leads/convert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lead_id: leadId })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Conversion failed' }));
+        throw new Error(err.error || 'Conversion failed');
+      }
+      this.showToast('Lead successfully converted to Customer and Deal!');
+      await this.reloadEntity('inboundLeads');
+      await this.reloadEntity('customers');
+      await this.reloadEntity('deals');
+      await this.reloadEntity('auditLogs');
+    } catch (err) {
+      this.showToast('Error: ' + err.message);
+    }
+  },
+
+  async sendInvoiceEmailAction(invoiceId) {
+    try {
+      this.showToast('Dispatching invoice email with client self-service portal link...');
+      const res = await fetch('/api/invoices/send-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invoice_id: invoiceId })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Email dispatch failed' }));
+        throw new Error(err.error || 'Email dispatch failed');
+      }
+      const data = await res.json();
+      await this.reloadEntity('emailOutbox');
+      await this.reloadEntity('auditLogs');
+
+      if (data.portal_url) {
+        window.open(data.portal_url, '_blank');
+        this.showToast('Transactional email sent & portal link opened in new tab');
+      } else {
+        this.showToast('Invoice transactional email successfully dispatched');
+      }
+    } catch (err) {
+      this.showToast('Error: ' + err.message);
     }
   },
 
