@@ -531,12 +531,12 @@ const app = {
       <div class="stats-grid">
         <div class="stat-card mockup-item">
           <div class="flex justify-between items-start mb-3">
-            <div class="stat-title">Cash Revenue</div>
+            <div class="stat-title">Cash Revenue (${this.activeCurrency})</div>
             <div class="w-10 h-10 bg-blue-50 rounded-xl flex items-center justify-center">
               <i data-lucide="trending-up" class="w-5 h-5 text-brand-blue"></i>
             </div>
           </div>
-          <div class="stat-value">$${s.total_revenue.toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
+          <div class="stat-value">${this.formatMoney(s.total_revenue)}</div>
           <div class="stat-trend trend-up">
             <i data-lucide="check" class="w-3.5 h-3.5 inline"></i> Paid Invoices (${s.paid_count || 0})
           </div>
@@ -544,25 +544,25 @@ const app = {
 
         <div class="stat-card mockup-item">
           <div class="flex justify-between items-start mb-3">
-            <div class="stat-title">Net Profit (P&L)</div>
+            <div class="stat-title">Net Profit (P&L) (${this.activeCurrency})</div>
             <div class="w-10 h-10 bg-emerald-50 rounded-xl flex items-center justify-center">
               <i data-lucide="shopping-cart" class="w-5 h-5 text-emerald-500"></i>
             </div>
           </div>
-          <div class="stat-value" style="color: #059669;">$${s.net_profit.toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
+          <div class="stat-value" style="color: #059669;">${this.formatMoney(s.net_profit)}</div>
           <div class="stat-trend trend-up">
-            Expenses: $${s.total_expense.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+            Expenses: ${this.formatMoney(s.total_expense)}
           </div>
         </div>
 
         <div class="stat-card mockup-item">
           <div class="flex justify-between items-start mb-3">
-            <div class="stat-title">Active Deals Pipeline</div>
+            <div class="stat-title">Active Deals Pipeline (${this.activeCurrency})</div>
             <div class="w-10 h-10 bg-purple-50 rounded-xl flex items-center justify-center">
               <i data-lucide="users" class="w-5 h-5 text-purple-500"></i>
             </div>
           </div>
-          <div class="stat-value">$${pipelineTotal.toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
+          <div class="stat-value">${this.formatMoney(pipelineTotal)}</div>
           <div class="stat-trend text-purple-600 font-semibold">
             ${this.data.deals.length} Active Opportunities
           </div>
