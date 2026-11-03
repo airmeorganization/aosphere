@@ -45,6 +45,7 @@ func (s *Store) CreateUser(orgID, email, passwordHash, name, role string) (*db.U
 	if err != nil {
 		return nil, fmt.Errorf("failed to create user: %w", err)
 	}
+	_, _ = s.db.Exec(`INSERT OR IGNORE INTO user_organizations (user_id, org_id, role, created_at) VALUES (?, ?, ?, ?)`, id, orgID, role, now)
 	return &db.User{
 		ID:        id,
 		OrgID:     orgID,
@@ -72,11 +73,23 @@ func (s *Store) GetUserByEmail(email string) (*db.User, error) {
 // GetUserByID finds a user by ID
 func (s *Store) GetUserByID(userID string) (*db.User, error) {
 	var u db.User
-	err := s.db.QueryRow(`SELECT id, org_id, email, password_hash, name, role, is_active, created_at, updated_at
+	var totpSec, recJSON sql.NullString
+	var totpEn sql.NullBool
+	var lastAct sql.NullTime
+
+	err := s.db.QueryRow(`SELECT id, org_id, email, password_hash, name, role, is_active,
+		COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(recovery_codes_json, '[]'), last_active_at, created_at, updated_at
 		FROM users WHERE id = ?`, userID).
-		Scan(&u.ID, &u.OrgID, &u.Email, &u.PasswordHash, &u.Name, &u.Role, &u.IsActive, &u.CreatedAt, &u.UpdatedAt)
+		Scan(&u.ID, &u.OrgID, &u.Email, &u.PasswordHash, &u.Name, &u.Role, &u.IsActive,
+			&totpSec, &totpEn, &recJSON, &lastAct, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
+	}
+	u.TOTPSecret = totpSec.String
+	u.TOTPEnabled = totpEn.Bool
+	u.RecoveryCodesJSON = recJSON.String
+	if lastAct.Valid {
+		u.LastActiveAt = &lastAct.Time
 	}
 	return &u, nil
 }

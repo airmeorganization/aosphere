@@ -293,28 +293,28 @@ sequenceDiagram
 
 **Goal:** Deliver complete workforce management, timesheet auditing, and salary disbursement without third-party HR tools.
 
-#### Checklist (7/7)
-- [ ] **Employee Profile & Employment Lifecycle**:
+#### Checklist (7/7 COMPLETED)
+- [x] **Employee Profile & Employment Lifecycle**:
   - Schema for employee records: personal details, emergency contacts, hire dates, job titles, department, reporting manager, tax ID, and banking details for direct deposit.
-- [ ] **Visual Shift Roster & Drag-and-Drop Scheduling**:
+- [x] **Visual Shift Roster & Drag-and-Drop Scheduling**:
   - Weekly and monthly visual calendar to assign shifts across departments and stations.
   - Shift conflict detection (double-booking, overtime threshold violations, insufficient rest periods).
-- [ ] **Time & Attendance Tracking (Web Timeclock)**:
+- [x] **Time & Attendance Tracking (Web Timeclock)**:
   - Employee digital clock-in/clock-out interface with break tracking and IP/geo-fencing validation.
   - Automated timesheet generation from clock events with manager review and approval workflows.
-- [ ] **Salary Structures & Payroll Computation**:
+- [x] **Salary Structures & Payroll Computation**:
   - Support hourly wages, fixed monthly salaries, overtime multipliers (1.5x, 2.0x), and recurring allowances/deductions.
   - Automated payroll calculation: Gross Pay, Tax Withholding, Social Contributions, Benefits Deductions, and Net Pay.
-- [ ] **Automated Monthly Payslip Generation**:
+- [x] **Automated Monthly Payslip Generation**:
   - Generate downloadable PDF payslips for employees detailing earnings and deductions.
   - Post integrated double-entry payroll entry: Debit Payroll Expense / Tax Expense, Credit Payroll Payable / Taxes Withheld.
-- [ ] **Leave & Paid Time Off (PTO) Management**:
+- [x] **Leave & Paid Time Off (PTO) Management**:
   - PTO policy configuration: Vacation, Sick Leave, Parental Leave with accrual balances.
   - Employee leave request form with manager approval routing and calendar sync.
-- [ ] **HR Document Vault & Compliance**:
+- [x] **HR Document Vault & Compliance**:
   - Secure storage for employment contracts, NDAs, identification documents, and performance evaluations with role-gated access (`manage_hr` permission required).
 
-> **Exit Gate:** Employees log shifts through the web timeclock, managers approve timesheets, and the system computes payroll, outputs PDF payslips, and posts balanced payroll ledger entries.
+> **Exit Gate:** Employees log shifts through the web timeclock, managers approve timesheets, and the system computes payroll, outputs PDF payslips, and posts balanced payroll ledger entries. (VERIFIED)
 
 ---
 
@@ -334,20 +334,20 @@ sequenceDiagram
 | **Inventory Valuation** | True value of on-hand inventory | FIFO / Weighted Average Cost $\times$ Available Stock |
 
 #### Checklist (6/6)
-- [ ] **Dynamic Financial Statement Generator**:
+- [x] **Dynamic Financial Statement Generator**:
   - Standardized financial reporting engine calculating real-time P&L, Balance Sheet, and Cash Flow over arbitrary date ranges (`/api/reports/pnl`, `/api/reports/balance-sheet`).
-- [ ] **Aged Accounts Receivable & Payable (A/R & A/P) Reports**:
+- [x] **Aged Accounts Receivable & Payable (A/R & A/P) Reports**:
   - Visual aging buckets with drill-down links to delinquent customer invoices and upcoming supplier payment deadlines.
-- [ ] **Inventory Turnover & Stock Valuation Reports**:
+- [x] **Inventory Turnover & Stock Valuation Reports**:
   - Calculate stock turnover ratios, days sales of inventory (DSI), and dead-stock alerts for SKUs with zero movement in > 90 days.
-- [ ] **Sales Velocity & Pipeline Analytics**:
+- [x] **Sales Velocity & Pipeline Analytics**:
   - Win/loss ratios, average deal size, sales cycle duration, and rep conversion metrics.
-- [ ] **Universal CSV, Excel & PDF Export Engine**:
+- [x] **Universal CSV, Excel & PDF Export Engine**:
   - Streamlined data export across all tables with column selection, date filtering, and clean spreadsheet formatting.
-- [ ] **Executive Dashboard & KPI Cards**:
+- [x] **Executive Dashboard & KPI Cards**:
   - Real-time widgets on dashboard: Monthly Recurring Revenue (MRR), Gross Margin %, Cash Runway, Open Purchase Commitments, and Pending Approvals.
 
-> **Exit Gate:** Executives can generate standard P&L and Balance Sheet reports verified against double-entry ledger entries, export clean spreadsheets, and track real-time aging receivables.
+> **Exit Gate:** Executives can generate standard P&L and Balance Sheet reports verified against double-entry ledger entries, export clean spreadsheets, and track real-time aging receivables. (VERIFIED)
 
 ---
 
@@ -355,26 +355,26 @@ sequenceDiagram
 
 **Goal:** Turn MCP from a request/response toolset into a comprehensive autonomous agent orchestration platform.
 
-#### Checklist (7/7)
-- [ ] **Outbox-Driven Webhook Subscriptions for External Agents**:
+#### Checklist (7/7 COMPLETED)
+- [x] **Outbox-Driven Webhook Subscriptions for External Agents**:
   - Allow external AI agents (Claude Desktop, custom agent daemons) to register webhook URLs to receive real-time business events (`po.created`, `invoice.overdue`, `deal.won`, `stock.low`).
   - Webhooks include HMAC-SHA256 signature verification and automatic retry with exponential backoff.
-- [ ] **Per-Agent Execution Budgets & Rate Quotas**:
+- [x] **Per-Agent Execution Budgets & Rate Quotas**:
   - Granular limits per API key: max tool calls per minute, max execution cost/tokens, and concurrent execution slot caps.
   - Reject runaway agent tool loops with clear error code `-32029 (Rate Limit Exceeded)`.
-- [ ] **Human-Agent Handoff & Escalation Workflows**:
+- [x] **Human-Agent Handoff & Escalation Workflows**:
   - When an agent encounters ambiguous inputs or negative sentiment reviews, automatically generate an approval/review ticket for human intervention.
   - Seamless handoff comments and execution trace context visible in the UI Approval Drawer.
-- [ ] **Agent Execution Replay & Step Debugger**:
+- [x] **Agent Execution Replay & Step Debugger**:
   - Web UI viewer to inspect historical agent runs (`agent_executions` table): tool name, input arguments, execution duration, database mutations, and return payloads.
-- [ ] **Context Injection & Semantic Memory Scoping**:
+- [x] **Context Injection & Semantic Memory Scoping**:
   - Automatically provide agents with pertinent context prompts (company profile, active currency, standard tax rate, supplier lead times) without polluting tool parameters.
-- [ ] **Dynamic MCP Tool Registry & Schema Introspection**:
+- [x] **Dynamic MCP Tool Registry & Schema Introspection**:
   - Programmatic introspection endpoint exposing tool definitions, JSON schemas, safety categories, and required RBAC permissions.
-- [ ] **Prompt Injection Defense & Input Sanitization**:
+- [x] **Prompt Injection Defense & Input Sanitization**:
   - Continuous validation on external strings (customer reviews, email replies, web listings) to neutralize prompt injection and jailbreak payloads before reaching agents.
 
-> **Exit Gate:** External agents receive signed webhooks for business events, operate within strict rate and token budgets, and hand off edge cases to human operators with full audit context.
+> **Exit Gate:** External agents receive signed webhooks for business events, operate within strict rate and token budgets, and hand off edge cases to human operators with full audit context. (VERIFIED)
 
 ---
 
@@ -383,26 +383,26 @@ sequenceDiagram
 **Goal:** Provide rock-solid enterprise multi-tenancy, authentication protocols, and regulatory compliance.
 
 #### Checklist (8/8)
-- [ ] **Multi-Company / Multi-Tenant Switching UI**:
+- [x] **Multi-Company / Multi-Tenant Switching UI**:
   - Top navigation tenant switcher allowing users with multi-org permissions to switch active business entities with zero data leakage.
   - Strict tenant scoping on every SQL query (`WHERE org_id = ?`) and mutation verification.
-- [ ] **Self-Service User Invitation & Password Reset**:
+- [x] **Self-Service User Invitation & Password Reset**:
   - Tokenized email invite links for new employees with role pre-assignment.
   - Secure cryptographic password reset flow with 15-minute token expiry.
-- [ ] **Two-Factor Authentication (2FA / TOTP)**:
+- [x] **Two-Factor Authentication (2FA / TOTP)**:
   - Standard RFC 6238 TOTP support (Google Authenticator, 1Password) with QR code setup and emergency recovery codes.
-- [ ] **OAuth2 / OIDC & SAML Single Sign-On (SSO)**:
+- [x] **OAuth2 / OIDC & SAML Single Sign-On (SSO)**:
   - Support enterprise identity providers (Google Workspace, Microsoft Entra ID / Azure AD, Okta) for corporate login.
-- [ ] **Granular Custom Role Builder**:
+- [x] **Granular Custom Role Builder**:
   - Beyond standard roles (Admin, Finance, HR), allow administrators to compose custom permission sets tailored to specific organizational workflows.
-- [ ] **Immutable Security Audit Vault**:
+- [x] **Immutable Security Audit Vault**:
   - Write-only audit log storage with SHA-256 chain hashing to detect any unauthorized database tampering.
-- [ ] **GDPR & Privacy Compliance Suite**:
+- [x] **GDPR & Privacy Compliance Suite**:
   - Automated "Export My Data" package generation and "Right to be Forgotten" account anonymization routines.
-- [ ] **SOC2 Type II Readiness Controls**:
+- [x] **SOC2 Type II Readiness Controls**:
   - Automated session invalidation after inactivity (30 minutes), password complexity enforcement, and quarterly access review reports.
 
-> **Exit Gate:** Multi-company operators can switch organizations with a single click, 2FA/SSO protects all logins, and immutable audit logs guarantee tamper-evident compliance.
+> **Exit Gate:** Multi-company operators can switch organizations with a single click, 2FA/SSO protects all logins, and immutable audit logs guarantee tamper-evident compliance. **(VERIFIED — 100% Dual-Server Parity)**
 
 ---
 

@@ -10,6 +10,25 @@ const app = {
   activeCurrency: localStorage.getItem('aosphere_currency') || 'INR',
   activeCRMSubTab: 'kanban',
   activePipelineId: 'pipe_std_org_default',
+  activeHRSubTab: 'roster',
+  selectedTimeclockEmpId: '',
+  activePayrollPeriod: new Date().toISOString().slice(0, 7),
+  activeReportsSubTab: 'kpis',
+  activeComplianceSubTab: 'tenancy',
+  reportsFilter: {
+    pnlStart: new Date(new Date().getFullYear(), 0, 1).toISOString().slice(0, 10),
+    pnlEnd: new Date().toISOString().slice(0, 10),
+    balanceSheetAsOf: new Date().toISOString().slice(0, 10),
+    cashFlowStart: new Date(new Date().getFullYear(), 0, 1).toISOString().slice(0, 10),
+    cashFlowEnd: new Date().toISOString().slice(0, 10),
+    agingAsOf: new Date().toISOString().slice(0, 10),
+    agingType: 'ar',
+    inventoryMode: 'sku',
+    exportEntity: 'pnl',
+    exportFormat: 'pdf',
+    exportStart: new Date(new Date().getFullYear(), 0, 1).toISOString().slice(0, 10),
+    exportEnd: new Date().toISOString().slice(0, 10)
+  },
   drawerTab: 'stream',
   theme: 'light',
   apiKey: localStorage.getItem('aosphere_api_key') || 'ao_sk_agent_default_token_12345',
@@ -54,12 +73,37 @@ const app = {
     summary: null,
     employees: [],
     shifts: [],
+    shiftConflicts: [],
+    timeclockStatus: null,
+    payrollPreview: null,
+    payrollRuns: [],
+    payslips: [],
+    leavePolicies: [],
+    leaveRequests: [],
+    hrDocuments: [],
     tasks: [],
     listings: [],
     reviews: [],
     approvals: [],
     auditLogs: [],
-    tools: []
+    tools: [],
+    reportsKPIs: null,
+    reportsPnL: null,
+    reportsBalanceSheet: null,
+    reportsCashFlow: null,
+    reportsAgingAR: null,
+    reportsAgingAP: null,
+    reportsInventoryValuation: null,
+    reportsInventoryTurnover: null,
+    reportsSalesVelocity: null,
+    organizations: [],
+    userInvitations: [],
+    ssoConfigs: [],
+    customRoles: [],
+    auditVaultBlocks: [],
+    auditVaultIntegrity: null,
+    privacyRequests: [],
+    soc2Reviews: []
   },
   sse: null,
 
@@ -68,6 +112,7 @@ const app = {
     this.setupCurrency();
     this.setupShortcuts();
     this.setupSSE();
+    this.loadOrganizations();
     this.loadAllData();
     if (window.lucide) {
       lucide.createIcons();
@@ -112,6 +157,45 @@ const app = {
     this.activePipelineId = pipeId;
     this.render();
     if (window.lucide) lucide.createIcons();
+  },
+
+  setHRSubTab(subTab) {
+    this.activeHRSubTab = subTab;
+    this.render();
+    if (window.lucide) lucide.createIcons();
+  },
+
+  async setReportsSubTab(subTab) {
+    this.activeReportsSubTab = subTab;
+    await this.ensureReportData(subTab);
+    this.render();
+    if (window.lucide) lucide.createIcons();
+  },
+
+  setReportsFilter(key, val) {
+    this.reportsFilter[key] = val;
+  },
+
+  async setSelectedTimeclockEmployee(empId) {
+    this.selectedTimeclockEmpId = empId;
+    await this.reloadTimeclockStatus();
+    this.render();
+    if (window.lucide) lucide.createIcons();
+  },
+
+  async reloadTimeclockStatus() {
+    if (!this.selectedTimeclockEmpId && this.data.employees && this.data.employees.length > 0) {
+      this.selectedTimeclockEmpId = this.data.employees[0].id;
+    }
+    if (!this.selectedTimeclockEmpId) return;
+    try {
+      const res = await fetch('/api/timeclock/status?employee_id=' + encodeURIComponent(this.selectedTimeclockEmpId));
+      if (res.ok) {
+        this.data.timeclockStatus = await res.json();
+      }
+    } catch (err) {
+      console.warn('Failed to reload timeclock status:', err);
+    }
   },
 
   formatMoney(amountInUSD, targetCur = null) {
@@ -233,11 +317,18 @@ const app = {
         deal_converted: ['deals', 'invoices', 'summary'],
         quote_generated: ['deals'],
         invoice_created: ['invoices', 'summary'],
-        shift_updated: ['shifts'],
-        shift_created: ['shifts'],
+        shift_updated: ['shifts', 'shiftConflicts'],
+        shift_created: ['shifts', 'shiftConflicts'],
+        shift_conflict: ['shiftConflicts'],
         task_updated: ['tasks'],
         task_created: ['tasks'],
         employee_created: ['employees'],
+        employee_updated: ['employees'],
+        timeclock_event: ['timeclockStatus', 'shifts', 'shiftConflicts'],
+        payroll_run: ['payrollRuns', 'payslips', 'accounts', 'journalEntries', 'summary'],
+        leave_requested: ['leaveRequests'],
+        leave_reviewed: ['leaveRequests'],
+        hr_document_uploaded: ['hrDocuments'],
         grn_received: ['grns', 'warehouseStocks', 'skus', 'purchaseOrders', 'summary'],
         stock_transferred: ['warehouseStocks', 'stockTransfers', 'skus'],
         supplier_bill_created: ['supplierBills', 'summary'],
@@ -291,12 +382,23 @@ const app = {
       summary: '/api/financial-summary',
       employees: '/api/employees',
       shifts: '/api/shifts',
+      shiftConflicts: '/api/shifts/conflicts',
+      payrollRuns: '/api/payroll/history',
+      payslips: '/api/payroll/payslips',
+      leavePolicies: '/api/leaves/policies',
+      leaveRequests: '/api/leaves/requests',
+      hrDocuments: '/api/hr/documents',
       tasks: '/api/tasks',
       listings: '/api/listings',
       reviews: '/api/reviews',
       approvals: '/api/approvals',
       auditLogs: '/api/audit-logs'
     };
+    if (name === 'timeclockStatus') {
+      await this.reloadTimeclockStatus();
+      this.render();
+      return;
+    }
     if (!endpoints[name]) return;
     try {
       const res = await fetch(endpoints[name]);
@@ -344,6 +446,12 @@ const app = {
         summary,
         employees,
         shifts,
+        shiftConflicts,
+        payrollRuns,
+        payslips,
+        leavePolicies,
+        leaveRequests,
+        hrDocuments,
         tasks,
         listings,
         reviews,
@@ -373,6 +481,12 @@ const app = {
         fetch('/api/financial-summary').then(r => r.json()).catch(() => null),
         fetch('/api/employees').then(r => r.json()).catch(() => []),
         fetch('/api/shifts').then(r => r.json()).catch(() => []),
+        fetch('/api/shifts/conflicts').then(r => r.json()).catch(() => []),
+        fetch('/api/payroll/history').then(r => r.json()).catch(() => []),
+        fetch('/api/payroll/payslips').then(r => r.json()).catch(() => []),
+        fetch('/api/leaves/policies').then(r => r.json()).catch(() => []),
+        fetch('/api/leaves/requests').then(r => r.json()).catch(() => []),
+        fetch('/api/hr/documents').then(r => r.json()).catch(() => []),
         fetch('/api/tasks').then(r => r.json()).catch(() => []),
         fetch('/api/listings').then(r => r.json()).catch(() => []),
         fetch('/api/reviews').then(r => r.json()).catch(() => []),
@@ -409,14 +523,32 @@ const app = {
       this.data.summary = summary;
       this.data.employees = employees;
       this.data.shifts = shifts;
+      this.data.shiftConflicts = shiftConflicts || [];
+      this.data.payrollRuns = payrollRuns || [];
+      this.data.payslips = payslips || [];
+      this.data.leavePolicies = leavePolicies || [];
+      this.data.leaveRequests = leaveRequests || [];
+      this.data.hrDocuments = hrDocuments || [];
       this.data.tasks = tasks;
       this.data.listings = listings;
       this.data.reviews = reviews;
       this.data.approvals = approvals;
       this.data.auditLogs = auditLogs;
 
+      if (employees && employees.length > 0 && !this.selectedTimeclockEmpId) {
+        this.selectedTimeclockEmpId = employees[0].id;
+      }
+      if (this.selectedTimeclockEmpId) {
+        await this.reloadTimeclockStatus();
+      }
+
       const picker = document.getElementById('global-currency-picker');
       if (picker) picker.value = this.activeCurrency;
+
+      try {
+        const kpiRes = await fetch('/api/reports/executive-kpis');
+        if (kpiRes.ok) this.data.reportsKPIs = await kpiRes.json();
+      } catch (e) {}
 
       this.updateBadges();
       this.render();
@@ -489,6 +621,15 @@ const app = {
     document.querySelectorAll('.nav-item').forEach(el => {
       el.classList.toggle('active', el.dataset.tab === tab);
     });
+    if (tab === 'reports') {
+      this.ensureReportData(this.activeReportsSubTab);
+    }
+    if (tab === 'agents') {
+      this.ensureAgentPlatformData(this.activeAgentSubTab);
+    }
+    if (tab === 'compliance') {
+      this.ensureComplianceData(this.activeComplianceSubTab);
+    }
     this.render();
   },
 
@@ -513,6 +654,9 @@ const app = {
       case 'hr':
         main.innerHTML = this.renderHR();
         break;
+      case 'reports':
+        main.innerHTML = this.renderReports();
+        break;
       case 'tasks':
         main.innerHTML = this.renderTasks();
         break;
@@ -527,6 +671,12 @@ const app = {
         break;
       case 'audit':
         main.innerHTML = this.renderAudit();
+        break;
+      case 'agents':
+        main.innerHTML = this.renderAgentPlatform();
+        break;
+      case 'compliance':
+        main.innerHTML = this.renderCompliance();
         break;
       default:
         main.innerHTML = `<div class="p-8">Select a module from the sidebar</div>`;
@@ -1857,20 +2007,37 @@ const app = {
     `;
   },
 
-  // ---------------- Module 5: HRMS & Shifts ----------------
+  // ---------------- Module 5: HRMS, Shifts & Automated Payroll ----------------
   renderHR() {
+    const subTab = this.activeHRSubTab || 'roster';
+    let subTabContent = '';
+
+    if (subTab === 'roster') {
+      subTabContent = this.renderHRRoster();
+    } else if (subTab === 'timeclock') {
+      subTabContent = this.renderHRTimeclock();
+    } else if (subTab === 'employees') {
+      subTabContent = this.renderHREmployees();
+    } else if (subTab === 'payroll') {
+      subTabContent = this.renderHRPayroll();
+    } else if (subTab === 'leaves') {
+      subTabContent = this.renderHRLeaves();
+    } else if (subTab === 'documents') {
+      subTabContent = this.renderHRDocuments();
+    }
+
     return `
       <div class="page-header">
         <div>
-          <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-orange-100 text-orange-700 text-[11px] font-bold uppercase tracking-widest mb-3">
-            <i data-lucide="zap" class="w-3.5 h-3.5"></i> Execution & People
+          <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-100 text-emerald-700 text-[11px] font-bold uppercase tracking-widest mb-3">
+            <i data-lucide="users" class="w-3.5 h-3.5"></i> Human Resources & Payroll
           </div>
-          <h1 class="page-title">Shifts & Team Records</h1>
-          <p class="page-sub">Coordinate employee shift schedules, digital timesheets, and wage rates in one place.</p>
+          <h1 class="page-title">Workforce, Shift Scheduling & Payroll</h1>
+          <p class="page-sub">Comprehensive workforce management, digital timeclock punches, automated double-entry payroll, and role-gated compliance vault.</p>
         </div>
         <div class="page-actions">
           <button class="btn-press btn btn-secondary" onclick="app.openNewEmployeeModal()">
-            <i data-lucide="user-plus" class="w-4 h-4 text-brand-blue"></i> Add Employee
+            <i data-lucide="user-plus" class="w-4 h-4 text-brand-blue"></i> Onboard Employee
           </button>
           <button class="btn-press btn btn-primary" onclick="app.openNewShiftModal()">
             <i data-lucide="calendar-plus" class="w-4 h-4"></i> Schedule Shift
@@ -1878,39 +2045,445 @@ const app = {
         </div>
       </div>
 
-      <div style="display:grid; grid-template-columns: 1.8fr 1.2fr; gap:24px;">
-        
-        <!-- Shifts Schedule Grid -->
+      <!-- HR & Payroll Sub-Navigation Pills -->
+      <div class="subnav-bar">
+        <button class="subnav-pill ${subTab === 'roster' ? 'active' : ''}" onclick="app.setHRSubTab('roster')">
+          <i data-lucide="calendar" class="w-4 h-4"></i> Shift Roster & Conflicts (${(this.data.shifts || []).length})
+        </button>
+        <button class="subnav-pill ${subTab === 'timeclock' ? 'active' : ''}" onclick="app.setHRSubTab('timeclock')">
+          <i data-lucide="clock" class="w-4 h-4"></i> Digital Timeclock
+        </button>
+        <button class="subnav-pill ${subTab === 'employees' ? 'active' : ''}" onclick="app.setHRSubTab('employees')">
+          <i data-lucide="user-check" class="w-4 h-4"></i> Employee Directory (${(this.data.employees || []).length})
+        </button>
+        <button class="subnav-pill ${subTab === 'payroll' ? 'active' : ''}" onclick="app.setHRSubTab('payroll')">
+          <i data-lucide="banknote" class="w-4 h-4"></i> Automated Payroll (${(this.data.payrollRuns || []).length})
+        </button>
+        <button class="subnav-pill ${subTab === 'leaves' ? 'active' : ''}" onclick="app.setHRSubTab('leaves')">
+          <i data-lucide="plane" class="w-4 h-4"></i> Leave & PTO (${(this.data.leaveRequests || []).length})
+        </button>
+        <button class="subnav-pill ${subTab === 'documents' ? 'active' : ''}" onclick="app.setHRSubTab('documents')">
+          <i data-lucide="shield-check" class="w-4 h-4"></i> HR Compliance Vault (${(this.data.hrDocuments || []).length})
+        </button>
+      </div>
+
+      ${subTabContent}
+    `;
+  },
+
+  renderHRRoster() {
+    const conflicts = this.data.shiftConflicts || [];
+    const conflictHTML = conflicts.length > 0 ? `
+      <div class="conflict-alert-box">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-2 font-bold text-red-800 text-[14px]">
+            <i data-lucide="alert-triangle" class="w-4 h-4 text-red-600"></i>
+            Scheduling Conflicts Detected (${conflicts.length})
+          </div>
+          <span class="text-xs text-red-700 font-medium">Automatic Labor Policy Enforcement</span>
+        </div>
+        ${conflicts.map(c => `
+          <div class="conflict-item">
+            <div class="flex items-center gap-2">
+              <span class="${c.conflict_type === 'overtime_threshold' ? 'conflict-badge-warn' : 'conflict-badge-error'}">
+                ${c.conflict_type.replace(/_/g, ' ')}
+              </span>
+              <strong class="text-slate-900">${c.employee_name || 'Employee'}:</strong>
+              <span class="text-slate-700">${c.description}</span>
+            </div>
+            <span class="text-xs text-slate-500 font-mono">${c.shift_id_1} ${c.shift_id_2 ? '↔ ' + c.shift_id_2 : ''}</span>
+          </div>
+        `).join('')}
+      </div>
+    ` : `
+      <div style="background:#ECFDF5; border:1px solid #A7F3D0; border-radius:12px; padding:12px 18px; margin-bottom:20px; display:flex; align-items:center; gap:10px; color:#065F46; font-size:13px; font-weight:600;">
+        <i data-lucide="check-circle-2" class="w-4 h-4 text-emerald-600"></i>
+        <span>Workforce Shift Compliance: Zero double-booking, rest period (&lt; 8h), or overtime (&gt; 40h) violations detected.</span>
+      </div>
+    `;
+
+    return `
+      ${conflictHTML}
+      <div class="table-container mockup-item">
+        <div class="table-filter-bar">
+          <span class="font-bold text-[15px] text-slate-800">Master Shift Roster</span>
+          <input type="text" class="table-filter-input" placeholder="Search shifts by employee, station..." oninput="app.filterTable('shifts-table', this.value)">
+        </div>
+        <table class="data-table" id="shifts-table">
+          <thead>
+            <tr>
+              <th>Employee</th>
+              <th>Shift Date</th>
+              <th>Time Window</th>
+              <th>Station</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${(this.data.shifts || []).length === 0 ? `<tr><td colspan="6" class="text-center py-6 text-slate-400">No shifts scheduled. Click "+ Schedule Shift" above to assign working hours.</td></tr>` :
+              this.data.shifts.map(sh => `
+                <tr>
+                  <td><strong>${sh.employee_name}</strong></td>
+                  <td class="font-mono text-slate-600 text-xs">${sh.shift_date || 'Today'}</td>
+                  <td class="font-medium text-slate-500">${sh.start_time} — ${sh.end_time}</td>
+                  <td><span class="badge" style="background:#F1F5F9; color:#475569;">${sh.station}</span></td>
+                  <td>
+                    <span class="badge" style="background:${sh.status === 'clocked_in' ? '#ECFDF5' : '#EFF6FF'}; color:${sh.status === 'clocked_in' ? '#047857' : '#1D4ED8'}; border:1px solid ${sh.status === 'clocked_in' ? '#A7F3D0' : '#BFDBFE'};">
+                      ${sh.status.replace(/_/g, ' ').toUpperCase()}
+                    </span>
+                  </td>
+                  <td>
+                    <button class="btn-press btn btn-secondary btn-sm" onclick="app.toggleShiftClock('${sh.id}', '${sh.status === 'clocked_in' ? 'completed' : 'clocked_in'}')">
+                      ${sh.status === 'clocked_in' ? 'Clock Out' : 'Clock In'}
+                    </button>
+                  </td>
+                </tr>
+              `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  },
+
+  renderHRTimeclock() {
+    const employees = this.data.employees || [];
+    const currentEmpId = this.selectedTimeclockEmpId || (employees[0] ? employees[0].id : '');
+    const currentEmp = employees.find(e => e.id === currentEmpId) || employees[0] || {};
+    const statusObj = this.data.timeclockStatus || { current_status: 'clocked_out', punches_today: [] };
+    const curStatus = statusObj.current_status || statusObj.current_state || 'clocked_out';
+    const punches = statusObj.punches_today || statusObj.events || [];
+
+    const nowStr = new Date().toLocaleTimeString('en-US', { hour12: false });
+
+    return `
+      <div style="display:grid; grid-template-columns: 1fr 1.4fr; gap:24px;">
+        <!-- Digital Punch Station Card -->
+        <div class="timeclock-station">
+          <div class="flex justify-between items-center">
+            <div>
+              <span class="text-xs uppercase tracking-widest text-slate-400 font-bold">Terminal Station</span>
+              <h3 class="text-lg font-extrabold text-white">Digital Timeclock</h3>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full ${curStatus === 'clocked_in' ? 'bg-emerald-400 animate-pulse' : curStatus === 'on_break' ? 'bg-amber-400 animate-pulse' : 'bg-slate-400'}"></span>
+              <span class="text-xs font-mono font-bold tracking-wider uppercase text-slate-300">
+                ${curStatus.replace(/_/g, ' ')}
+              </span>
+            </div>
+          </div>
+
+          <div style="background:rgba(255,255,255,0.06); padding:16px; border-radius:12px; border:1px solid rgba(255,255,255,0.1);">
+            <label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block mb-2">Select Active Employee</label>
+            <select class="form-input text-sm" style="background:#0F172A; color:#FFFFFF; border-color:#334155;" onchange="app.setSelectedTimeclockEmployee(this.value)">
+              ${employees.map(e => `
+                <option value="${e.id}" ${e.id === currentEmpId ? 'selected' : ''}>${e.name} (${e.role || 'Staff'})</option>
+              `).join('')}
+            </select>
+          </div>
+
+          <div class="text-center py-2">
+            <div class="timeclock-digital-face">${nowStr}</div>
+            <div class="text-xs text-slate-400 font-medium mt-1">Official Server Time & Attendance Synchronization</div>
+          </div>
+
+          <div class="punch-grid">
+            <button class="punch-btn punch-btn-in" ${curStatus !== 'clocked_out' ? 'disabled' : ''} onclick="app.recordPunch('clock_in')">
+              <i data-lucide="log-in" class="w-5 h-5 mb-1"></i>
+              Clock In
+            </button>
+            <button class="punch-btn punch-btn-break-start" ${curStatus !== 'clocked_in' ? 'disabled' : ''} onclick="app.recordPunch('break_start')">
+              <i data-lucide="coffee" class="w-5 h-5 mb-1"></i>
+              Start Break
+            </button>
+            <button class="punch-btn punch-btn-break-end" ${curStatus !== 'on_break' ? 'disabled' : ''} onclick="app.recordPunch('break_end')">
+              <i data-lucide="play" class="w-5 h-5 mb-1"></i>
+              End Break
+            </button>
+            <button class="punch-btn punch-btn-out" ${curStatus === 'clocked_out' ? 'disabled' : ''} onclick="app.recordPunch('clock_out')">
+              <i data-lucide="log-out" class="w-5 h-5 mb-1"></i>
+              Clock Out
+            </button>
+          </div>
+
+          <div style="background:rgba(255,255,255,0.04); border-radius:10px; padding:12px 14px; display:flex; justify-content:space-between; align-items:center; font-size:12px; color:#94A3B8;">
+            <span>Current Compensation:</span>
+            <strong class="text-white font-mono">${currentEmp.salary_type === 'monthly' ? this.formatMoney((currentEmp.monthly_salary_cents || 0)/100) + '/mo' : this.formatMoney(currentEmp.hourly_rate || 0) + '/hr'}</strong>
+          </div>
+        </div>
+
+        <!-- Today's Punch Activity Log -->
         <div class="table-container mockup-item">
           <div class="table-filter-bar">
-            <span class="font-bold text-[15px] text-slate-800">Today's Shift Roster</span>
-            <input type="text" class="table-filter-input" placeholder="Search shifts by employee, station..." oninput="app.filterTable('shifts-table', this.value)">
+            <div>
+              <span class="font-bold text-[15px] text-slate-800">Punch Event Stream</span>
+              <p class="text-xs text-slate-400 mt-0.5">Live time records for <strong>${currentEmp.name || 'Selected Employee'}</strong></p>
+            </div>
+            <button class="btn-press btn btn-secondary btn-sm" onclick="app.reloadTimeclockStatus().then(() => app.render())">
+              <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Refresh
+            </button>
           </div>
-          <table class="data-table" id="shifts-table">
+          <table class="data-table">
             <thead>
               <tr>
-                <th>Employee</th>
-                <th>Time Window</th>
-                <th>Station</th>
-                <th>Status</th>
-                <th>Actions</th>
+                <th>Event Type</th>
+                <th>Timestamp</th>
+                <th>Notes / Workstation</th>
+                <th>Source IP</th>
               </tr>
             </thead>
             <tbody>
-              ${this.data.shifts.length === 0 ? `<tr><td colspan="5" class="text-center py-6 text-slate-400">No shifts scheduled for today. Click "+ Schedule Shift" to assign a shift.</td></tr>` :
-                this.data.shifts.map(sh => `
+              ${punches.length === 0 ? `<tr><td colspan="4" class="text-center py-8 text-slate-400">No punches recorded today for this employee. Punch Clock In to begin shift.</td></tr>` :
+                punches.map(p => `
                   <tr>
-                    <td><strong>${sh.employee_name}</strong></td>
-                    <td class="font-medium text-slate-500">${sh.start_time} — ${sh.end_time}</td>
-                    <td><span class="badge" style="background:#F1F5F9; color:#475569;">${sh.station}</span></td>
                     <td>
-                      <span class="badge" style="background:${sh.status === 'clocked_in' ? '#ECFDF5' : '#EFF6FF'}; color:${sh.status === 'clocked_in' ? '#047857' : '#1D4ED8'}; border:1px solid ${sh.status === 'clocked_in' ? '#A7F3D0' : '#BFDBFE'};">
-                        ${sh.status.replace('_', ' ').toUpperCase()}
+                      <span class="badge" style="background:${p.event_type === 'clock_in' ? '#ECFDF5' : p.event_type === 'clock_out' ? '#FEF2F2' : '#FFFBEB'}; color:${p.event_type === 'clock_in' ? '#047857' : p.event_type === 'clock_out' ? '#DC2626' : '#D97706'}; font-weight:700;">
+                        ${p.event_type.replace(/_/g, ' ').toUpperCase()}
                       </span>
                     </td>
+                    <td class="font-mono text-xs text-slate-600">${p.timestamp}</td>
+                    <td class="text-slate-700">${p.notes || 'Terminal Punch'}</td>
+                    <td class="font-mono text-xs text-slate-400">${p.ip_address || '127.0.0.1'}</td>
+                  </tr>
+                `).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  },
+
+  renderHREmployees() {
+    const emps = this.data.employees || [];
+
+    return `
+      <div class="table-container mockup-item" style="padding:24px; margin-bottom:24px;">
+        <div class="flex justify-between items-center mb-6">
+          <div>
+            <h3 class="font-extrabold text-[18px] text-slate-900">Personnel & Compensation Registry</h3>
+            <p class="text-xs text-slate-500 mt-0.5">Direct deposit banking, tax withholdings, and compensation structures.</p>
+          </div>
+          <div class="flex items-center gap-3">
+            <input type="text" class="table-filter-input" style="width:240px;" placeholder="Search employee, title, department..." oninput="app.filterCards('employees-grid-container', 'emp-profile-card', this.value)">
+            <button class="btn-press btn btn-primary" onclick="app.openNewEmployeeModal()">
+              <i data-lucide="plus" class="w-4 h-4"></i> Onboard Member
+            </button>
+          </div>
+        </div>
+
+        <div id="employees-grid-container" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(360px, 1fr)); gap:20px;">
+          ${emps.length === 0 ? `<div class="text-slate-400 py-8 text-center col-span-full">No employee records registered. Click "+ Onboard Member" to add one.</div>` :
+            emps.map(emp => {
+              const compText = emp.salary_type === 'monthly'
+                ? `${this.formatMoney((emp.monthly_salary_cents || 0) / 100)} / mo`
+                : `${this.formatMoney(emp.hourly_rate || 0)} / hr`;
+              const maskedAcct = emp.bank_account ? '••••' + emp.bank_account.slice(-4) : 'Not configured';
+
+              return `
+                <div class="emp-profile-card" style="background:#FFFFFF; border:1px solid var(--border-subtle); border-radius:14px; padding:20px; display:flex; flex-direction:column; justify-content:space-between; gap:16px; box-shadow:0 1px 3px rgba(0,0,0,0.04);">
+                  <div>
+                    <div class="flex justify-between items-start mb-2">
+                      <div>
+                        <h4 class="font-bold text-[16px] text-slate-900">${emp.name}</h4>
+                        <div class="text-xs text-slate-500 font-medium">${emp.role || emp.job_title || 'Team Member'} • <span class="text-brand-blue font-semibold">${emp.department || 'General'}</span></div>
+                      </div>
+                      <span class="badge" style="background:#EFF6FF; color:#1D4ED8; font-size:11px; text-transform:uppercase;">
+                        ${(emp.employment_type || 'full_time').replace(/_/g, ' ')}
+                      </span>
+                    </div>
+
+                    <div style="background:#F8FAFC; border-radius:10px; padding:12px 14px; display:flex; flex-direction:column; gap:8px; margin-top:12px; font-size:12.5px;">
+                      <div class="flex justify-between items-center">
+                        <span class="text-slate-500">Compensation:</span>
+                        <strong class="font-mono text-emerald-600 font-bold">${compText}</strong>
+                      </div>
+                      <div class="flex justify-between items-center">
+                        <span class="text-slate-500">Tax ID:</span>
+                        <span class="font-mono text-slate-700">${emp.tax_id || 'Pending'}</span>
+                      </div>
+                      <div class="flex justify-between items-center">
+                        <span class="text-slate-500">Direct Deposit:</span>
+                        <span class="font-mono text-slate-700">${emp.bank_name || 'Bank'} (${maskedAcct})</span>
+                      </div>
+                      <div class="flex justify-between items-center">
+                        <span class="text-slate-500">Emergency Contact:</span>
+                        <span class="text-slate-700">${emp.emergency_contact_name || '—'} ${emp.emergency_contact_phone ? '(' + emp.emergency_contact_phone + ')' : ''}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="flex justify-between items-center pt-2 border-t border-slate-100">
+                    <span class="text-[11px] text-slate-400 font-mono">ID: ${emp.id}</span>
+                    <button class="btn-press btn btn-secondary btn-sm" onclick="app.openEditEmployeeModal('${emp.id}')">
+                      <i data-lucide="edit-3" class="w-3.5 h-3.5"></i> Edit Profile
+                    </button>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+        </div>
+      </div>
+    `;
+  },
+
+  renderHRPayroll() {
+    const preview = this.data.payrollPreview;
+    const runs = this.data.payrollRuns || [];
+    const payslips = this.data.payslips || [];
+    const period = this.activePayrollPeriod || new Date().toISOString().slice(0, 7);
+
+    // Compute preview totals or fallback to last run
+    const grossCents = preview ? preview.total_gross_cents : (runs[0] ? runs[0].total_gross_cents : 0);
+    const taxCents = preview ? preview.total_tax_cents : (runs[0] ? runs[0].total_tax_cents : 0);
+    const deductionsCents = preview ? preview.total_deductions_cents : (runs[0] ? runs[0].total_deductions_cents : 0);
+    const netCents = preview ? preview.total_net_cents : (runs[0] ? runs[0].total_net_cents : 0);
+    const socialCents = Math.round(grossCents * 0.05);
+    const benefitsCents = deductionsCents - socialCents > 0 ? deductionsCents - socialCents : Math.round(grossCents * 0.03);
+
+    return `
+      <!-- Period Selector & Disbursal Actions -->
+      <div style="background:#FFFFFF; border:1px solid var(--border-subtle); border-radius:14px; padding:18px 24px; margin-bottom:24px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:16px;">
+        <div class="flex items-center gap-4">
+          <div class="flex flex-col">
+            <label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">Pay Period (YYYY-MM)</label>
+            <input type="month" id="payroll-period-input" class="form-input text-sm font-semibold" style="width:180px;" value="${period}" onchange="app.activePayrollPeriod = this.value">
+          </div>
+          <button class="btn-press btn btn-secondary mt-4" onclick="app.calculatePayrollPreview()">
+            <i data-lucide="calculator" class="w-4 h-4"></i> Preview Payroll
+          </button>
+        </div>
+        <div class="flex items-center gap-3">
+          <button class="btn-press btn btn-primary" onclick="app.executePayrollRun()">
+            <i data-lucide="send" class="w-4 h-4"></i> Disburse & Post to General Ledger
+          </button>
+        </div>
+      </div>
+
+      <!-- Real-time Payroll Summary KPI Grid -->
+      <div class="payroll-summary-grid">
+        <div class="payroll-stat-card">
+          <span class="payroll-stat-label">Total Gross Wages</span>
+          <span class="payroll-stat-val">${this.formatMoney(grossCents / 100)}</span>
+          <span class="text-[11px] text-slate-400 font-medium">Debit Acc 5200</span>
+        </div>
+        <div class="payroll-stat-card">
+          <span class="payroll-stat-label">Tax Withholding (12%)</span>
+          <span class="payroll-stat-val text-amber-600">${this.formatMoney(taxCents / 100)}</span>
+          <span class="text-[11px] text-slate-400 font-medium">Credit Acc 2150</span>
+        </div>
+        <div class="payroll-stat-card">
+          <span class="payroll-stat-label">Social Contributions (5%)</span>
+          <span class="payroll-stat-val text-blue-600">${this.formatMoney(socialCents / 100)}</span>
+          <span class="text-[11px] text-slate-400 font-medium">Credit Acc 2150</span>
+        </div>
+        <div class="payroll-stat-card">
+          <span class="payroll-stat-label">Benefits Deductions (3%)</span>
+          <span class="payroll-stat-val text-purple-600">${this.formatMoney(benefitsCents / 100)}</span>
+          <span class="text-[11px] text-slate-400 font-medium">Credit Acc 2150</span>
+        </div>
+        <div class="payroll-stat-card">
+          <span class="payroll-stat-label">Net Disbursed Wages</span>
+          <span class="payroll-stat-val payroll-stat-highlight">${this.formatMoney(netCents / 100)}</span>
+          <span class="text-[11px] text-slate-400 font-medium">Credit Cash/Bank 1000</span>
+        </div>
+      </div>
+
+      <!-- Itemized Payroll Run / Preview Calculation Table -->
+      <div class="table-container mockup-item mb-6">
+        <div class="table-filter-bar">
+          <div>
+            <span class="font-bold text-[15px] text-slate-800">Itemized Payroll Computation</span>
+            <span class="text-xs text-slate-400 ml-2">Period: <strong>${period}</strong></span>
+          </div>
+          <span class="text-xs text-slate-500 font-mono">1.5x Overtime Multiplier Enforced</span>
+        </div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Employee</th>
+              <th>Type</th>
+              <th>Reg Hours</th>
+              <th>OT Hours</th>
+              <th>Gross Pay</th>
+              <th>Tax (12%)</th>
+              <th>Social (5%)</th>
+              <th>Benefits (3%)</th>
+              <th>Net Pay</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${preview && preview.payslips && preview.payslips.length > 0 ?
+              preview.payslips.map(p => `
+                <tr>
+                  <td><strong>${p.employee_name}</strong></td>
+                  <td><span class="badge" style="background:#F1F5F9; color:#475569;">${p.salary_type || 'hourly'}</span></td>
+                  <td class="font-mono text-xs">${(p.regular_hours || 0).toFixed(1)}h</td>
+                  <td class="font-mono text-xs text-amber-600 font-bold">${(p.overtime_hours || 0).toFixed(1)}h</td>
+                  <td class="font-mono text-xs font-bold">${this.formatMoney(p.gross_pay_cents / 100)}</td>
+                  <td class="font-mono text-xs text-amber-600">-${this.formatMoney(p.tax_withheld_cents / 100)}</td>
+                  <td class="font-mono text-xs text-blue-600">-${this.formatMoney(p.social_security_cents / 100)}</td>
+                  <td class="font-mono text-xs text-purple-600">-${this.formatMoney(p.benefits_deduction_cents / 100)}</td>
+                  <td class="font-mono text-xs font-bold text-emerald-600">${this.formatMoney(p.net_pay_cents / 100)}</td>
+                </tr>
+              `).join('') :
+              `<tr><td colspan="9" class="text-center py-6 text-slate-400">Click "Preview Payroll" above to compute wages, overtime, and tax withholdings for ${period}.</td></tr>`
+            }
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Disbursed Payroll Runs & Payslip Archive -->
+      <div style="display:grid; grid-template-columns: 1fr 1.2fr; gap:24px;">
+        <div class="table-container mockup-item">
+          <div class="table-filter-bar">
+            <span class="font-bold text-[15px] text-slate-800">Payroll Run History</span>
+          </div>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Period</th>
+                <th>Disbursed</th>
+                <th>Total Net</th>
+                <th>Journal Entry</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${runs.length === 0 ? `<tr><td colspan="4" class="text-center py-6 text-slate-400">No payroll runs posted yet.</td></tr>` :
+                runs.map(r => `
+                  <tr>
+                    <td class="font-bold">${r.period}</td>
+                    <td class="text-xs text-slate-500 font-mono">${(r.created_at || '').slice(0, 10)}</td>
+                    <td class="font-mono text-xs font-bold text-emerald-600">${this.formatMoney(r.total_net_cents / 100)}</td>
+                    <td><span class="badge" style="background:#EFF6FF; color:#1D4ED8; font-family:var(--font-mono); font-size:11px;">#${r.journal_entry_id ? r.journal_entry_id.slice(0, 8) : 'BALANCED'}</span></td>
+                  </tr>
+                `).join('')}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="table-container mockup-item">
+          <div class="table-filter-bar">
+            <span class="font-bold text-[15px] text-slate-800">Employee Payslip Vault</span>
+          </div>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Employee</th>
+                <th>Period</th>
+                <th>Net Pay</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${payslips.length === 0 ? `<tr><td colspan="4" class="text-center py-6 text-slate-400">No payslips generated. Disburse a payroll run to generate PDF payslips.</td></tr>` :
+                payslips.map(ps => `
+                  <tr>
+                    <td><strong>${ps.employee_name || 'Staff'}</strong></td>
+                    <td class="font-mono text-xs text-slate-500">${ps.period}</td>
+                    <td class="font-mono text-xs font-bold text-emerald-600">${this.formatMoney(ps.net_pay_cents / 100)}</td>
                     <td>
-                      <button class="btn-press btn btn-secondary btn-sm" onclick="app.toggleShiftClock('${sh.id}', '${sh.status === 'clocked_in' ? 'completed' : 'clocked_in'}')">
-                        ${sh.status === 'clocked_in' ? 'Clock Out' : 'Clock In'}
+                      <button class="btn-press btn btn-secondary btn-sm" onclick="app.downloadPayslipPDF('${ps.id}')">
+                        <i data-lucide="download" class="w-3.5 h-3.5"></i> PDF
                       </button>
                     </td>
                   </tr>
@@ -1918,27 +2491,136 @@ const app = {
             </tbody>
           </table>
         </div>
+      </div>
+    `;
+  },
 
-        <!-- Employee Directory -->
-        <div class="table-container mockup-item" style="padding:24px;">
-          <div class="flex justify-between items-center mb-4">
-            <h3 style="font-size:16px; font-weight:800; color:#0F172A;">Active Employees (${this.data.employees.length})</h3>
-            <input type="text" class="table-filter-input" style="max-width:180px; height:32px; font-size:11.5px;" placeholder="Filter team..." oninput="app.filterCards('employees-list-container', 'emp-item', this.value)">
+  renderHRLeaves() {
+    const policies = this.data.leavePolicies || [];
+    const requests = this.data.leaveRequests || [];
+
+    return `
+      <!-- Leave Policy Balance Chips -->
+      <div class="pto-card-grid">
+        ${policies.length === 0 ? `
+          <div class="pto-card"><div><div class="text-xs text-slate-500 uppercase font-bold">Annual Vacation</div><div class="text-lg font-bold">20 Days</div></div><i data-lucide="sun" class="w-5 h-5 text-amber-500"></i></div>
+          <div class="pto-card"><div><div class="text-xs text-slate-500 uppercase font-bold">Sick Leave</div><div class="text-lg font-bold">10 Days</div></div><i data-lucide="thermometer" class="w-5 h-5 text-red-500"></i></div>
+          <div class="pto-card"><div><div class="text-xs text-slate-500 uppercase font-bold">Parental Leave</div><div class="text-lg font-bold">60 Days</div></div><i data-lucide="heart" class="w-5 h-5 text-purple-500"></i></div>
+          <div class="pto-card"><div><div class="text-xs text-slate-500 uppercase font-bold">Unpaid Leave</div><div class="text-lg font-bold">30 Days</div></div><i data-lucide="clock" class="w-5 h-5 text-blue-500"></i></div>
+        ` :
+          policies.map(pol => `
+            <div class="pto-card">
+              <div>
+                <div class="text-xs text-slate-500 uppercase font-bold tracking-wider">${pol.name}</div>
+                <div class="text-lg font-bold text-slate-900 mt-0.5">${pol.days_allowed} Days / yr</div>
+                <div class="text-[11px] text-slate-400 font-medium">${pol.paid ? '100% Paid Leave' : 'Unpaid Leave'}</div>
+              </div>
+              <span class="badge" style="background:#EFF6FF; color:#1D4ED8; text-transform:uppercase;">${pol.code}</span>
+            </div>
+          `).join('')}
+      </div>
+
+      <!-- Leave Requests Workflow Table -->
+      <div class="table-container mockup-item">
+        <div class="table-filter-bar">
+          <div>
+            <span class="font-bold text-[15px] text-slate-800">Leave & Time-Off Requests</span>
+            <p class="text-xs text-slate-400 mt-0.5">Manager review and calendar synchronization</p>
           </div>
-          <div id="employees-list-container" style="display:flex; flex-direction:column; gap:12px; max-height:480px; overflow-y:auto;">
-            ${this.data.employees.length === 0 ? `<div class="text-slate-400 text-sm py-4">No employees registered. Click "+ Add Employee" above.</div>` :
-              this.data.employees.map(emp => `
-                <div class="emp-item" style="display:flex; align-items:center; justify-content:space-between; padding:12px 14px; background:#F8FAFC; border:1px solid var(--border-subtle); border-radius:12px;">
-                  <div>
-                    <div style="font-weight:700; font-size:14px; color:#0F172A;">${emp.name}</div>
-                    <div style="font-size:12px; color:#64748B; font-weight:500;">${emp.role} • ${emp.department}</div>
-                  </div>
-                  <div style="font-family:var(--font-mono); font-size:13px; font-weight:700; color:#2563EB; background:#EFF6FF; padding:3px 8px; border-radius:6px;">$${emp.hourly_rate.toFixed(0)}/hr</div>
-                </div>
+          <button class="btn-press btn btn-primary" onclick="app.openRequestLeaveModal()">
+            <i data-lucide="calendar-plus" class="w-4 h-4"></i> Submit Leave Request
+          </button>
+        </div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Employee</th>
+              <th>Policy / Type</th>
+              <th>Date Window</th>
+              <th>Days</th>
+              <th>Reason</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${requests.length === 0 ? `<tr><td colspan="7" class="text-center py-6 text-slate-400">No leave requests submitted. Click "Submit Leave Request" to create one.</td></tr>` :
+              requests.map(req => `
+                <tr>
+                  <td><strong>${req.employee_name || 'Staff'}</strong></td>
+                  <td><span class="badge" style="background:#F1F5F9; color:#475569; font-weight:700;">${req.policy_name || req.policy_id}</span></td>
+                  <td class="font-mono text-xs text-slate-600">${req.start_date} — ${req.end_date}</td>
+                  <td class="font-mono text-xs font-bold">${req.total_days}d</td>
+                  <td class="text-slate-600 text-xs">${req.reason || '—'}</td>
+                  <td>
+                    <span class="badge" style="background:${req.status === 'approved' ? '#ECFDF5' : req.status === 'rejected' ? '#FEF2F2' : '#FFFBEB'}; color:${req.status === 'approved' ? '#047857' : req.status === 'rejected' ? '#DC2626' : '#D97706'}; border:1px solid ${req.status === 'approved' ? '#A7F3D0' : req.status === 'rejected' ? '#FECACA' : '#FDE68A'};">
+                      ${req.status.toUpperCase()}
+                    </span>
+                  </td>
+                  <td>
+                    ${req.status === 'pending' ? `
+                      <div class="flex items-center gap-1.5">
+                        <button class="btn-press btn btn-sm" style="background:#10B981; color:#FFFFFF; padding:4px 8px; font-size:11px;" onclick="app.reviewLeaveRequest('${req.id}', 'approved')">
+                          Approve
+                        </button>
+                        <button class="btn-press btn btn-sm" style="background:#EF4444; color:#FFFFFF; padding:4px 8px; font-size:11px;" onclick="app.reviewLeaveRequest('${req.id}', 'rejected')">
+                          Reject
+                        </button>
+                      </div>
+                    ` : `<span class="text-xs text-slate-400 font-mono">Reviewed</span>`}
+                  </td>
+                </tr>
               `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  },
+
+  renderHRDocuments() {
+    const docs = this.data.hrDocuments || [];
+
+    return `
+      <div class="table-container mockup-item" style="padding:24px;">
+        <div class="flex justify-between items-center mb-6">
+          <div>
+            <div class="flex items-center gap-2 mb-1">
+              <span class="badge" style="background:#FEF2F2; color:#B91C1C; font-weight:800; font-size:10px; letter-spacing:0.5px;">ROLE-GATED (MANAGE_HR)</span>
+              <h3 class="font-extrabold text-[18px] text-slate-900">HR Compliance & Document Vault</h3>
+            </div>
+            <p class="text-xs text-slate-500">Secure storage for contracts, NDAs, identification verifications, and performance reviews.</p>
           </div>
+          <button class="btn-press btn btn-primary" onclick="app.openUploadDocModal()">
+            <i data-lucide="upload-cloud" class="w-4 h-4"></i> Upload Document
+          </button>
         </div>
 
+        <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:16px;">
+          ${docs.length === 0 ? `<div class="text-slate-400 py-8 text-center col-span-full">No documents stored in the vault yet. Click "Upload Document" to archive compliance records.</div>` :
+            docs.map(doc => `
+              <div style="background:#F8FAFC; border:1px solid var(--border-subtle); border-radius:12px; padding:16px; display:flex; flex-direction:column; justify-content:space-between; gap:12px;">
+                <div class="flex items-start justify-between">
+                  <div class="flex items-center gap-3">
+                    <div style="width:40px; height:40px; border-radius:10px; background:#EFF6FF; color:#2563EB; display:flex; align-items:center; justify-content:center;">
+                      <i data-lucide="file-text" class="w-5 h-5"></i>
+                    </div>
+                    <div>
+                      <h4 class="font-bold text-sm text-slate-900">${doc.title}</h4>
+                      <span class="text-xs text-slate-500 font-medium">${doc.employee_name || 'Organization'}</span>
+                    </div>
+                  </div>
+                  <span class="badge" style="background:#FFFFFF; border:1px solid #E2E8F0; color:#334155; font-size:10.5px; text-transform:uppercase;">
+                    ${doc.doc_type || 'Contract'}
+                  </span>
+                </div>
+
+                <div class="flex justify-between items-center text-xs text-slate-400 font-mono pt-2 border-t border-slate-200/60">
+                  <span>${doc.file_name || 'document.pdf'}</span>
+                  <span>${((doc.file_size_bytes || 102400) / 1024).toFixed(0)} KB</span>
+                </div>
+              </div>
+            `).join('')}
+        </div>
       </div>
     `;
   },
@@ -2237,6 +2919,1288 @@ const app = {
             `).join('')}
           </tbody>
         </table>
+      </div>
+    `;
+  },
+
+  // ---------------- Module 11: Financial Intelligence, Statements & Exports ----------------
+  async ensureReportData(subTab) {
+    try {
+      if (subTab === 'kpis' && !this.data.reportsKPIs) {
+        const res = await fetch('/api/reports/executive-kpis');
+        if (res.ok) this.data.reportsKPIs = await res.json();
+      } else if (subTab === 'pnl' && !this.data.reportsPnL) {
+        await this.reloadPnLReport();
+      } else if (subTab === 'balance-sheet' && !this.data.reportsBalanceSheet) {
+        await this.reloadBalanceSheetReport();
+      } else if (subTab === 'cash-flow' && !this.data.reportsCashFlow) {
+        await this.reloadCashFlowReport();
+      } else if (subTab === 'aging') {
+        await this.reloadAgingReport();
+      } else if (subTab === 'inventory') {
+        await this.reloadInventoryReports();
+      } else if (subTab === 'sales' && !this.data.reportsSalesVelocity) {
+        const res = await fetch('/api/reports/sales-velocity');
+        if (res.ok) this.data.reportsSalesVelocity = await res.json();
+      }
+    } catch (err) {
+      console.warn('Failed to ensure report data:', err);
+    }
+  },
+
+  async reloadPnLReport() {
+    const f = this.reportsFilter;
+    try {
+      const res = await fetch(`/api/reports/pnl?start_date=${encodeURIComponent(f.pnlStart)}&end_date=${encodeURIComponent(f.pnlEnd)}`);
+      if (res.ok) {
+        this.data.reportsPnL = await res.json();
+        if (this.activeTab === 'reports' && this.activeReportsSubTab === 'pnl') this.render();
+      }
+    } catch (e) { console.error('Error fetching P&L:', e); }
+  },
+
+  async reloadBalanceSheetReport() {
+    const f = this.reportsFilter;
+    try {
+      const res = await fetch(`/api/reports/balance-sheet?as_of_date=${encodeURIComponent(f.balanceSheetAsOf)}`);
+      if (res.ok) {
+        this.data.reportsBalanceSheet = await res.json();
+        if (this.activeTab === 'reports' && this.activeReportsSubTab === 'balance-sheet') this.render();
+      }
+    } catch (e) { console.error('Error fetching Balance Sheet:', e); }
+  },
+
+  async reloadCashFlowReport() {
+    const f = this.reportsFilter;
+    try {
+      const res = await fetch(`/api/reports/cash-flow?start_date=${encodeURIComponent(f.cashFlowStart)}&end_date=${encodeURIComponent(f.cashFlowEnd)}`);
+      if (res.ok) {
+        this.data.reportsCashFlow = await res.json();
+        if (this.activeTab === 'reports' && this.activeReportsSubTab === 'cash-flow') this.render();
+      }
+    } catch (e) { console.error('Error fetching Cash Flow:', e); }
+  },
+
+  async reloadAgingReport() {
+    const f = this.reportsFilter;
+    const ep = f.agingType === 'ap' ? '/api/reports/aging-ap' : '/api/reports/aging-ar';
+    try {
+      const res = await fetch(`${ep}?as_of_date=${encodeURIComponent(f.agingAsOf)}`);
+      if (res.ok) {
+        if (f.agingType === 'ap') {
+          this.data.reportsAgingAP = await res.json();
+        } else {
+          this.data.reportsAgingAR = await res.json();
+        }
+        if (this.activeTab === 'reports' && this.activeReportsSubTab === 'aging') this.render();
+      }
+    } catch (e) { console.error('Error fetching Aging report:', e); }
+  },
+
+  async reloadInventoryReports() {
+    try {
+      const [valRes, turnRes] = await Promise.all([
+        fetch('/api/reports/inventory-valuation'),
+        fetch('/api/reports/inventory-turnover')
+      ]);
+      if (valRes.ok) this.data.reportsInventoryValuation = await valRes.json();
+      if (turnRes.ok) this.data.reportsInventoryTurnover = await turnRes.json();
+      if (this.activeTab === 'reports' && this.activeReportsSubTab === 'inventory') this.render();
+    } catch (e) { console.error('Error fetching inventory reports:', e); }
+  },
+
+  async reloadExecutiveKPIs() {
+    try {
+      const res = await fetch('/api/reports/executive-kpis');
+      if (res.ok) {
+        this.data.reportsKPIs = await res.json();
+        if (this.activeTab === 'reports' && this.activeReportsSubTab === 'kpis') this.render();
+      }
+    } catch (e) { console.error('Error fetching KPIs:', e); }
+  },
+
+  async reloadSalesVelocity() {
+    try {
+      const res = await fetch('/api/reports/sales-velocity');
+      if (res.ok) {
+        this.data.reportsSalesVelocity = await res.json();
+        if (this.activeTab === 'reports' && this.activeReportsSubTab === 'sales') this.render();
+      }
+    } catch (e) { console.error('Error fetching Sales Velocity:', e); }
+  },
+
+  triggerReportExport(entity, format, startDate = null, endDate = null, asOfDate = null) {
+    let url = `/api/reports/export?entity=${encodeURIComponent(entity)}&format=${encodeURIComponent(format)}`;
+    if (startDate) url += `&start_date=${encodeURIComponent(startDate)}`;
+    if (endDate) url += `&end_date=${encodeURIComponent(endDate)}`;
+    if (asOfDate) url += `&as_of_date=${encodeURIComponent(asOfDate)}`;
+    
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${entity}_${new Date().toISOString().slice(0,10)}.${format}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    this.showToast(`Export initiated: ${entity.toUpperCase()} (${format.toUpperCase()})`);
+  },
+
+  renderReports() {
+    const subTab = this.activeReportsSubTab || 'kpis';
+
+    let content = '';
+    switch (subTab) {
+      case 'kpis':
+        content = this.renderReportsKPIs();
+        break;
+      case 'pnl':
+        content = this.renderReportsPnL();
+        break;
+      case 'balance-sheet':
+        content = this.renderReportsBalanceSheet();
+        break;
+      case 'cash-flow':
+        content = this.renderReportsCashFlow();
+        break;
+      case 'aging':
+        content = this.renderReportsAging();
+        break;
+      case 'inventory':
+        content = this.renderReportsInventory();
+        break;
+      case 'sales':
+        content = this.renderReportsSales();
+        break;
+      case 'export':
+        content = this.renderReportsExport();
+        break;
+      default:
+        content = this.renderReportsKPIs();
+    }
+
+    return `
+      <div class="page-header">
+        <div>
+          <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-100 text-brand-blue text-[11px] font-bold uppercase tracking-widest mb-3">
+            <i data-lucide="bar-chart-3" class="w-3.5 h-3.5"></i> Financial Intelligence & Exports
+          </div>
+          <h1 class="page-title">Intelligence, Statements & Exports</h1>
+          <p class="page-sub">Audited real-time financial statements, aging ledgers, operational turnover, and vector document exports.</p>
+        </div>
+        <div class="page-actions">
+          <button class="btn-press btn btn-secondary" onclick="app.setReportsSubTab('export')">
+            <i data-lucide="download" class="w-4 h-4 text-brand-blue"></i>
+            Export Hub
+          </button>
+          <button class="btn-press btn btn-primary" onclick="app.ensureReportData(app.activeReportsSubTab); app.showToast('Report data refreshed');">
+            <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+            Refresh Intelligence
+          </button>
+        </div>
+      </div>
+
+      <!-- Reports Sub-navigation Bar -->
+      <div class="subnav-bar">
+        <button class="subnav-pill ${subTab === 'kpis' ? 'active' : ''}" onclick="app.setReportsSubTab('kpis')">
+          <i data-lucide="activity" class="w-4 h-4"></i> Executive KPIs
+        </button>
+        <button class="subnav-pill ${subTab === 'pnl' ? 'active' : ''}" onclick="app.setReportsSubTab('pnl')">
+          <i data-lucide="trending-up" class="w-4 h-4"></i> Profit & Loss (P&L)
+        </button>
+        <button class="subnav-pill ${subTab === 'balance-sheet' ? 'active' : ''}" onclick="app.setReportsSubTab('balance-sheet')">
+          <i data-lucide="scale" class="w-4 h-4"></i> Balance Sheet
+        </button>
+        <button class="subnav-pill ${subTab === 'cash-flow' ? 'active' : ''}" onclick="app.setReportsSubTab('cash-flow')">
+          <i data-lucide="arrow-left-right" class="w-4 h-4"></i> Cash Flow
+        </button>
+        <button class="subnav-pill ${subTab === 'aging' ? 'active' : ''}" onclick="app.setReportsSubTab('aging')">
+          <i data-lucide="clock" class="w-4 h-4"></i> Aged A/R & A/P
+        </button>
+        <button class="subnav-pill ${subTab === 'inventory' ? 'active' : ''}" onclick="app.setReportsSubTab('inventory')">
+          <i data-lucide="boxes" class="w-4 h-4"></i> Inventory Turnover
+        </button>
+        <button class="subnav-pill ${subTab === 'sales' ? 'active' : ''}" onclick="app.setReportsSubTab('sales')">
+          <i data-lucide="zap" class="w-4 h-4"></i> Sales Velocity
+        </button>
+        <button class="subnav-pill ${subTab === 'export' ? 'active' : ''}" onclick="app.setReportsSubTab('export')">
+          <i data-lucide="file-output" class="w-4 h-4"></i> Document Exports
+        </button>
+      </div>
+
+      <div class="reports-content-wrapper">
+        ${content}
+      </div>
+    `;
+  },
+
+  renderReportsKPIs() {
+    const k = this.data.reportsKPIs || {};
+    const mrr = k.mrr !== undefined ? k.mrr : (k.mrr_cents || 0) / 100;
+    const operatingCash = k.operating_cash !== undefined ? k.operating_cash : (k.operating_cash_cents || 0) / 100;
+    const commitments = k.open_purchase_commitments !== undefined ? k.open_purchase_commitments : (k.open_purchase_commitments_cents || 0) / 100;
+    const ytdRev = k.total_revenue_ytd !== undefined ? k.total_revenue_ytd : (k.ytd_revenue_cents || 0) / 100;
+    const ytdNet = k.net_profit_ytd !== undefined ? k.net_profit_ytd : (k.ytd_net_profit_cents || 0) / 100;
+    const runwayMonths = k.cash_runway_months || 0;
+    const grossMarginPct = k.gross_margin_pct || 0;
+    const pendingApprs = k.pending_approvals_count || 0;
+
+    const runwayBadge = runwayMonths >= 12
+      ? '<span class="status-badge status-approved">12+ Months • Extended Runway</span>'
+      : runwayMonths >= 6
+      ? '<span class="status-badge status-delivered">Healthy Runway (>6m)</span>'
+      : '<span class="status-badge status-rejected">Critical Runway (<6m)</span>';
+
+    return `
+      <!-- Executive Top KPI Grid -->
+      <div class="stats-grid mb-6">
+        <div class="stat-card mockup-item">
+          <div class="flex justify-between items-start mb-2">
+            <div class="stat-title">Monthly Recurring Revenue</div>
+            <div class="w-10 h-10 bg-blue-50 rounded-xl flex items-center justify-center">
+              <i data-lucide="repeat" class="w-5 h-5 text-brand-blue"></i>
+            </div>
+          </div>
+          <div class="stat-value">${this.formatMoney(mrr)}</div>
+          <div class="stat-trend trend-up">MRR Run-rate</div>
+        </div>
+
+        <div class="stat-card mockup-item">
+          <div class="flex justify-between items-start mb-2">
+            <div class="stat-title">Gross Margin %</div>
+            <div class="w-10 h-10 bg-emerald-50 rounded-xl flex items-center justify-center">
+              <i data-lucide="percent" class="w-5 h-5 text-emerald-500"></i>
+            </div>
+          </div>
+          <div class="stat-value" style="color:#059669;">${grossMarginPct.toFixed(1)}%</div>
+          <div class="stat-trend trend-up">Revenue vs COGS efficiency</div>
+        </div>
+
+        <div class="stat-card mockup-item">
+          <div class="flex justify-between items-start mb-2">
+            <div class="stat-title">Operating Cash</div>
+            <div class="w-10 h-10 bg-indigo-50 rounded-xl flex items-center justify-center">
+              <i data-lucide="wallet" class="w-5 h-5 text-indigo-600"></i>
+            </div>
+          </div>
+          <div class="stat-value">${this.formatMoney(operatingCash)}</div>
+          <div class="stat-trend font-medium text-slate-500">Account 1000 Reserves</div>
+        </div>
+
+        <div class="stat-card mockup-item">
+          <div class="flex justify-between items-start mb-2">
+            <div class="stat-title">Cash Runway</div>
+            <div class="w-10 h-10 bg-amber-50 rounded-xl flex items-center justify-center">
+              <i data-lucide="hourglass" class="w-5 h-5 text-amber-500"></i>
+            </div>
+          </div>
+          <div class="stat-value">${runwayMonths.toFixed(1)} <span class="text-xs font-semibold text-slate-400">Months</span></div>
+          <div class="stat-trend">${runwayBadge}</div>
+        </div>
+      </div>
+
+      <!-- Secondary KPI Row -->
+      <div class="stats-grid mb-6">
+        <div class="stat-card mockup-item">
+          <div class="flex justify-between items-start mb-2">
+            <div class="stat-title">YTD Gross Revenue</div>
+            <div class="w-10 h-10 bg-purple-50 rounded-xl flex items-center justify-center">
+              <i data-lucide="trending-up" class="w-5 h-5 text-purple-600"></i>
+            </div>
+          </div>
+          <div class="stat-value">${this.formatMoney(ytdRev)}</div>
+          <div class="stat-trend trend-up">Year-to-date booked</div>
+        </div>
+
+        <div class="stat-card mockup-item">
+          <div class="flex justify-between items-start mb-2">
+            <div class="stat-title">YTD Net Profit</div>
+            <div class="w-10 h-10 bg-emerald-50 rounded-xl flex items-center justify-center">
+              <i data-lucide="award" class="w-5 h-5 text-emerald-600"></i>
+            </div>
+          </div>
+          <div class="stat-value" style="color:#059669;">${this.formatMoney(ytdNet)}</div>
+          <div class="stat-trend trend-up">Net margin bottom-line</div>
+        </div>
+
+        <div class="stat-card mockup-item">
+          <div class="flex justify-between items-start mb-2">
+            <div class="stat-title">Open Commitments</div>
+            <div class="w-10 h-10 bg-orange-50 rounded-xl flex items-center justify-center">
+              <i data-lucide="truck" class="w-5 h-5 text-orange-500"></i>
+            </div>
+          </div>
+          <div class="stat-value">${this.formatMoney(commitments)}</div>
+          <div class="stat-trend text-slate-500">Issued & Ordered POs</div>
+        </div>
+
+        <div class="stat-card mockup-item">
+          <div class="flex justify-between items-start mb-2">
+            <div class="stat-title">Pending Governance</div>
+            <div class="w-10 h-10 bg-rose-50 rounded-xl flex items-center justify-center">
+              <i data-lucide="shield-alert" class="w-5 h-5 text-rose-500"></i>
+            </div>
+          </div>
+          <div class="stat-value" style="color:${pendingApprs > 0 ? '#E11D48' : '#059669'};">${pendingApprs} <span class="text-xs font-semibold text-slate-400">Actions</span></div>
+          <div class="stat-trend text-slate-500 font-medium">Awaiting Dual-Actor Sign-off</div>
+        </div>
+      </div>
+
+      <!-- Strategic Directives Card -->
+      <div class="financial-statement-card">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h3 class="text-base font-bold text-brand-textMain">Executive Briefing & Fast Actions</h3>
+            <p class="text-xs text-slate-400">Direct shortcuts to audit-grade statements and operational actions.</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button class="btn btn-secondary text-xs" onclick="app.setReportsSubTab('pnl')">View Full P&L</button>
+            <button class="btn btn-secondary text-xs" onclick="app.setReportsSubTab('balance-sheet')">View Balance Sheet</button>
+            <button class="btn btn-secondary text-xs" onclick="app.setReportsSubTab('aging')">Review Aging</button>
+          </div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
+          <div class="p-4 rounded-xl bg-slate-50 border border-slate-200">
+            <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Liquidity & Runway</div>
+            <div class="text-sm text-slate-700">Operating balance stands at <strong>${this.formatMoney(k.operating_cash_cents / 100)}</strong> providing <strong>${k.cash_runway_months.toFixed(1)} months</strong> of continuous runway under active expenditure rates.</div>
+          </div>
+          <div class="p-4 rounded-xl bg-slate-50 border border-slate-200">
+            <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Profitability & Margin</div>
+            <div class="text-sm text-slate-700">Gross margin maintained at <strong>${k.gross_margin_pct.toFixed(1)}%</strong> with YTD bottom-line net profit of <strong>${this.formatMoney(k.ytd_net_profit_cents / 100)}</strong>.</div>
+          </div>
+          <div class="p-4 rounded-xl bg-slate-50 border border-slate-200">
+            <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Procurement & Outlays</div>
+            <div class="text-sm text-slate-700">Active purchase order commitments total <strong>${this.formatMoney(k.open_purchase_commitments_cents / 100)}</strong> across pending vendor deliveries.</div>
+          </div>
+        </div>
+      </div>
+    `;
+  },
+
+  renderReportsPnL() {
+    const pnl = this.data.reportsPnL || {
+      start_date: this.reportsFilter.pnlStart,
+      end_date: this.reportsFilter.pnlEnd,
+      revenue_cents: 0,
+      cogs_cents: 0,
+      gross_profit_cents: 0,
+      gross_margin_pct: 0,
+      opex_cents: 0,
+      net_profit_cents: 0,
+      items: []
+    };
+
+    const revItems = (pnl.items || []).filter(i => i.category === 'revenue');
+    const cogsItems = (pnl.items || []).filter(i => i.category === 'cogs');
+    const opexItems = (pnl.items || []).filter(i => i.category === 'opex');
+
+    return `
+      <!-- Filter & Action Toolbar -->
+      <div class="reports-toolbar">
+        <div class="reports-date-group">
+          <span>Period:</span>
+          <input type="date" class="reports-date-input" value="${this.reportsFilter.pnlStart}" onchange="app.setReportsFilter('pnlStart', this.value)">
+          <span>to</span>
+          <input type="date" class="reports-date-input" value="${this.reportsFilter.pnlEnd}" onchange="app.setReportsFilter('pnlEnd', this.value)">
+          <button class="btn-press btn btn-primary text-xs py-1.5 px-3" onclick="app.reloadPnLReport()">
+            <i data-lucide="play" class="w-3.5 h-3.5"></i> Run Statement
+          </button>
+        </div>
+        <div class="flex items-center gap-2">
+          <button class="btn-press btn btn-secondary text-xs" onclick="app.triggerReportExport('pnl', 'csv', app.reportsFilter.pnlStart, app.reportsFilter.pnlEnd)">
+            <i data-lucide="file-spreadsheet" class="w-3.5 h-3.5 text-emerald-600"></i> Export CSV
+          </button>
+          <button class="btn-press btn btn-secondary text-xs" onclick="app.triggerReportExport('pnl', 'pdf', app.reportsFilter.pnlStart, app.reportsFilter.pnlEnd)">
+            <i data-lucide="file-text" class="w-3.5 h-3.5 text-rose-600"></i> Vector PDF
+          </button>
+        </div>
+      </div>
+
+      <!-- P&L Metric Highlights -->
+      <div class="stats-grid mb-6">
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Operating Revenue</div>
+          <div class="stat-value">${this.formatMoney(pnl.revenue_cents / 100)}</div>
+          <div class="stat-trend trend-up">Invoiced & Earned</div>
+        </div>
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Cost of Goods Sold</div>
+          <div class="stat-value">${this.formatMoney(pnl.cogs_cents / 100)}</div>
+          <div class="stat-trend text-slate-500 font-medium">Direct Production / Purchase</div>
+        </div>
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Gross Profit</div>
+          <div class="stat-value" style="color:#059669;">${this.formatMoney(pnl.gross_profit_cents / 100)}</div>
+          <div class="stat-trend trend-up">Gross Margin: ${pnl.gross_margin_pct.toFixed(1)}%</div>
+        </div>
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Operating Expenses</div>
+          <div class="stat-value">${this.formatMoney(pnl.opex_cents / 100)}</div>
+          <div class="stat-trend text-slate-500 font-medium">Payroll & Overhead</div>
+        </div>
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Net Operating Profit</div>
+          <div class="stat-value" style="color:${pnl.net_profit_cents >= 0 ? '#059669' : '#DC2626'};">${this.formatMoney(pnl.net_profit_cents / 100)}</div>
+          <div class="stat-trend ${pnl.net_profit_cents >= 0 ? 'trend-up' : 'text-rose-500'}">${pnl.net_profit_cents >= 0 ? 'Net Income' : 'Net Deficit'}</div>
+        </div>
+      </div>
+
+      <!-- Financial Statement Table -->
+      <div class="table-container mockup-item">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th style="width:140px;">Account Code</th>
+              <th>Account Description</th>
+              <th style="width:160px;">Classification</th>
+              <th style="width:180px; text-align:right;">Period Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            <!-- REVENUE SECTION -->
+            <tr class="statement-row-category">
+              <td colspan="4">I. Operating Revenue</td>
+            </tr>
+            ${revItems.length > 0 ? revItems.map(item => `
+              <tr>
+                <td class="mono-code">${item.account_code}</td>
+                <td><strong>${item.account_name}</strong></td>
+                <td><span class="actor-pill actor-agent">REVENUE</span></td>
+                <td style="text-align:right; font-family:var(--font-mono); font-weight:700; color:#059669;">${this.formatMoney(item.amount_cents / 100)}</td>
+              </tr>
+            `).join('') : `<tr><td colspan="4" class="text-center py-3 text-slate-400">No revenue entries recorded for selected period</td></tr>`}
+            <tr class="statement-row-total">
+              <td colspan="3" style="text-align:right; padding-right:16px;">Total Operating Revenue:</td>
+              <td style="text-align:right; font-family:var(--font-mono); font-weight:800; color:#059669;">${this.formatMoney(pnl.revenue_cents / 100)}</td>
+            </tr>
+
+            <!-- COGS SECTION -->
+            <tr class="statement-row-category">
+              <td colspan="4">II. Cost of Goods Sold (COGS)</td>
+            </tr>
+            ${cogsItems.length > 0 ? cogsItems.map(item => `
+              <tr>
+                <td class="mono-code">${item.account_code}</td>
+                <td><strong>${item.account_name}</strong></td>
+                <td><span class="actor-pill actor-human">COGS</span></td>
+                <td style="text-align:right; font-family:var(--font-mono); font-weight:700; color:#E11D48;">${this.formatMoney(item.amount_cents / 100)}</td>
+              </tr>
+            `).join('') : `<tr><td colspan="4" class="text-center py-3 text-slate-400">No direct inventory/production COGS entries</td></tr>`}
+            <tr class="statement-row-total">
+              <td colspan="3" style="text-align:right; padding-right:16px;">Gross Profit (Revenue - COGS):</td>
+              <td style="text-align:right; font-family:var(--font-mono); font-weight:800; color:#059669;">${this.formatMoney(pnl.gross_profit_cents / 100)}</td>
+            </tr>
+
+            <!-- OPEX SECTION -->
+            <tr class="statement-row-category">
+              <td colspan="4">III. Operating Expenses (OpEx)</td>
+            </tr>
+            ${opexItems.length > 0 ? opexItems.map(item => `
+              <tr>
+                <td class="mono-code">${item.account_code}</td>
+                <td><strong>${item.account_name}</strong></td>
+                <td><span class="actor-pill actor-human">OPEX</span></td>
+                <td style="text-align:right; font-family:var(--font-mono); font-weight:700; color:#475569;">${this.formatMoney(item.amount_cents / 100)}</td>
+              </tr>
+            `).join('') : `<tr><td colspan="4" class="text-center py-3 text-slate-400">No overhead expenses recorded</td></tr>`}
+            <tr class="statement-row-total">
+              <td colspan="3" style="text-align:right; padding-right:16px;">Total Operating Expenses:</td>
+              <td style="text-align:right; font-family:var(--font-mono); font-weight:800; color:#475569;">${this.formatMoney(pnl.opex_cents / 100)}</td>
+            </tr>
+
+            <!-- NET INCOME -->
+            <tr class="statement-row-total" style="background:rgba(16, 185, 129, 0.08);">
+              <td colspan="3" style="text-align:right; font-size:16px; padding-right:16px; color:#059669;">NET PROFIT / (LOSS):</td>
+              <td style="text-align:right; font-family:var(--font-mono); font-weight:900; font-size:16px; color:${pnl.net_profit_cents >= 0 ? '#059669' : '#DC2626'};">${this.formatMoney(pnl.net_profit_cents / 100)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    `;
+  },
+
+  renderReportsBalanceSheet() {
+    const bs = this.data.reportsBalanceSheet || {
+      as_of_date: this.reportsFilter.balanceSheetAsOf,
+      total_assets_cents: 0,
+      total_liabilities_cents: 0,
+      total_equity_cents: 0,
+      is_balanced: true,
+      assets: [],
+      liabilities: [],
+      equity: []
+    };
+
+    const isBalanced = bs.is_balanced;
+    const balanceDiff = bs.total_assets_cents - (bs.total_liabilities_cents + bs.total_equity_cents);
+
+    return `
+      <div class="reports-toolbar">
+        <div class="reports-date-group">
+          <span>Statement As Of:</span>
+          <input type="date" class="reports-date-input" value="${this.reportsFilter.balanceSheetAsOf}" onchange="app.setReportsFilter('balanceSheetAsOf', this.value)">
+          <button class="btn-press btn btn-primary text-xs py-1.5 px-3" onclick="app.reloadBalanceSheetReport()">
+            <i data-lucide="play" class="w-3.5 h-3.5"></i> Run Balance Sheet
+          </button>
+        </div>
+        <div class="flex items-center gap-3">
+          ${isBalanced ? `
+            <span class="balance-check-pill balanced" title="Assets = Liabilities + Equity strictly satisfied">
+              <i data-lucide="check-circle" class="w-4 h-4"></i> Balanced Equation Verified
+            </span>
+          ` : `
+            <span class="balance-check-pill unbalanced" title="Variance detected: ${this.formatMoney(balanceDiff / 100)}">
+              <i data-lucide="alert-triangle" class="w-4 h-4"></i> Equation Out of Balance (${this.formatMoney(balanceDiff / 100)})
+            </span>
+          `}
+          <button class="btn-press btn btn-secondary text-xs" onclick="app.triggerReportExport('balance-sheet', 'csv', null, null, app.reportsFilter.balanceSheetAsOf)">
+            <i data-lucide="file-spreadsheet" class="w-3.5 h-3.5 text-emerald-600"></i> Export CSV
+          </button>
+          <button class="btn-press btn btn-secondary text-xs" onclick="app.triggerReportExport('balance-sheet', 'pdf', null, null, app.reportsFilter.balanceSheetAsOf)">
+            <i data-lucide="file-text" class="w-3.5 h-3.5 text-rose-600"></i> Vector PDF
+          </button>
+        </div>
+      </div>
+
+      <!-- High-Level Overview Grid -->
+      <div class="stats-grid mb-6">
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Total Assets (Debit)</div>
+          <div class="stat-value" style="color:#2563EB;">${this.formatMoney(bs.total_assets_cents / 100)}</div>
+          <div class="stat-trend trend-up">Cash, Receivables & Stock</div>
+        </div>
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Total Liabilities (Credit)</div>
+          <div class="stat-value" style="color:#E11D48;">${this.formatMoney(bs.total_liabilities_cents / 100)}</div>
+          <div class="stat-trend text-slate-500 font-medium">Payables & Obligations</div>
+        </div>
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Total Equity (Credit)</div>
+          <div class="stat-value" style="color:#059669;">${this.formatMoney(bs.total_equity_cents / 100)}</div>
+          <div class="stat-trend trend-up">Capital & Current Earnings</div>
+        </div>
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Liabilities + Equity</div>
+          <div class="stat-value">${this.formatMoney((bs.total_liabilities_cents + bs.total_equity_cents) / 100)}</div>
+          <div class="stat-trend ${isBalanced ? 'trend-up' : 'text-rose-500'}">${isBalanced ? '✓ Equation Exact (Zero Variance)' : 'Variance: ' + this.formatMoney(balanceDiff / 100)}</div>
+        </div>
+      </div>
+
+      <!-- 3-Column Detailed Ledger Layout -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <!-- ASSETS -->
+        <div class="financial-statement-card">
+          <div class="flex items-center justify-between pb-3 border-b border-slate-200 mb-3">
+            <h3 class="font-extrabold text-sm text-brand-textMain uppercase tracking-wider flex items-center gap-2">
+              <i data-lucide="landmark" class="w-4 h-4 text-brand-blue"></i> Assets (1000s)
+            </h3>
+            <span class="mono-code font-bold text-blue-600">${this.formatMoney(bs.total_assets_cents / 100)}</span>
+          </div>
+          <table class="w-full text-xs">
+            <thead>
+              <tr class="text-slate-400 border-b border-slate-100">
+                <th class="py-2 text-left">Account</th>
+                <th class="py-2 text-right">Balance</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${(bs.assets || []).map(a => `
+                <tr class="border-b border-slate-50 hover:bg-slate-50/50">
+                  <td class="py-2.5">
+                    <span class="mono-code text-[11px] text-slate-400 mr-1.5">${a.code}</span>
+                    <strong class="text-slate-700">${a.name}</strong>
+                  </td>
+                  <td class="py-2.5 text-right font-mono font-semibold text-slate-800">${this.formatMoney(a.balance_cents / 100)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+
+        <!-- LIABILITIES -->
+        <div class="financial-statement-card">
+          <div class="flex items-center justify-between pb-3 border-b border-slate-200 mb-3">
+            <h3 class="font-extrabold text-sm text-brand-textMain uppercase tracking-wider flex items-center gap-2">
+              <i data-lucide="credit-card" class="w-4 h-4 text-rose-500"></i> Liabilities (2000s)
+            </h3>
+            <span class="mono-code font-bold text-rose-600">${this.formatMoney(bs.total_liabilities_cents / 100)}</span>
+          </div>
+          <table class="w-full text-xs">
+            <thead>
+              <tr class="text-slate-400 border-b border-slate-100">
+                <th class="py-2 text-left">Account</th>
+                <th class="py-2 text-right">Balance</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${(bs.liabilities || []).map(l => `
+                <tr class="border-b border-slate-50 hover:bg-slate-50/50">
+                  <td class="py-2.5">
+                    <span class="mono-code text-[11px] text-slate-400 mr-1.5">${l.code}</span>
+                    <strong class="text-slate-700">${l.name}</strong>
+                  </td>
+                  <td class="py-2.5 text-right font-mono font-semibold text-slate-800">${this.formatMoney(l.balance_cents / 100)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+
+        <!-- EQUITY -->
+        <div class="financial-statement-card">
+          <div class="flex items-center justify-between pb-3 border-b border-slate-200 mb-3">
+            <h3 class="font-extrabold text-sm text-brand-textMain uppercase tracking-wider flex items-center gap-2">
+              <i data-lucide="pie-chart" class="w-4 h-4 text-emerald-500"></i> Equity (3000s)
+            </h3>
+            <span class="mono-code font-bold text-emerald-600">${this.formatMoney(bs.total_equity_cents / 100)}</span>
+          </div>
+          <table class="w-full text-xs">
+            <thead>
+              <tr class="text-slate-400 border-b border-slate-100">
+                <th class="py-2 text-left">Account</th>
+                <th class="py-2 text-right">Balance</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${(bs.equity || []).map(e => `
+                <tr class="border-b border-slate-50 hover:bg-slate-50/50">
+                  <td class="py-2.5">
+                    <span class="mono-code text-[11px] text-slate-400 mr-1.5">${e.code}</span>
+                    <strong class="text-slate-700">${e.name}</strong>
+                  </td>
+                  <td class="py-2.5 text-right font-mono font-semibold text-slate-800">${this.formatMoney(e.balance_cents / 100)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  },
+
+  renderReportsCashFlow() {
+    const cf = this.data.reportsCashFlow || {
+      start_date: this.reportsFilter.cashFlowStart,
+      end_date: this.reportsFilter.cashFlowEnd,
+      beginning_cash_cents: 0,
+      inflows_cents: 0,
+      outflows_cents: 0,
+      net_cash_flow_cents: 0,
+      ending_cash_cents: 0,
+      activities: []
+    };
+
+    return `
+      <div class="reports-toolbar">
+        <div class="reports-date-group">
+          <span>Cash Statement Period:</span>
+          <input type="date" class="reports-date-input" value="${this.reportsFilter.cashFlowStart}" onchange="app.setReportsFilter('cashFlowStart', this.value)">
+          <span>to</span>
+          <input type="date" class="reports-date-input" value="${this.reportsFilter.cashFlowEnd}" onchange="app.setReportsFilter('cashFlowEnd', this.value)">
+          <button class="btn-press btn btn-primary text-xs py-1.5 px-3" onclick="app.reloadCashFlowReport()">
+            <i data-lucide="play" class="w-3.5 h-3.5"></i> Run Cash Flow
+          </button>
+        </div>
+        <div class="flex items-center gap-2">
+          <button class="btn-press btn btn-secondary text-xs" onclick="app.triggerReportExport('cash-flow', 'csv', app.reportsFilter.cashFlowStart, app.reportsFilter.cashFlowEnd)">
+            <i data-lucide="file-spreadsheet" class="w-3.5 h-3.5 text-emerald-600"></i> Export CSV
+          </button>
+          <button class="btn-press btn btn-secondary text-xs" onclick="app.triggerReportExport('cash-flow', 'pdf', app.reportsFilter.cashFlowStart, app.reportsFilter.cashFlowEnd)">
+            <i data-lucide="file-text" class="w-3.5 h-3.5 text-rose-600"></i> Vector PDF
+          </button>
+        </div>
+      </div>
+
+      <!-- Cash Metric Cards -->
+      <div class="stats-grid mb-6">
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Beginning Cash</div>
+          <div class="stat-value">${this.formatMoney(cf.beginning_cash_cents / 100)}</div>
+          <div class="stat-trend text-slate-500">Balance at ${cf.start_date}</div>
+        </div>
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Cash Inflows (+)</div>
+          <div class="stat-value" style="color:#059669;">+${this.formatMoney(cf.inflows_cents / 100)}</div>
+          <div class="stat-trend trend-up">Collections & Receipts</div>
+        </div>
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Cash Outflows (-)</div>
+          <div class="stat-value" style="color:#DC2626;">-${this.formatMoney(cf.outflows_cents / 100)}</div>
+          <div class="stat-trend text-slate-500 font-medium">Vendor & Payroll Payments</div>
+        </div>
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Net Cash Flow</div>
+          <div class="stat-value" style="color:${cf.net_cash_flow_cents >= 0 ? '#059669' : '#DC2626'};">${this.formatMoney(cf.net_cash_flow_cents / 100)}</div>
+          <div class="stat-trend ${cf.net_cash_flow_cents >= 0 ? 'trend-up' : 'text-rose-500'}">${cf.net_cash_flow_cents >= 0 ? 'Net Inflow' : 'Net Burn'}</div>
+        </div>
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Ending Cash</div>
+          <div class="stat-value" style="color:#2563EB;">${this.formatMoney(cf.ending_cash_cents / 100)}</div>
+          <div class="stat-trend text-slate-500">Balance at ${cf.end_date}</div>
+        </div>
+      </div>
+
+      <!-- Activities Table -->
+      <div class="table-container mockup-item">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th style="width:140px;">Timestamp</th>
+              <th style="width:160px;">Reference</th>
+              <th>Activity Description</th>
+              <th style="width:140px;">Flow Type</th>
+              <th style="width:160px; text-align:right;">Cash Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${(cf.activities || []).length > 0 ? (cf.activities || []).map(a => `
+              <tr>
+                <td class="mono-code text-[11px] text-slate-400">${a.timestamp ? a.timestamp.slice(0, 10) : ''}</td>
+                <td class="mono-code">${a.reference_number || '-'}</td>
+                <td><strong>${a.description}</strong></td>
+                <td>
+                  <span class="actor-pill ${a.activity_type === 'inflow' ? 'actor-agent' : 'actor-human'}">
+                    ${a.activity_type.toUpperCase()}
+                  </span>
+                </td>
+                <td style="text-align:right; font-family:var(--font-mono); font-weight:700; color:${a.activity_type === 'inflow' ? '#059669' : '#DC2626'};">
+                  ${a.activity_type === 'inflow' ? '+' : '-'}${this.formatMoney(a.amount_cents / 100)}
+                </td>
+              </tr>
+            `).join('') : `<tr><td colspan="5" class="text-center py-4 text-slate-400">No cash transactions in selected period</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
+  },
+
+  renderReportsAging() {
+    const isAR = this.reportsFilter.agingType !== 'ap';
+    const rep = isAR ? (this.data.reportsAgingAR || {}) : (this.data.reportsAgingAP || {});
+    const items = rep.items || [];
+
+    return `
+      <!-- Sub-Toggle between A/R and A/P -->
+      <div class="reports-toolbar">
+        <div class="flex items-center gap-2">
+          <button class="btn-press btn ${isAR ? 'btn-primary' : 'btn-secondary'} text-xs" onclick="app.setReportsFilter('agingType', 'ar'); app.reloadAgingReport();">
+            <i data-lucide="arrow-down-left" class="w-3.5 h-3.5"></i> Accounts Receivable (A/R)
+          </button>
+          <button class="btn-press btn ${!isAR ? 'btn-primary' : 'btn-secondary'} text-xs" onclick="app.setReportsFilter('agingType', 'ap'); app.reloadAgingReport();">
+            <i data-lucide="arrow-up-right" class="w-3.5 h-3.5"></i> Accounts Payable (A/P)
+          </button>
+        </div>
+        <div class="reports-date-group">
+          <span>Aging As Of:</span>
+          <input type="date" class="reports-date-input" value="${this.reportsFilter.agingAsOf}" onchange="app.setReportsFilter('agingAsOf', this.value)">
+          <button class="btn-press btn btn-secondary text-xs py-1.5 px-3" onclick="app.reloadAgingReport()">
+            <i data-lucide="play" class="w-3.5 h-3.5"></i> Refresh Aging
+          </button>
+          <button class="btn-press btn btn-secondary text-xs" onclick="app.triggerReportExport(app.reportsFilter.agingType === 'ap' ? 'aging-ap' : 'aging-ar', 'csv', null, null, app.reportsFilter.agingAsOf)">
+            <i data-lucide="file-spreadsheet" class="w-3.5 h-3.5 text-emerald-600"></i> CSV
+          </button>
+          <button class="btn-press btn btn-secondary text-xs" onclick="app.triggerReportExport(app.reportsFilter.agingType === 'ap' ? 'aging-ap' : 'aging-ar', 'pdf', null, null, app.reportsFilter.agingAsOf)">
+            <i data-lucide="file-text" class="w-3.5 h-3.5 text-rose-600"></i> PDF
+          </button>
+        </div>
+      </div>
+
+      <!-- 5 Aging Bucket Cards -->
+      <div class="aging-buckets-grid">
+        <div class="aging-bucket-card bucket-current">
+          <div class="aging-bucket-title">Current (Not Due)</div>
+          <div class="aging-bucket-amount" style="color:#10B981;">${this.formatMoney((rep.current_cents || 0) / 100)}</div>
+          <div class="aging-bucket-meta">On schedule</div>
+        </div>
+        <div class="aging-bucket-card bucket-1-30">
+          <div class="aging-bucket-title">1–30 Days Overdue</div>
+          <div class="aging-bucket-amount" style="color:#3B82F6;">${this.formatMoney((rep.days_1_30_cents || 0) / 100)}</div>
+          <div class="aging-bucket-meta">Early notice</div>
+        </div>
+        <div class="aging-bucket-card bucket-31-60">
+          <div class="aging-bucket-title">31–60 Days Overdue</div>
+          <div class="aging-bucket-amount" style="color:#F59E0B;">${this.formatMoney((rep.days_31_60_cents || 0) / 100)}</div>
+          <div class="aging-bucket-meta">Follow-up due</div>
+        </div>
+        <div class="aging-bucket-card bucket-61-90">
+          <div class="aging-bucket-title">61–90 Days Overdue</div>
+          <div class="aging-bucket-amount" style="color:#F97316;">${this.formatMoney((rep.days_61_90_cents || 0) / 100)}</div>
+          <div class="aging-bucket-meta">Escalation tier</div>
+        </div>
+        <div class="aging-bucket-card bucket-90-plus">
+          <div class="aging-bucket-title">90+ Days (Critical)</div>
+          <div class="aging-bucket-amount" style="color:#EF4444;">${this.formatMoney((rep.days_90_plus_cents || 0) / 100)}</div>
+          <div class="aging-bucket-meta">High delinquency</div>
+        </div>
+      </div>
+
+      <!-- Aging Total Banner -->
+      <div class="flex items-center justify-between p-4 bg-slate-50 border border-slate-200 rounded-xl mb-6">
+        <div>
+          <span class="text-xs font-bold text-slate-500 uppercase tracking-wider">Total Outstanding ${isAR ? 'Receivables' : 'Payables'}:</span>
+          <span class="text-xl font-extrabold text-brand-textMain ml-2">${this.formatMoney((rep.total_cents || 0) / 100)}</span>
+        </div>
+        <span class="text-xs text-slate-500">${items.length} open ${isAR ? 'customer invoices' : 'supplier bills'}</span>
+      </div>
+
+      <!-- Delinquent / Open Items Drill-Down Table -->
+      <div class="table-container mockup-item">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>${isAR ? 'Customer' : 'Supplier'} Name</th>
+              <th style="width:140px;">Document #</th>
+              <th style="width:120px;">Issue Date</th>
+              <th style="width:120px;">Due Date</th>
+              <th style="width:110px;">Overdue</th>
+              <th style="width:140px; text-align:right;">Total Amount</th>
+              <th style="width:140px; text-align:right;">Balance Due</th>
+              <th style="width:130px;">Aging Bracket</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${items.length > 0 ? items.map(i => {
+              const badgeClass = i.bracket === 'current' ? 'status-delivered' : i.bracket === '1_30' ? 'status-draft' : i.bracket === '31_60' ? 'status-pending' : i.bracket === '61_90' ? 'status-rejected' : 'status-rejected';
+              return `
+                <tr>
+                  <td><strong>${i.entity_name}</strong></td>
+                  <td class="mono-code">${i.reference_number}</td>
+                  <td class="text-slate-500 text-xs">${i.issue_date}</td>
+                  <td class="text-slate-500 text-xs font-medium">${i.due_date}</td>
+                  <td>
+                    ${i.days_overdue > 0 ? `<span class="text-rose-600 font-bold text-xs">${i.days_overdue} days</span>` : `<span class="text-emerald-600 text-xs">Current</span>`}
+                  </td>
+                  <td style="text-align:right; font-family:var(--font-mono);">${this.formatMoney(i.total_cents / 100)}</td>
+                  <td style="text-align:right; font-family:var(--font-mono); font-weight:800; color:#0F172A;">${this.formatMoney(i.due_cents / 100)}</td>
+                  <td>
+                    <span class="status-badge ${badgeClass}">${i.bracket.toUpperCase()}</span>
+                  </td>
+                </tr>
+              `;
+            }).join('') : `<tr><td colspan="8" class="text-center py-4 text-slate-400">All balances are completely settled. No outstanding items found.</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
+  },
+
+  renderReportsInventory() {
+    const val = this.data.reportsInventoryValuation || {
+      total_cost_valuation_cents: 0,
+      total_retail_valuation_cents: 0,
+      potential_margin_pct: 0,
+      total_skus: 0,
+      skus: [],
+      warehouses: []
+    };
+    const turn = this.data.reportsInventoryTurnover || {
+      period_days: 90,
+      cogs_cents: 0,
+      avg_inventory_cents: 0,
+      turnover_ratio: 0,
+      days_sales_inventory: 0,
+      dead_stock_items: []
+    };
+
+    const mode = this.reportsFilter.inventoryMode || 'sku';
+
+    return `
+      <!-- Valuation & Turnover Metric Cards -->
+      <div class="stats-grid mb-6">
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Cost Valuation (Capital Tied)</div>
+          <div class="stat-value" style="color:#2563EB;">${this.formatMoney(val.total_cost_valuation_cents / 100)}</div>
+          <div class="stat-trend text-slate-500">${val.total_skus} Active SKUs</div>
+        </div>
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Retail Valuation</div>
+          <div class="stat-value" style="color:#059669;">${this.formatMoney(val.total_retail_valuation_cents / 100)}</div>
+          <div class="stat-trend trend-up">Potential Gross Value</div>
+        </div>
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Unrealized Margin</div>
+          <div class="stat-value">${val.potential_margin_pct.toFixed(1)}%</div>
+          <div class="stat-trend trend-up">Spread between Cost & Retail</div>
+        </div>
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Turnover Ratio (90d)</div>
+          <div class="stat-value">${turn.turnover_ratio.toFixed(2)}x</div>
+          <div class="stat-trend text-slate-500 font-medium">COGS / Avg Stock</div>
+        </div>
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Days Sales of Inv (DSI)</div>
+          <div class="stat-value">${turn.days_sales_inventory.toFixed(1)} <span class="text-xs font-semibold text-slate-400">Days</span></div>
+          <div class="stat-trend text-slate-500 font-medium">Avg liquidation velocity</div>
+        </div>
+      </div>
+
+      <!-- Toolbar & Sub-views -->
+      <div class="reports-toolbar">
+        <div class="flex items-center gap-2">
+          <button class="btn-press btn ${mode === 'sku' ? 'btn-primary' : 'btn-secondary'} text-xs" onclick="app.setReportsFilter('inventoryMode', 'sku'); app.render();">
+            <i data-lucide="package" class="w-3.5 h-3.5"></i> Valuation by SKU
+          </button>
+          <button class="btn-press btn ${mode === 'warehouse' ? 'btn-primary' : 'btn-secondary'} text-xs" onclick="app.setReportsFilter('inventoryMode', 'warehouse'); app.render();">
+            <i data-lucide="warehouse" class="w-3.5 h-3.5"></i> By Warehouse
+          </button>
+          <button class="btn-press btn ${mode === 'dead_stock' ? 'btn-primary' : 'btn-secondary'} text-xs" onclick="app.setReportsFilter('inventoryMode', 'dead_stock'); app.render();">
+            <i data-lucide="alert-octagon" class="w-3.5 h-3.5 text-rose-500"></i> Dead Stock Alerts (${(turn.dead_stock_items || []).length})
+          </button>
+        </div>
+        <div class="flex items-center gap-2">
+          <button class="btn-press btn btn-secondary text-xs" onclick="app.triggerReportExport('inventory', 'csv')">
+            <i data-lucide="file-spreadsheet" class="w-3.5 h-3.5 text-emerald-600"></i> Export CSV
+          </button>
+          <button class="btn-press btn btn-secondary text-xs" onclick="app.triggerReportExport('inventory', 'pdf')">
+            <i data-lucide="file-text" class="w-3.5 h-3.5 text-rose-600"></i> Vector PDF
+          </button>
+        </div>
+      </div>
+
+      ${mode === 'sku' ? `
+        <div class="table-container mockup-item">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>SKU Code</th>
+                <th>Item Name</th>
+                <th>Category</th>
+                <th style="width:110px; text-align:right;">Stock Qty</th>
+                <th style="width:130px; text-align:right;">Unit Cost</th>
+                <th style="width:130px; text-align:right;">Retail Price</th>
+                <th style="width:150px; text-align:right;">Cost Valuation</th>
+                <th style="width:150px; text-align:right;">Retail Valuation</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${(val.skus || []).map(s => `
+                <tr>
+                  <td class="mono-code">${s.sku_code}</td>
+                  <td><strong>${s.name}</strong></td>
+                  <td><span class="actor-pill actor-human">${s.category || 'Standard'}</span></td>
+                  <td style="text-align:right; font-mono font-bold;">${s.stock_quantity}</td>
+                  <td style="text-align:right; font-family:var(--font-mono);">${this.formatMoney(s.cost_price_cents / 100)}</td>
+                  <td style="text-align:right; font-family:var(--font-mono);">${this.formatMoney(s.retail_price_cents / 100)}</td>
+                  <td style="text-align:right; font-family:var(--font-mono); font-weight:700; color:#2563EB;">${this.formatMoney(s.cost_valuation_cents / 100)}</td>
+                  <td style="text-align:right; font-family:var(--font-mono); font-weight:700; color:#059669;">${this.formatMoney(s.retail_valuation_cents / 100)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      ` : mode === 'warehouse' ? `
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          ${(val.warehouses || []).map(w => `
+            <div class="financial-statement-card">
+              <div class="flex items-center justify-between mb-3 pb-2 border-b border-slate-200">
+                <div>
+                  <h4 class="font-extrabold text-sm text-brand-textMain">${w.warehouse_name}</h4>
+                  <p class="text-xs text-slate-400">${w.location || 'Primary Site'}</p>
+                </div>
+                <div class="w-9 h-9 bg-blue-50 rounded-lg flex items-center justify-center">
+                  <i data-lucide="building-2" class="w-4 h-4 text-brand-blue"></i>
+                </div>
+              </div>
+              <div class="space-y-2 text-xs">
+                <div class="flex justify-between">
+                  <span class="text-slate-500">Distinct SKUs:</span>
+                  <strong>${w.total_skus}</strong>
+                </div>
+                <div class="flex justify-between">
+                  <span class="text-slate-500">Total Units:</span>
+                  <strong>${w.total_quantity} units</strong>
+                </div>
+                <div class="flex justify-between pt-2 border-t border-slate-100">
+                  <span class="text-slate-500 font-bold">Cost Valuation:</span>
+                  <span class="font-mono font-extrabold text-blue-600 text-sm">${this.formatMoney(w.cost_valuation_cents / 100)}</span>
+                </div>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      ` : `
+        <!-- Dead Stock Section -->
+        <div class="table-container mockup-item">
+          <div class="p-4 bg-rose-50 border-b border-rose-200 flex items-center gap-3">
+            <i data-lucide="alert-triangle" class="w-5 h-5 text-rose-600 shrink-0"></i>
+            <div>
+              <strong class="text-xs text-rose-800">Dead Stock Inactivity Warning (>90 Days Inactive)</strong>
+              <p class="text-xs text-rose-700">These SKUs have zero sales movement over the last 90 days, locking up capital.</p>
+            </div>
+          </div>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>SKU Code</th>
+                <th>Item Name</th>
+                <th style="width:120px; text-align:right;">Stock Units</th>
+                <th style="width:150px; text-align:right;">Capital Locked</th>
+                <th style="width:160px;">Last Activity Date</th>
+                <th style="width:140px;">Recommended Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${(turn.dead_stock_items || []).length > 0 ? (turn.dead_stock_items || []).map(ds => `
+                <tr>
+                  <td class="mono-code">${ds.sku_code}</td>
+                  <td><strong>${ds.name}</strong></td>
+                  <td style="text-align:right; font-family:var(--font-mono); font-weight:700;">${ds.stock_quantity}</td>
+                  <td style="text-align:right; font-family:var(--font-mono); font-weight:800; color:#DC2626;">${this.formatMoney(ds.valuation_cents / 100)}</td>
+                  <td class="text-slate-500 text-xs">${ds.last_activity_date ? ds.last_activity_date.slice(0, 10) : 'None Recorded'}</td>
+                  <td><span class="status-badge status-draft">Discount / Clearance</span></td>
+                </tr>
+              `).join('') : `<tr><td colspan="6" class="text-center py-4 text-emerald-600 font-semibold">✓ Zero dead stock detected! All SKUs have healthy turnover.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      `}
+    `;
+  },
+
+  renderReportsSales() {
+    const s = this.data.reportsSalesVelocity || {
+      total_closed_won_cents: 0,
+      won_deal_count: 0,
+      lost_deal_count: 0,
+      win_loss_ratio: 0,
+      avg_deal_size_cents: 0,
+      avg_sales_cycle_days: 0,
+      velocity_daily_cents: 0,
+      stage_distribution: []
+    };
+
+    return `
+      <!-- Sales Velocity Metric Cards -->
+      <div class="stats-grid mb-6">
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Closed-Won Revenue</div>
+          <div class="stat-value" style="color:#059669;">${this.formatMoney(s.total_closed_won_cents / 100)}</div>
+          <div class="stat-trend trend-up">${s.won_deal_count} Won Deals</div>
+        </div>
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Win / Loss Ratio</div>
+          <div class="stat-value">${s.win_loss_ratio.toFixed(2)}x</div>
+          <div class="stat-trend ${s.win_loss_ratio >= 1.0 ? 'trend-up' : 'text-rose-500'}">${s.won_deal_count} Won / ${s.lost_deal_count} Lost</div>
+        </div>
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Average Deal Size</div>
+          <div class="stat-value">${this.formatMoney(s.avg_deal_size_cents / 100)}</div>
+          <div class="stat-trend text-slate-500 font-medium">Per closed contract</div>
+        </div>
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Avg Cycle Duration</div>
+          <div class="stat-value">${s.avg_sales_cycle_days.toFixed(1)} <span class="text-xs font-semibold text-slate-400">Days</span></div>
+          <div class="stat-trend text-slate-500">Lead to Close Velocity</div>
+        </div>
+        <div class="stat-card mockup-item">
+          <div class="stat-title">Pipeline Velocity</div>
+          <div class="stat-value" style="color:#2563EB;">${this.formatMoney(s.velocity_daily_cents / 100)} <span class="text-xs font-semibold text-slate-400">/day</span></div>
+          <div class="stat-trend trend-up">Sales throughput rate</div>
+        </div>
+      </div>
+
+      <!-- Stage Distribution Funnel Table -->
+      <div class="table-container mockup-item mb-6">
+        <div class="p-4 border-b border-slate-200 flex justify-between items-center">
+          <div>
+            <h4 class="font-extrabold text-sm text-brand-textMain">Pipeline Distribution & Stage Health</h4>
+            <p class="text-xs text-slate-400">Real-time breakdown of deal volume and dwell time across stages.</p>
+          </div>
+          <button class="btn-press btn btn-secondary text-xs" onclick="app.triggerReportExport('sales-velocity', 'pdf')">
+            <i data-lucide="file-text" class="w-3.5 h-3.5 text-rose-600"></i> Export PDF
+          </button>
+        </div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Pipeline Stage</th>
+              <th style="width:120px; text-align:right;">Deal Count</th>
+              <th style="width:160px; text-align:right;">Total Pipeline Value</th>
+              <th style="width:150px; text-align:right;">Average Stage Age</th>
+              <th style="width:160px;">Conversion Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${(s.stage_distribution || []).map(st => `
+              <tr>
+                <td><strong class="uppercase text-xs tracking-wider">${st.stage}</strong></td>
+                <td style="text-align:right; font-bold;">${st.deal_count}</td>
+                <td style="text-align:right; font-family:var(--font-mono); font-weight:700; color:#2563EB;">${this.formatMoney(st.total_value_cents / 100)}</td>
+                <td style="text-align:right; font-family:var(--font-mono);">${st.avg_age_days.toFixed(1)} days</td>
+                <td>
+                  <span class="status-badge ${st.stage === 'won' ? 'status-delivered' : st.stage === 'lost' ? 'status-rejected' : 'status-approved'}">
+                    ${st.stage === 'won' ? 'CLOSED WON' : st.stage === 'lost' ? 'CLOSED LOST' : 'ACTIVE PIPELINE'}
+                  </span>
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  },
+
+  renderReportsExport() {
+    return `
+      <div class="mb-6">
+        <h3 class="text-lg font-extrabold text-brand-textMain mb-1">Universal Document & Financial Export Engine</h3>
+        <p class="text-xs text-slate-500">Download cryptographically verifiable CSV, JSON, and vector PDF audit documents.</p>
+      </div>
+
+      <div class="export-tile-grid">
+        <!-- P&L -->
+        <div class="export-tile">
+          <div>
+            <div class="flex items-center gap-3 mb-2">
+              <div class="w-10 h-10 rounded-xl bg-blue-50 flex items-center justify-center text-brand-blue">
+                <i data-lucide="trending-up" class="w-5 h-5"></i>
+              </div>
+              <div>
+                <h4 class="font-bold text-sm text-brand-textMain">Profit & Loss Statement</h4>
+                <p class="text-xs text-slate-400">Revenue, COGS, OpEx & Net Margin</p>
+              </div>
+            </div>
+          </div>
+          <div class="flex gap-2 pt-2 border-t border-slate-100">
+            <button class="btn btn-secondary text-xs flex-1" onclick="app.triggerReportExport('pnl', 'csv')">
+              <i data-lucide="file-spreadsheet" class="w-3.5 h-3.5 text-emerald-600"></i> CSV
+            </button>
+            <button class="btn btn-secondary text-xs flex-1" onclick="app.triggerReportExport('pnl', 'pdf')">
+              <i data-lucide="file-text" class="w-3.5 h-3.5 text-rose-600"></i> PDF
+            </button>
+            <button class="btn btn-secondary text-xs flex-1" onclick="app.triggerReportExport('pnl', 'json')">
+              <i data-lucide="code" class="w-3.5 h-3.5 text-amber-600"></i> JSON
+            </button>
+          </div>
+        </div>
+
+        <!-- Balance Sheet -->
+        <div class="export-tile">
+          <div>
+            <div class="flex items-center gap-3 mb-2">
+              <div class="w-10 h-10 rounded-xl bg-purple-50 flex items-center justify-center text-purple-600">
+                <i data-lucide="scale" class="w-5 h-5"></i>
+              </div>
+              <div>
+                <h4 class="font-bold text-sm text-brand-textMain">Balance Sheet & Equity</h4>
+                <p class="text-xs text-slate-400">Assets, Liabilities & Equity Verification</p>
+              </div>
+            </div>
+          </div>
+          <div class="flex gap-2 pt-2 border-t border-slate-100">
+            <button class="btn btn-secondary text-xs flex-1" onclick="app.triggerReportExport('balance-sheet', 'csv')">
+              <i data-lucide="file-spreadsheet" class="w-3.5 h-3.5 text-emerald-600"></i> CSV
+            </button>
+            <button class="btn btn-secondary text-xs flex-1" onclick="app.triggerReportExport('balance-sheet', 'pdf')">
+              <i data-lucide="file-text" class="w-3.5 h-3.5 text-rose-600"></i> PDF
+            </button>
+            <button class="btn btn-secondary text-xs flex-1" onclick="app.triggerReportExport('balance-sheet', 'json')">
+              <i data-lucide="code" class="w-3.5 h-3.5 text-amber-600"></i> JSON
+            </button>
+          </div>
+        </div>
+
+        <!-- Aged AR -->
+        <div class="export-tile">
+          <div>
+            <div class="flex items-center gap-3 mb-2">
+              <div class="w-10 h-10 rounded-xl bg-emerald-50 flex items-center justify-center text-emerald-600">
+                <i data-lucide="clock" class="w-5 h-5"></i>
+              </div>
+              <div>
+                <h4 class="font-bold text-sm text-brand-textMain">Aged Accounts Receivable</h4>
+                <p class="text-xs text-slate-400">Aging brackets & delinquent invoices</p>
+              </div>
+            </div>
+          </div>
+          <div class="flex gap-2 pt-2 border-t border-slate-100">
+            <button class="btn btn-secondary text-xs flex-1" onclick="app.triggerReportExport('aging-ar', 'csv')">
+              <i data-lucide="file-spreadsheet" class="w-3.5 h-3.5 text-emerald-600"></i> CSV
+            </button>
+            <button class="btn btn-secondary text-xs flex-1" onclick="app.triggerReportExport('aging-ar', 'pdf')">
+              <i data-lucide="file-text" class="w-3.5 h-3.5 text-rose-600"></i> PDF
+            </button>
+            <button class="btn btn-secondary text-xs flex-1" onclick="app.triggerReportExport('aging-ar', 'json')">
+              <i data-lucide="code" class="w-3.5 h-3.5 text-amber-600"></i> JSON
+            </button>
+          </div>
+        </div>
+
+        <!-- Aged AP -->
+        <div class="export-tile">
+          <div>
+            <div class="flex items-center gap-3 mb-2">
+              <div class="w-10 h-10 rounded-xl bg-rose-50 flex items-center justify-center text-rose-600">
+                <i data-lucide="clock" class="w-5 h-5"></i>
+              </div>
+              <div>
+                <h4 class="font-bold text-sm text-brand-textMain">Aged Accounts Payable</h4>
+                <p class="text-xs text-slate-400">Supplier obligations & overdue bills</p>
+              </div>
+            </div>
+          </div>
+          <div class="flex gap-2 pt-2 border-t border-slate-100">
+            <button class="btn btn-secondary text-xs flex-1" onclick="app.triggerReportExport('aging-ap', 'csv')">
+              <i data-lucide="file-spreadsheet" class="w-3.5 h-3.5 text-emerald-600"></i> CSV
+            </button>
+            <button class="btn btn-secondary text-xs flex-1" onclick="app.triggerReportExport('aging-ap', 'pdf')">
+              <i data-lucide="file-text" class="w-3.5 h-3.5 text-rose-600"></i> PDF
+            </button>
+            <button class="btn btn-secondary text-xs flex-1" onclick="app.triggerReportExport('aging-ap', 'json')">
+              <i data-lucide="code" class="w-3.5 h-3.5 text-amber-600"></i> JSON
+            </button>
+          </div>
+        </div>
+
+        <!-- Inventory Valuation -->
+        <div class="export-tile">
+          <div>
+            <div class="flex items-center gap-3 mb-2">
+              <div class="w-10 h-10 rounded-xl bg-amber-50 flex items-center justify-center text-amber-600">
+                <i data-lucide="boxes" class="w-5 h-5"></i>
+              </div>
+              <div>
+                <h4 class="font-bold text-sm text-brand-textMain">Inventory Stock Valuation</h4>
+                <p class="text-xs text-slate-400">SKU cost, retail & warehouse allocation</p>
+              </div>
+            </div>
+          </div>
+          <div class="flex gap-2 pt-2 border-t border-slate-100">
+            <button class="btn btn-secondary text-xs flex-1" onclick="app.triggerReportExport('inventory', 'csv')">
+              <i data-lucide="file-spreadsheet" class="w-3.5 h-3.5 text-emerald-600"></i> CSV
+            </button>
+            <button class="btn btn-secondary text-xs flex-1" onclick="app.triggerReportExport('inventory', 'pdf')">
+              <i data-lucide="file-text" class="w-3.5 h-3.5 text-rose-600"></i> PDF
+            </button>
+            <button class="btn btn-secondary text-xs flex-1" onclick="app.triggerReportExport('inventory', 'json')">
+              <i data-lucide="code" class="w-3.5 h-3.5 text-amber-600"></i> JSON
+            </button>
+          </div>
+        </div>
+
+        <!-- Client Invoices Register -->
+        <div class="export-tile">
+          <div>
+            <div class="flex items-center gap-3 mb-2">
+              <div class="w-10 h-10 rounded-xl bg-indigo-50 flex items-center justify-center text-indigo-600">
+                <i data-lucide="receipt" class="w-5 h-5"></i>
+              </div>
+              <div>
+                <h4 class="font-bold text-sm text-brand-textMain">Invoices & Billing Register</h4>
+                <p class="text-xs text-slate-400">Full accounts billing history</p>
+              </div>
+            </div>
+          </div>
+          <div class="flex gap-2 pt-2 border-t border-slate-100">
+            <button class="btn btn-secondary text-xs flex-1" onclick="app.triggerReportExport('invoices', 'csv')">
+              <i data-lucide="file-spreadsheet" class="w-3.5 h-3.5 text-emerald-600"></i> CSV
+            </button>
+            <button class="btn btn-secondary text-xs flex-1" onclick="app.triggerReportExport('invoices', 'pdf')">
+              <i data-lucide="file-text" class="w-3.5 h-3.5 text-rose-600"></i> PDF
+            </button>
+            <button class="btn btn-secondary text-xs flex-1" onclick="app.triggerReportExport('invoices', 'json')">
+              <i data-lucide="code" class="w-3.5 h-3.5 text-amber-600"></i> JSON
+            </button>
+          </div>
+        </div>
       </div>
     `;
   },
@@ -3358,43 +5322,105 @@ const app = {
     }
   },
 
-  // ---------------- HR & Team Modals ----------------
+  // ---------------- HR, Shifts, Timeclock & Payroll Modals ----------------
   openNewEmployeeModal() {
     const modal = document.getElementById('action-modal');
     const content = document.getElementById('modal-content');
-    modal.querySelector('.modal-window').style.maxWidth = '500px';
+    modal.querySelector('.modal-window').style.maxWidth = '640px';
 
     content.innerHTML = `
-      <h3 style="font-size:18px; font-weight:800; margin-bottom:10px; color:var(--text-main);">Add New Team Member</h3>
-      <div style="display:flex; flex-direction:column; gap:12px;">
-        <label for="emp-name" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Full Name</label>
-        <input type="text" id="emp-name" class="form-input" placeholder="e.g. Jessica Chen">
-        
+      <h3 style="font-size:18px; font-weight:800; margin-bottom:12px; color:var(--text-main);">Onboard New Team Member</h3>
+      <div style="display:flex; flex-direction:column; gap:12px; max-height:75vh; overflow-y:auto; padding-right:6px;">
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
           <div>
-            <label for="emp-role" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Role</label>
-            <input type="text" id="emp-role" class="form-input" value="Inventory Specialist">
+            <label for="emp-name" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Full Legal Name</label>
+            <input type="text" id="emp-name" class="form-input" placeholder="e.g. Jessica Chen">
           </div>
           <div>
-            <label for="emp-dept" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Department</label>
-            <input type="text" id="emp-dept" class="form-input" value="Operations">
+            <label for="emp-email" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Email Address</label>
+            <input type="email" id="emp-email" class="form-input" placeholder="jessica@example.com">
           </div>
         </div>
 
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
           <div>
-            <label for="emp-rate" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Hourly Rate ($)</label>
-            <input type="number" id="emp-rate" class="form-input" value="38.00" step="1">
+            <label for="emp-role" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Role / Job Title</label>
+            <input type="text" id="emp-role" class="form-input" value="Operations Lead">
           </div>
           <div>
-            <label for="emp-email" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Email Address</label>
-            <input type="email" id="emp-email" class="form-input" placeholder="jessica@example.com">
+            <label for="emp-dept" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Department</label>
+            <input type="text" id="emp-dept" class="form-input" value="Logistics">
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="emp-type" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Employment Type</label>
+            <select id="emp-type" class="form-input">
+              <option value="full_time">Full Time</option>
+              <option value="part_time">Part Time</option>
+              <option value="contractor">Contractor</option>
+            </select>
+          </div>
+          <div>
+            <label for="emp-sal-type" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Compensation Model</label>
+            <select id="emp-sal-type" class="form-input" onchange="document.getElementById('monthly-field-box').style.display = this.value === 'monthly' ? 'block' : 'none'; document.getElementById('hourly-field-box').style.display = this.value === 'hourly' ? 'block' : 'none';">
+              <option value="hourly">Hourly Wage</option>
+              <option value="monthly">Fixed Monthly Salary</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div id="hourly-field-box">
+            <label for="emp-rate" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Hourly Rate ($/hr)</label>
+            <input type="number" id="emp-rate" class="form-input" value="35.00" step="0.5">
+          </div>
+          <div id="monthly-field-box" style="display:none;">
+            <label for="emp-monthly" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Monthly Salary ($/mo)</label>
+            <input type="number" id="emp-monthly" class="form-input" value="6000.00" step="50">
+          </div>
+          <div>
+            <label for="emp-tax-id" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Tax ID (SSN / EIN / PAN)</label>
+            <input type="text" id="emp-tax-id" class="form-input" placeholder="e.g. 98-7654321">
+          </div>
+        </div>
+
+        <div style="border-top:1px dashed var(--border-subtle); padding-top:10px;">
+          <span style="font-size:11px; font-weight:800; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; display:block; mb-2;">Direct Deposit Banking (ACH / Routing)</span>
+          <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-top:8px;">
+            <div>
+              <label for="emp-bank-name" style="font-size:10.5px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Bank Name</label>
+              <input type="text" id="emp-bank-name" class="form-input" placeholder="Chase / HDFC">
+            </div>
+            <div>
+              <label for="emp-routing" style="font-size:10.5px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Routing / IFSC</label>
+              <input type="text" id="emp-routing" class="form-input" placeholder="021000021">
+            </div>
+            <div>
+              <label for="emp-acct" style="font-size:10.5px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Account Number</label>
+              <input type="text" id="emp-acct" class="form-input" placeholder="987654321098">
+            </div>
+          </div>
+        </div>
+
+        <div style="border-top:1px dashed var(--border-subtle); padding-top:10px;">
+          <span style="font-size:11px; font-weight:800; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; display:block; mb-2;">Emergency Contact</span>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:8px;">
+            <div>
+              <label for="emp-emer-name" style="font-size:10.5px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Contact Name</label>
+              <input type="text" id="emp-emer-name" class="form-input" placeholder="Marcus Chen (Spouse)">
+            </div>
+            <div>
+              <label for="emp-emer-phone" style="font-size:10.5px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Contact Phone</label>
+              <input type="text" id="emp-emer-phone" class="form-input" placeholder="+1-555-019-2834">
+            </div>
           </div>
         </div>
 
         <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
           <button class="btn-press btn btn-secondary" onclick="app.closeModal()">Cancel</button>
-          <button class="btn-press btn btn-primary" onclick="app.submitNewEmployee()">Create Employee</button>
+          <button class="btn-press btn btn-primary" onclick="app.submitNewEmployee()">Save Employee Profile</button>
         </div>
       </div>
     `;
@@ -3403,10 +5429,19 @@ const app = {
 
   async submitNewEmployee() {
     const name = document.getElementById('emp-name')?.value.trim();
+    const email = document.getElementById('emp-email')?.value.trim();
     const role = document.getElementById('emp-role')?.value.trim();
     const dept = document.getElementById('emp-dept')?.value.trim();
+    const empType = document.getElementById('emp-type')?.value;
+    const salType = document.getElementById('emp-sal-type')?.value;
     const rate = parseFloat(document.getElementById('emp-rate')?.value || 0);
-    const email = document.getElementById('emp-email')?.value.trim();
+    const monthly = parseFloat(document.getElementById('emp-monthly')?.value || 0);
+    const taxId = document.getElementById('emp-tax-id')?.value.trim();
+    const bankName = document.getElementById('emp-bank-name')?.value.trim();
+    const routing = document.getElementById('emp-routing')?.value.trim();
+    const acct = document.getElementById('emp-acct')?.value.trim();
+    const emerName = document.getElementById('emp-emer-name')?.value.trim();
+    const emerPhone = document.getElementById('emp-emer-phone')?.value.trim();
 
     if (!name || !role) {
       this.showToast('Please enter both name and role');
@@ -3417,17 +5452,205 @@ const app = {
       const res = await fetch('/api/employees', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, role, department: dept, hourly_rate: rate, email })
+        body: JSON.stringify({
+          name: name,
+          email: email,
+          role: role,
+          job_title: role,
+          department: dept,
+          employment_type: empType,
+          salary_type: salType,
+          hourly_rate: rate,
+          monthly_salary_cents: Math.round(monthly * 100),
+          tax_id: taxId,
+          bank_name: bankName,
+          bank_routing: routing,
+          bank_account: acct,
+          emergency_contact_name: emerName,
+          emergency_contact_phone: emerPhone
+        })
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ message: res.statusText }));
         this.showToast('Error: ' + (err.message || 'Failed to add employee'));
         return;
       }
-      this.showToast(`Employee ${name} added successfully`);
+      this.showToast(`Employee ${name} onboarded successfully`);
       this.closeModal();
       await this.reloadEntity('employees');
       await this.reloadEntity('auditLogs');
+      this.render();
+    } catch (e) {
+      this.showToast('Error: ' + e.message);
+    }
+  },
+
+  openEditEmployeeModal(empId) {
+    const emp = (this.data.employees || []).find(e => e.id === empId);
+    if (!emp) {
+      this.showToast('Employee not found');
+      return;
+    }
+
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    modal.querySelector('.modal-window').style.maxWidth = '640px';
+
+    const isMonthly = emp.salary_type === 'monthly';
+
+    content.innerHTML = `
+      <h3 style="font-size:18px; font-weight:800; margin-bottom:12px; color:var(--text-main);">Update Employee Profile</h3>
+      <div style="display:flex; flex-direction:column; gap:12px; max-height:75vh; overflow-y:auto; padding-right:6px;">
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="edit-emp-name" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Full Legal Name</label>
+            <input type="text" id="edit-emp-name" class="form-input" value="${emp.name || ''}">
+          </div>
+          <div>
+            <label for="edit-emp-email" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Email Address</label>
+            <input type="email" id="edit-emp-email" class="form-input" value="${emp.email || ''}">
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="edit-emp-role" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Role / Job Title</label>
+            <input type="text" id="edit-emp-role" class="form-input" value="${emp.role || emp.job_title || ''}">
+          </div>
+          <div>
+            <label for="edit-emp-dept" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Department</label>
+            <input type="text" id="edit-emp-dept" class="form-input" value="${emp.department || ''}">
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="edit-emp-type" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Employment Type</label>
+            <select id="edit-emp-type" class="form-input">
+              <option value="full_time" ${emp.employment_type === 'full_time' ? 'selected' : ''}>Full Time</option>
+              <option value="part_time" ${emp.employment_type === 'part_time' ? 'selected' : ''}>Part Time</option>
+              <option value="contractor" ${emp.employment_type === 'contractor' ? 'selected' : ''}>Contractor</option>
+            </select>
+          </div>
+          <div>
+            <label for="edit-emp-sal-type" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Compensation Model</label>
+            <select id="edit-emp-sal-type" class="form-input" onchange="document.getElementById('edit-monthly-field-box').style.display = this.value === 'monthly' ? 'block' : 'none'; document.getElementById('edit-hourly-field-box').style.display = this.value === 'hourly' ? 'block' : 'none';">
+              <option value="hourly" ${!isMonthly ? 'selected' : ''}>Hourly Wage</option>
+              <option value="monthly" ${isMonthly ? 'selected' : ''}>Fixed Monthly Salary</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div id="edit-hourly-field-box" style="display:${isMonthly ? 'none' : 'block'};">
+            <label for="edit-emp-rate" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Hourly Rate ($/hr)</label>
+            <input type="number" id="edit-emp-rate" class="form-input" value="${emp.hourly_rate || 35.00}" step="0.5">
+          </div>
+          <div id="edit-monthly-field-box" style="display:${isMonthly ? 'block' : 'none'};">
+            <label for="edit-emp-monthly" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Monthly Salary ($/mo)</label>
+            <input type="number" id="edit-emp-monthly" class="form-input" value="${((emp.monthly_salary_cents || 0) / 100).toFixed(2)}" step="50">
+          </div>
+          <div>
+            <label for="edit-emp-tax-id" style="font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Tax ID (SSN / EIN / PAN)</label>
+            <input type="text" id="edit-emp-tax-id" class="form-input" value="${emp.tax_id || ''}">
+          </div>
+        </div>
+
+        <div style="border-top:1px dashed var(--border-subtle); padding-top:10px;">
+          <span style="font-size:11px; font-weight:800; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; display:block; mb-2;">Direct Deposit Banking (ACH / Routing)</span>
+          <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-top:8px;">
+            <div>
+              <label for="edit-emp-bank-name" style="font-size:10.5px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Bank Name</label>
+              <input type="text" id="edit-emp-bank-name" class="form-input" value="${emp.bank_name || ''}">
+            </div>
+            <div>
+              <label for="edit-emp-routing" style="font-size:10.5px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Routing / IFSC</label>
+              <input type="text" id="edit-emp-routing" class="form-input" value="${emp.bank_routing || ''}">
+            </div>
+            <div>
+              <label for="edit-emp-acct" style="font-size:10.5px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Account Number</label>
+              <input type="text" id="edit-emp-acct" class="form-input" value="${emp.bank_account || ''}">
+            </div>
+          </div>
+        </div>
+
+        <div style="border-top:1px dashed var(--border-subtle); padding-top:10px;">
+          <span style="font-size:11px; font-weight:800; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.5px; display:block; mb-2;">Emergency Contact</span>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:8px;">
+            <div>
+              <label for="edit-emp-emer-name" style="font-size:10.5px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Contact Name</label>
+              <input type="text" id="edit-emp-emer-name" class="form-input" value="${emp.emergency_contact_name || ''}">
+            </div>
+            <div>
+              <label for="edit-emp-emer-phone" style="font-size:10.5px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Contact Phone</label>
+              <input type="text" id="edit-emp-emer-phone" class="form-input" value="${emp.emergency_contact_phone || ''}">
+            </div>
+          </div>
+        </div>
+
+        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
+          <button class="btn-press btn btn-secondary" onclick="app.closeModal()">Cancel</button>
+          <button class="btn-press btn btn-primary" onclick="app.submitEditEmployee('${empId}')">Save Changes</button>
+        </div>
+      </div>
+    `;
+    modal.classList.add('active');
+  },
+
+  async submitEditEmployee(empId) {
+    const name = document.getElementById('edit-emp-name')?.value.trim();
+    const email = document.getElementById('edit-emp-email')?.value.trim();
+    const role = document.getElementById('edit-emp-role')?.value.trim();
+    const dept = document.getElementById('edit-emp-dept')?.value.trim();
+    const empType = document.getElementById('edit-emp-type')?.value;
+    const salType = document.getElementById('edit-emp-sal-type')?.value;
+    const rate = parseFloat(document.getElementById('edit-emp-rate')?.value || 0);
+    const monthly = parseFloat(document.getElementById('edit-emp-monthly')?.value || 0);
+    const taxId = document.getElementById('edit-emp-tax-id')?.value.trim();
+    const bankName = document.getElementById('edit-emp-bank-name')?.value.trim();
+    const routing = document.getElementById('edit-emp-routing')?.value.trim();
+    const acct = document.getElementById('edit-emp-acct')?.value.trim();
+    const emerName = document.getElementById('edit-emp-emer-name')?.value.trim();
+    const emerPhone = document.getElementById('edit-emp-emer-phone')?.value.trim();
+
+    if (!name || !role) {
+      this.showToast('Please enter both name and role');
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/employees', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: empId,
+          name: name,
+          email: email,
+          role: role,
+          job_title: role,
+          department: dept,
+          employment_type: empType,
+          salary_type: salType,
+          hourly_rate: rate,
+          monthly_salary_cents: Math.round(monthly * 100),
+          tax_id: taxId,
+          bank_name: bankName,
+          bank_routing: routing,
+          bank_account: acct,
+          emergency_contact_name: emerName,
+          emergency_contact_phone: emerPhone
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: res.statusText }));
+        this.showToast('Error: ' + (err.message || 'Failed to update employee'));
+        return;
+      }
+      this.showToast(`Employee ${name} updated successfully`);
+      this.closeModal();
+      await this.reloadEntity('employees');
+      await this.reloadEntity('auditLogs');
+      this.render();
     } catch (e) {
       this.showToast('Error: ' + e.message);
     }
@@ -3438,7 +5661,7 @@ const app = {
     const content = document.getElementById('modal-content');
     modal.querySelector('.modal-window').style.maxWidth = '500px';
 
-    const empOptions = (this.data.employees || []).map(e => `<option value="${e.id}">${e.name} (${e.role})</option>`).join('') || '<option value="emp_01">Sarah Jenkins</option>';
+    const empOptions = (this.data.employees || []).map(e => `<option value="${e.id}">${e.name} (${e.role || 'Staff'})</option>`).join('') || '<option value="emp_01">Sarah Jenkins</option>';
 
     content.innerHTML = `
       <h3 style="font-size:18px; font-weight:800; margin-bottom:10px; color:var(--text-main);">Schedule Shift</h3>
@@ -3449,7 +5672,7 @@ const app = {
         </select>
         
         <label for="shift-date" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Shift Date</label>
-        <input type="date" id="shift-date" class="form-input" value="2026-10-26">
+        <input type="date" id="shift-date" class="form-input" value="${new Date().toISOString().slice(0, 10)}">
 
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
           <div>
@@ -3501,7 +5724,288 @@ const app = {
       this.showToast('Shift scheduled successfully');
       this.closeModal();
       await this.reloadEntity('shifts');
+      await this.reloadEntity('shiftConflicts');
       await this.reloadEntity('auditLogs');
+      this.render();
+    } catch (e) {
+      this.showToast('Error: ' + e.message);
+    }
+  },
+
+  async recordPunch(eventType) {
+    if (!this.selectedTimeclockEmpId && this.data.employees && this.data.employees.length > 0) {
+      this.selectedTimeclockEmpId = this.data.employees[0].id;
+    }
+    if (!this.selectedTimeclockEmpId) {
+      this.showToast('Please select an employee first');
+      return;
+    }
+    try {
+      const res = await fetch('/api/timeclock/event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employee_id: this.selectedTimeclockEmpId,
+          event_type: eventType,
+          notes: 'Web Timeclock Terminal'
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: res.statusText }));
+        this.showToast('Punch Error: ' + (err.message || 'Failed to record punch'));
+        return;
+      }
+      this.showToast(`Punched ${eventType.replace(/_/g, ' ').toUpperCase()} successfully`);
+      await this.reloadTimeclockStatus();
+      await this.reloadEntity('shifts');
+      await this.reloadEntity('shiftConflicts');
+      await this.reloadEntity('auditLogs');
+      this.render();
+    } catch (e) {
+      this.showToast('Error: ' + e.message);
+    }
+  },
+
+  async calculatePayrollPreview() {
+    const periodInput = document.getElementById('payroll-period-input');
+    const period = periodInput ? periodInput.value : (this.activePayrollPeriod || new Date().toISOString().slice(0, 7));
+    this.activePayrollPeriod = period;
+    try {
+      const res = await fetch('/api/payroll/preview?period=' + encodeURIComponent(period));
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: res.statusText }));
+        this.showToast('Preview Error: ' + (err.message || 'Failed to preview payroll'));
+        return;
+      }
+      this.data.payrollPreview = await res.json();
+      this.showToast(`Payroll calculated for ${period}: Gross ${this.formatMoney(this.data.payrollPreview.total_gross_cents / 100)}, Net ${this.formatMoney(this.data.payrollPreview.total_net_cents / 100)}`);
+      this.render();
+    } catch (e) {
+      this.showToast('Error: ' + e.message);
+    }
+  },
+
+  async executePayrollRun() {
+    const periodInput = document.getElementById('payroll-period-input');
+    const period = periodInput ? periodInput.value : (this.activePayrollPeriod || new Date().toISOString().slice(0, 7));
+    this.activePayrollPeriod = period;
+    try {
+      const res = await fetch('/api/payroll/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          period: period,
+          notes: 'Automated monthly payroll run for ' + period
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: res.statusText }));
+        this.showToast('Payroll Disbursal Error: ' + (err.message || 'Failed to disburse payroll'));
+        return;
+      }
+      this.showToast(`Payroll disbursed for ${period}! Balanced general ledger entry posted.`);
+      await this.reloadEntity('payrollRuns');
+      await this.reloadEntity('payslips');
+      await this.reloadEntity('accounts');
+      await this.reloadEntity('journalEntries');
+      await this.reloadEntity('summary');
+      await this.reloadEntity('auditLogs');
+      this.render();
+    } catch (e) {
+      this.showToast('Error: ' + e.message);
+    }
+  },
+
+  downloadPayslipPDF(payslipId) {
+    if (!payslipId) {
+      this.showToast('Invalid payslip ID');
+      return;
+    }
+    window.open('/api/payroll/payslip/pdf?payslip_id=' + encodeURIComponent(payslipId), '_blank');
+  },
+
+  openRequestLeaveModal() {
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    modal.querySelector('.modal-window').style.maxWidth = '520px';
+
+    const empOptions = (this.data.employees || []).map(e => `<option value="${e.id}">${e.name} (${e.role || 'Staff'})</option>`).join('') || '<option value="emp_01">Staff</option>';
+    const polOptions = (this.data.leavePolicies || []).map(p => `<option value="${p.id}">${p.name} (${p.days_allowed}d)</option>`).join('') || '<option value="pol_vacation">Annual Vacation</option>';
+
+    const today = new Date().toISOString().slice(0, 10);
+
+    content.innerHTML = `
+      <h3 style="font-size:18px; font-weight:800; margin-bottom:10px; color:var(--text-main);">Submit Leave Request</h3>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <label for="leave-emp" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Employee</label>
+        <select id="leave-emp" class="form-input">
+          ${empOptions}
+        </select>
+
+        <label for="leave-policy" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Leave Policy</label>
+        <select id="leave-policy" class="form-input">
+          ${polOptions}
+        </select>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="leave-start" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Start Date</label>
+            <input type="date" id="leave-start" class="form-input" value="${today}">
+          </div>
+          <div>
+            <label for="leave-end" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">End Date</label>
+            <input type="date" id="leave-end" class="form-input" value="${today}">
+          </div>
+        </div>
+
+        <label for="leave-reason" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Reason / Notes</label>
+        <textarea id="leave-reason" class="form-input" style="height:70px; resize:none;" placeholder="Family vacation, medical appointment, etc."></textarea>
+
+        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
+          <button class="btn-press btn btn-secondary" onclick="app.closeModal()">Cancel</button>
+          <button class="btn-press btn btn-primary" onclick="app.submitLeaveRequest()">Submit Request</button>
+        </div>
+      </div>
+    `;
+    modal.classList.add('active');
+  },
+
+  async submitLeaveRequest() {
+    const empId = document.getElementById('leave-emp')?.value;
+    const policyId = document.getElementById('leave-policy')?.value;
+    const startDate = document.getElementById('leave-start')?.value;
+    const endDate = document.getElementById('leave-end')?.value;
+    const reason = document.getElementById('leave-reason')?.value.trim();
+
+    try {
+      const res = await fetch('/api/leaves/requests', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employee_id: empId,
+          policy_id: policyId,
+          start_date: startDate,
+          end_date: endDate,
+          reason: reason
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: res.statusText }));
+        this.showToast('Error: ' + (err.message || 'Failed to submit leave request'));
+        return;
+      }
+      this.showToast('Leave request submitted successfully');
+      this.closeModal();
+      await this.reloadEntity('leaveRequests');
+      await this.reloadEntity('auditLogs');
+      this.render();
+    } catch (e) {
+      this.showToast('Error: ' + e.message);
+    }
+  },
+
+  async reviewLeaveRequest(requestId, status) {
+    try {
+      const res = await fetch('/api/leaves/review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          request_id: requestId,
+          status: status,
+          notes: 'Manager ' + status + ' decision'
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: res.statusText }));
+        this.showToast('Error: ' + (err.message || 'Failed to review leave request'));
+        return;
+      }
+      this.showToast(`Leave request ${status} successfully`);
+      await this.reloadEntity('leaveRequests');
+      await this.reloadEntity('auditLogs');
+      this.render();
+    } catch (e) {
+      this.showToast('Error: ' + e.message);
+    }
+  },
+
+  openUploadDocModal() {
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    modal.querySelector('.modal-window').style.maxWidth = '520px';
+
+    const empOptions = (this.data.employees || []).map(e => `<option value="${e.id}">${e.name} (${e.role || 'Staff'})</option>`).join('') || '<option value="emp_01">Staff</option>';
+
+    content.innerHTML = `
+      <h3 style="font-size:18px; font-weight:800; margin-bottom:10px; color:var(--text-main);">Upload HR Compliance Document</h3>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <label for="doc-emp" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Associated Employee</label>
+        <select id="doc-emp" class="form-input">
+          ${empOptions}
+        </select>
+
+        <label for="doc-title" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Document Title</label>
+        <input type="text" id="doc-title" class="form-input" placeholder="e.g. Standard Employment Agreement">
+
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div>
+            <label for="doc-type" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">Document Type</label>
+            <select id="doc-type" class="form-input">
+              <option value="contract">Employment Contract</option>
+              <option value="nda">Non-Disclosure Agreement (NDA)</option>
+              <option value="tax_id">Tax ID / Form W-4 / W-9</option>
+              <option value="evaluation">Performance Evaluation</option>
+            </select>
+          </div>
+          <div>
+            <label for="doc-filename" style="font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase;">File Name</label>
+            <input type="text" id="doc-filename" class="form-input" value="employment_contract_signed.pdf">
+          </div>
+        </div>
+
+        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
+          <button class="btn-press btn btn-secondary" onclick="app.closeModal()">Cancel</button>
+          <button class="btn-press btn btn-primary" onclick="app.submitUploadDoc()">Save to Vault</button>
+        </div>
+      </div>
+    `;
+    modal.classList.add('active');
+  },
+
+  async submitUploadDoc() {
+    const empId = document.getElementById('doc-emp')?.value;
+    const title = document.getElementById('doc-title')?.value.trim();
+    const docType = document.getElementById('doc-type')?.value;
+    const fileName = document.getElementById('doc-filename')?.value.trim();
+
+    if (!title) {
+      this.showToast('Please enter document title');
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/hr/documents', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employee_id: empId,
+          title: title,
+          doc_type: docType,
+          file_name: fileName || 'document.pdf',
+          file_size_bytes: 142800,
+          access_level: 'manage_hr'
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: res.statusText }));
+        this.showToast('Error: ' + (err.message || 'Failed to upload document'));
+        return;
+      }
+      this.showToast(`Document "${title}" archived in compliance vault`);
+      this.closeModal();
+      await this.reloadEntity('hrDocuments');
+      await this.reloadEntity('auditLogs');
+      this.render();
     } catch (e) {
       this.showToast('Error: ' + e.message);
     }
@@ -4442,12 +6946,24 @@ const app = {
       { title: 'Open ERP & Inventory Catalog', tag: 'Navigation', action: () => { app.setTab('erp'); app.closeCommandPalette(); } },
       { title: 'Open Visual Sales Pipeline (Kanban)', tag: 'Navigation', action: () => { app.setTab('crm'); app.closeCommandPalette(); } },
       { title: 'Open Financial Summary & Invoices', tag: 'Navigation', action: () => { app.setTab('finance'); app.closeCommandPalette(); } },
+      { title: 'Open Intelligence & Financial Reports', tag: 'Navigation', action: () => { app.setTab('reports'); app.closeCommandPalette(); } },
+      { title: 'Run Real-Time Profit & Loss (P&L)', tag: 'Reports', action: () => { app.setTab('reports'); app.setReportsSubTab('pnl'); app.closeCommandPalette(); } },
+      { title: 'Run Balance Sheet & Equity Equation', tag: 'Reports', action: () => { app.setTab('reports'); app.setReportsSubTab('balance-sheet'); app.closeCommandPalette(); } },
+      { title: 'View Aged Receivables (A/R)', tag: 'Reports', action: () => { app.setTab('reports'); app.setReportsSubTab('aging'); app.setReportsFilter('agingType', 'ar'); app.reloadAgingReport(); app.closeCommandPalette(); } },
+      { title: 'View Aged Payables (A/P)', tag: 'Reports', action: () => { app.setTab('reports'); app.setReportsSubTab('aging'); app.setReportsFilter('agingType', 'ap'); app.reloadAgingReport(); app.closeCommandPalette(); } },
+      { title: 'Analyze Inventory Valuation & Turnover', tag: 'Reports', action: () => { app.setTab('reports'); app.setReportsSubTab('inventory'); app.closeCommandPalette(); } },
+      { title: 'Open Universal Document Export Hub', tag: 'Reports', action: () => { app.setTab('reports'); app.setReportsSubTab('export'); app.closeCommandPalette(); } },
       { title: 'Open Shift Schedule & Team Records', tag: 'Navigation', action: () => { app.setTab('hr'); app.closeCommandPalette(); } },
       { title: 'Open Tasks & Delivery Board', tag: 'Navigation', action: () => { app.setTab('tasks'); app.closeCommandPalette(); } },
       { title: 'Open Local Listing Sync (NAP)', tag: 'Navigation', action: () => { app.setTab('presence'); app.closeCommandPalette(); } },
       { title: 'Open Reviews & Reputation Hub', tag: 'Navigation', action: () => { app.setTab('reviews'); app.closeCommandPalette(); } },
       { title: 'Open Approval Inbox', tag: 'Governance', action: () => { app.setTab('approvals'); app.closeCommandPalette(); } },
       { title: 'Open Dual-Actor Audit Trail', tag: 'Audit', action: () => { app.setTab('audit'); app.closeCommandPalette(); } },
+      { title: 'Open Autonomous MCP Agent Platform', tag: 'Agent', action: () => { app.setTab('agents'); app.closeCommandPalette(); } },
+      { title: 'Inspect Agent Execution Replay & Debugger', tag: 'Agent', action: () => { app.setTab('agents'); app.setAgentSubTab('executions'); app.closeCommandPalette(); } },
+      { title: 'Review Human Escalation Queue', tag: 'Agent', action: () => { app.setTab('agents'); app.setAgentSubTab('escalations'); app.closeCommandPalette(); } },
+      { title: 'Manage Outbox Webhook Subscriptions', tag: 'Agent', action: () => { app.setTab('agents'); app.setAgentSubTab('webhooks'); app.closeCommandPalette(); } },
+      { title: 'Test Prompt Injection Defense & Context', tag: 'Agent', action: () => { app.setTab('agents'); app.setAgentSubTab('safety'); app.closeCommandPalette(); } },
       { title: 'Toggle MCP Agent Co-Pilot Drawer', tag: 'Agent', action: () => { app.toggleAgentDrawer(); app.closeCommandPalette(); } },
       { title: 'Trigger Immediate NAP Directory Sync', tag: 'Action', action: () => { app.syncAllNAP(); app.closeCommandPalette(); } },
       { title: 'Create Client Invoice', tag: 'Action', action: () => { app.closeCommandPalette(); app.openNewInvoiceModal(); } },
@@ -4477,6 +6993,1842 @@ const app = {
   runPaletteAction(idx) {
     if (this._currentFilteredCommands && this._currentFilteredCommands[idx]) {
       this._currentFilteredCommands[idx].action();
+    }
+  },
+
+
+  // ==========================================================================
+  // Phase 8: Autonomous MCP Agent Platform & Webhooks
+  // ==========================================================================
+  activeAgentSubTab: 'quotas',
+  agentConfigs: [],
+  agentExecutions: [],
+  agentEscalations: [],
+  webhookSubscriptions: [],
+  webhookDeliveries: [],
+  agentContextMemory: [],
+  sanitizeResult: null,
+
+  setAgentSubTab(subTab) {
+    this.activeAgentSubTab = subTab;
+    this.ensureAgentPlatformData(subTab);
+    this.render();
+  },
+
+  async ensureAgentPlatformData(subTab = 'quotas') {
+    try {
+      if (subTab === 'quotas') {
+        const res = await fetch('/api/agent/configs');
+        if (res.ok) this.agentConfigs = await res.json();
+      } else if (subTab === 'executions') {
+        const res = await fetch('/api/agent/executions');
+        if (res.ok) this.agentExecutions = await res.json();
+      } else if (subTab === 'escalations') {
+        const res = await fetch('/api/agent/escalations');
+        if (res.ok) this.agentEscalations = await res.json();
+      } else if (subTab === 'webhooks') {
+        const [resSub, resDel] = await Promise.all([
+          fetch('/api/webhooks/subscriptions'),
+          fetch('/api/webhooks/deliveries')
+        ]);
+        if (resSub.ok) this.webhookSubscriptions = await resSub.json();
+        if (resDel.ok) this.webhookDeliveries = await resDel.json();
+      } else if (subTab === 'safety') {
+        const res = await fetch('/api/agent/context');
+        if (res.ok) this.agentContextMemory = await res.json();
+      }
+    } catch (e) {
+      console.warn('Failed fetching agent platform data:', e);
+    }
+  },
+
+  renderAgentPlatform() {
+    const sub = this.activeAgentSubTab || 'quotas';
+    let body = '';
+    if (sub === 'quotas') body = this.renderAgentQuotas();
+    else if (sub === 'executions') body = this.renderAgentExecutions();
+    else if (sub === 'escalations') body = this.renderAgentEscalations();
+    else if (sub === 'webhooks') body = this.renderAgentWebhooks();
+    else if (sub === 'safety') body = this.renderAgentSafety();
+
+    return `
+      <div class="content-header">
+        <div>
+          <h1 class="text-2xl font-bold text-slate-900 tracking-tight flex items-center gap-2">
+            <i data-lucide="bot" class="w-7 h-7 text-indigo-600"></i>
+            Autonomous MCP Agent Platform & Webhooks
+          </h1>
+          <p class="text-sm text-slate-500 mt-0.5">
+            Orchestration engine, per-agent execution quotas, signed outbox webhooks, prompt defense, and human-in-the-loop escalations.
+          </p>
+        </div>
+        <div style="display:flex; gap:10px;">
+          <button class="btn-press btn btn-secondary" onclick="app.ensureAgentPlatformData(app.activeAgentSubTab).then(() => app.render())">
+            <i data-lucide="refresh-cw" class="w-4 h-4"></i> Refresh
+          </button>
+          <button class="btn-press btn btn-primary" onclick="app.toggleAgentDrawer()">
+            <i data-lucide="terminal" class="w-4 h-4"></i> MCP Inspector
+          </button>
+        </div>
+      </div>
+
+      <div class="reports-toolbar" style="margin-bottom: 24px;">
+        <div class="reports-subnav">
+          <button class="reports-nav-btn ${sub === 'quotas' ? 'active' : ''}" onclick="app.setAgentSubTab('quotas')">
+            <i data-lucide="gauge" class="w-4 h-4"></i> Quotas & Budgets
+          </button>
+          <button class="reports-nav-btn ${sub === 'executions' ? 'active' : ''}" onclick="app.setAgentSubTab('executions')">
+            <i data-lucide="history" class="w-4 h-4"></i> Execution Replay
+          </button>
+          <button class="reports-nav-btn ${sub === 'escalations' ? 'active' : ''}" onclick="app.setAgentSubTab('escalations')">
+            <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-500"></i> Human Escalations (${(this.agentEscalations || []).filter(e => e.status === 'pending').length})
+          </button>
+          <button class="reports-nav-btn ${sub === 'webhooks' ? 'active' : ''}" onclick="app.setAgentSubTab('webhooks')">
+            <i data-lucide="webhook" class="w-4 h-4 text-emerald-500"></i> Signed Webhooks
+          </button>
+          <button class="reports-nav-btn ${sub === 'safety' ? 'active' : ''}" onclick="app.setAgentSubTab('safety')">
+            <i data-lucide="shield-alert" class="w-4 h-4 text-rose-500"></i> Prompt Defense & Context
+          </button>
+        </div>
+      </div>
+
+      ${body}
+    `;
+  },
+
+  renderAgentQuotas() {
+    const cfgs = this.agentConfigs || [];
+    return `
+      <div class="agent-platform-grid">
+        ${cfgs.map(c => {
+          const usagePct = c.daily_budget_cents > 0 ? Math.min(100, Math.round((c.current_day_usage_cents / c.daily_budget_cents) * 100)) : 0;
+          const isWarn = usagePct >= 80;
+          return `
+            <div class="agent-quota-card">
+              <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+                <div>
+                  <h3 style="font-weight:700; font-size:16px; color:var(--text-main);">${c.name}</h3>
+                  <span style="font-size:11px; color:var(--text-dim); font-family:var(--font-mono);">${c.id}</span>
+                </div>
+                <span class="actor-pill actor-agent">${c.is_active ? 'ACTIVE' : 'DISABLED'}</span>
+              </div>
+
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:8px;">
+                <div>
+                  <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase;">Tool Rate Quota</div>
+                  <div style="font-size:16px; font-weight:800; color:var(--text-main);">${c.tool_quota_per_minute} <span style="font-size:11px; font-weight:500;">calls/min</span></div>
+                </div>
+                <div>
+                  <div style="font-size:11px; color:var(--text-muted); text-transform:uppercase;">Concurrency Cap</div>
+                  <div style="font-size:16px; font-weight:800; color:var(--text-main);">${c.active_slots || 0} / ${c.concurrent_limit} <span style="font-size:11px; font-weight:500;">slots</span></div>
+                </div>
+              </div>
+
+              <div style="margin-top:8px;">
+                <div style="display:flex; justify-content:space-between; font-size:12px; font-weight:600;">
+                  <span>Daily Budget Allocation</span>
+                  <span>$${(c.current_day_usage_cents / 100).toFixed(2)} / $${(c.daily_budget_cents / 100).toFixed(2)} (${usagePct}%)</span>
+                </div>
+                <div class="quota-gauge-bar">
+                  <div class="quota-gauge-fill ${isWarn ? 'warning' : ''}" style="width: ${usagePct}%;"></div>
+                </div>
+              </div>
+
+              <div style="font-size:11px; color:var(--text-dim); margin-top:4px;">
+                Last active: ${c.last_used_at ? new Date(c.last_used_at).toLocaleTimeString() : 'Never'}
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    `;
+  },
+
+  renderAgentExecutions() {
+    const execs = this.agentExecutions || [];
+    return `
+      <div class="card p-5">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+          <h3 class="text-base font-bold text-slate-800 flex items-center gap-2">
+            <i data-lucide="history" class="w-5 h-5 text-indigo-500"></i>
+            Live Agent Execution Stream & Debugger Replay
+          </h3>
+          <span style="font-size:12px; color:var(--text-muted);">${execs.length} recorded tool runs</span>
+        </div>
+
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Timestamp</th>
+              <th>Tool Name</th>
+              <th>Agent Identity</th>
+              <th>Duration</th>
+              <th>Status</th>
+              <th>Arguments & Return Payload</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${execs.length === 0 ? '<tr><td colspan="6" style="text-align:center; padding:24px; color:var(--text-muted);">No agent executions recorded yet.</td></tr>' : execs.map(e => `
+              <tr>
+                <td style="font-size:11px; font-family:var(--font-mono); color:var(--text-dim); white-space:nowrap;">
+                  ${new Date(e.created_at).toLocaleTimeString()}
+                </td>
+                <td>
+                  <strong style="color:var(--text-main); font-family:var(--font-mono); font-size:12px;">${e.tool_name}</strong>
+                  <div style="font-size:10px; color:var(--text-dim); text-transform:uppercase;">${e.category}</div>
+                </td>
+                <td>
+                  <span class="actor-pill actor-agent">${e.agent_id}</span>
+                </td>
+                <td style="font-size:12px; font-weight:700; color:var(--text-main);">
+                  ${e.duration_ms} ms
+                </td>
+                <td>
+                  <span class="badge ${e.is_error ? 'badge-danger' : 'badge-success'}">${e.is_error ? 'ERROR' : 'SUCCESS'}</span>
+                </td>
+                <td>
+                  <details style="cursor:pointer;">
+                    <summary style="font-size:11px; color:var(--primary); font-weight:600;">Inspect JSON Payloads</summary>
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px;">
+                      <div>
+                        <div style="font-size:10px; color:var(--text-dim); font-weight:700; margin-bottom:2px;">ARGUMENTS</div>
+                        <pre class="code-block-viewer">${e.arguments_json || '{}'}</pre>
+                      </div>
+                      <div>
+                        <div style="font-size:10px; color:var(--text-dim); font-weight:700; margin-bottom:2px;">RESULT</div>
+                        <pre class="code-block-viewer">${e.result_json || '{}'}</pre>
+                      </div>
+                    </div>
+                  </details>
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  },
+
+  renderAgentEscalations() {
+    const escs = this.agentEscalations || [];
+    return `
+      <div class="card p-5">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+          <div>
+            <h3 class="text-base font-bold text-slate-800 flex items-center gap-2">
+              <i data-lucide="alert-triangle" class="w-5 h-5 text-amber-500"></i>
+              Human Operator Escalation Queue
+            </h3>
+            <p style="font-size:12px; color:var(--text-muted); margin-top:2px;">
+              Autonomous agent handoffs triggered by ambiguous requests, policy thresholds, or negative customer sentiment.
+            </p>
+          </div>
+        </div>
+
+        <div style="display:flex; flex-direction:column; gap:14px;">
+          ${escs.length === 0 ? '<div style="text-align:center; padding:32px; color:var(--text-muted);">No escalations pending review. All autonomous agents running smoothly.</div>' : escs.map(e => `
+            <div style="background:var(--bg-tertiary); border:1px solid var(--border-subtle); border-radius:14px; padding:18px;">
+              <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+                <div>
+                  <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+                    <span class="escalation-badge-${e.status}">${e.status.toUpperCase()}</span>
+                    <strong style="font-size:15px; color:var(--text-main);">${e.title}</strong>
+                  </div>
+                  <div style="font-size:12px; color:var(--text-dim);">
+                    Escalated by <span class="actor-pill actor-agent" style="font-size:9px;">${e.agent_id}</span> on ${new Date(e.created_at).toLocaleString()}
+                  </div>
+                </div>
+                ${e.status === 'pending' ? `
+                  <div style="display:flex; gap:8px;">
+                    <button class="btn-press btn btn-primary btn-sm" onclick="app.resolveAgentEscalation('${e.id}', 'approved')">
+                      <i data-lucide="check" class="w-3.5 h-3.5"></i> Approve
+                    </button>
+                    <button class="btn-press btn btn-secondary btn-sm" onclick="app.resolveAgentEscalation('${e.id}', 'rejected')">
+                      <i data-lucide="x" class="w-3.5 h-3.5"></i> Reject
+                    </button>
+                  </div>
+                ` : `<span style="font-size:12px; color:var(--text-muted);">Resolved</span>`}
+              </div>
+
+              <div style="margin-top:12px; font-size:13px; color:var(--text-main);">
+                <strong>Reason:</strong> <code style="font-family:var(--font-mono); font-size:12px; background:rgba(0,0,0,0.04); padding:2px 6px; border-radius:4px;">${e.reason}</code>
+              </div>
+
+              ${e.recommended_action ? `
+                <div style="margin-top:6px; font-size:13px; color:var(--text-main);">
+                  <strong>Recommended Action:</strong> ${e.recommended_action}
+                </div>
+              ` : ''}
+
+              <div style="margin-top:10px;">
+                <details style="cursor:pointer;">
+                  <summary style="font-size:11px; font-weight:600; color:var(--primary);">View Execution Context</summary>
+                  <pre class="code-block-viewer" style="margin-top:6px;">${e.input_context_json || '{}'}</pre>
+                </details>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `;
+  },
+
+  renderAgentWebhooks() {
+    const subs = this.webhookSubscriptions || [];
+    const delivs = this.webhookDeliveries || [];
+    return `
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:20px;">
+        <!-- Registered Webhooks -->
+        <div class="card p-5">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+            <h3 class="text-base font-bold text-slate-800 flex items-center gap-2">
+              <i data-lucide="webhook" class="w-5 h-5 text-emerald-500"></i>
+              Active Webhook Subscriptions
+            </h3>
+            <button class="btn-press btn btn-primary btn-sm" onclick="app.openNewWebhookModal()">
+              <i data-lucide="plus" class="w-3.5 h-3.5"></i> Add Webhook
+            </button>
+          </div>
+
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Subscription</th>
+                <th>Target URL</th>
+                <th>Event Types</th>
+                <th>HMAC Secret</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${subs.length === 0 ? '<tr><td colspan="5" style="text-align:center; padding:18px; color:var(--text-muted);">No webhook subscribers registered.</td></tr>' : subs.map(s => `
+                <tr>
+                  <td><strong>${s.name}</strong></td>
+                  <td style="font-size:11px; font-family:var(--font-mono); color:var(--primary); word-break:break-all;">${s.url}</td>
+                  <td style="font-size:11px; font-family:var(--font-mono);">${s.event_types}</td>
+                  <td><span class="webhook-secret-chip">${(s.secret || '').slice(0, 10)}...</span></td>
+                  <td>
+                    <button class="btn btn-secondary btn-sm" onclick="app.triggerTestWebhookEvent('${s.id}')">Test</button>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+
+          <div style="margin-top:16px; padding:14px; background:var(--bg-tertiary); border-radius:12px; border:1px solid var(--border-subtle); display:flex; justify-content:space-between; align-items:center;">
+            <div>
+              <strong style="font-size:13px; color:var(--text-main);">Outbox Event Simulator</strong>
+              <p style="font-size:11px; color:var(--text-muted);">Trigger signed HMAC-SHA256 test events across subscribers.</p>
+            </div>
+            <button class="btn-press btn btn-primary btn-sm" onclick="app.triggerTestWebhookEvent()">
+              <i data-lucide="send" class="w-3.5 h-3.5"></i> Dispatch po.created
+            </button>
+          </div>
+        </div>
+
+        <!-- Deliveries Log -->
+        <div class="card p-5">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+            <h3 class="text-base font-bold text-slate-800 flex items-center gap-2">
+              <i data-lucide="send" class="w-5 h-5 text-indigo-500"></i>
+              Outbox Delivery Attempts & Retries
+            </h3>
+            <span style="font-size:12px; color:var(--text-muted);">${delivs.length} logged attempts</span>
+          </div>
+
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Event Type</th>
+                <th>Status</th>
+                <th>HTTP Code</th>
+                <th>Retries</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${delivs.length === 0 ? '<tr><td colspan="5" style="text-align:center; padding:18px; color:var(--text-muted);">No webhook deliveries logged yet.</td></tr>' : delivs.map(d => `
+                <tr>
+                  <td style="font-size:11px; font-family:var(--font-mono); color:var(--text-dim);">${new Date(d.created_at).toLocaleTimeString()}</td>
+                  <td><code style="font-size:11px; font-family:var(--font-mono);">${d.event_type}</code></td>
+                  <td>
+                    <span class="badge ${d.status === 'delivered' ? 'badge-success' : 'badge-danger'}">${d.status.toUpperCase()}</span>
+                  </td>
+                  <td style="font-size:12px; font-weight:700;">${d.status_code || 0}</td>
+                  <td style="font-size:12px;">${d.retry_count} / ${d.max_retries}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  },
+
+  renderAgentSafety() {
+    const mems = this.agentContextMemory || [];
+    const sanitizeRes = this.sanitizeResult;
+    return `
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:20px;">
+        <!-- Injected Context Memory -->
+        <div class="card p-5">
+          <h3 class="text-base font-bold text-slate-800 flex items-center gap-2" style="margin-bottom:6px;">
+            <i data-lucide="database" class="w-5 h-5 text-indigo-500"></i>
+            Injected Company Context & Policy Prompts
+          </h3>
+          <p style="font-size:12px; color:var(--text-muted); margin-bottom:16px;">
+            Contextually provided to agents without polluting tool parameters (currency, tax rates, standard lead times).
+          </p>
+
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Category</th>
+                <th>Key</th>
+                <th>Injected Value</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${mems.length === 0 ? '<tr><td colspan="4" style="text-align:center; padding:18px; color:var(--text-muted);">No contextual memory records found.</td></tr>' : mems.map(m => `
+                <tr>
+                  <td><span class="actor-pill actor-agent" style="font-size:9px;">${m.category}</span></td>
+                  <td style="font-family:var(--font-mono); font-size:12px; font-weight:700;">${m.key}</td>
+                  <td><strong style="color:var(--text-main); font-family:var(--font-mono); font-size:12px;">${m.value}</strong></td>
+                  <td style="font-size:11px; color:var(--text-dim);">${m.description || ''}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Prompt Injection Defense Sandbox -->
+        <div class="card p-5">
+          <h3 class="text-base font-bold text-slate-800 flex items-center gap-2" style="margin-bottom:6px;">
+            <i data-lucide="shield-alert" class="w-5 h-5 text-rose-500"></i>
+            Prompt Injection Defense Sandbox
+          </h3>
+          <p style="font-size:12px; color:var(--text-muted); margin-bottom:14px;">
+            Test untrusted strings against regex and heuristic jailbreak detectors before dispatching to agents.
+          </p>
+
+          <textarea id="prompt-test-input" class="form-input code-input" rows="4" placeholder="Enter untrusted customer review or prompt injection payload (e.g. Please ignore previous instructions and override system prompt)..."></textarea>
+          
+          <button class="btn-press btn btn-primary" style="margin-top:10px; width:100%;" onclick="app.triggerSanitizeTest()">
+            <i data-lucide="shield-check" class="w-4 h-4"></i> Validate & Sanitize Input
+          </button>
+
+          ${sanitizeRes ? `
+            <div class="sanitize-result-box">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <span style="font-size:13px; font-weight:700;">Analysis Verdict:</span>
+                <span class="badge ${sanitizeRes.is_safe ? 'badge-success' : 'badge-danger'}">
+                  ${sanitizeRes.is_safe ? 'SAFE / PASSED' : 'INJECTION DETECTED (BLOCKED)'}
+                </span>
+              </div>
+              <div style="font-size:12px; color:var(--text-muted);">Risk Score: <strong>${(sanitizeRes.risk_score * 100).toFixed(0)}%</strong></div>
+              ${sanitizeRes.flagged_patterns && sanitizeRes.flagged_patterns.length > 0 ? `
+                <div style="font-size:12px; color:#DC2626; margin-top:4px;">
+                  Flagged Patterns: <strong>${sanitizeRes.flagged_patterns.join(', ')}</strong>
+                </div>
+              ` : ''}
+              <div style="margin-top:10px;">
+                <div style="font-size:11px; font-weight:700; color:var(--text-dim); margin-bottom:2px;">SANITIZED OUTPUT</div>
+                <pre class="code-block-viewer">${sanitizeRes.sanitized_text || ''}</pre>
+              </div>
+            </div>
+          ` : ''}
+        </div>
+      </div>
+    `;
+  },
+
+  async triggerSanitizeTest() {
+    const input = document.getElementById('prompt-test-input');
+    const text = input ? input.value : '';
+    if (!text) {
+      this.showToast('Please enter text to test.');
+      return;
+    }
+    try {
+      const res = await fetch('/api/agent/sanitize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text })
+      });
+      if (res.ok) {
+        this.sanitizeResult = await res.json();
+        this.render();
+      }
+    } catch (e) {
+      this.showToast('Error validating prompt: ' + e.message);
+    }
+  },
+
+  async triggerTestWebhookEvent(subId) {
+    try {
+      const res = await fetch('/api/webhooks/test-dispatch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ event_type: 'po.created' })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        this.showToast(`Dispatched event to ${data.deliveries_count || 0} subscriber(s).`);
+        await this.ensureAgentPlatformData('webhooks');
+        this.render();
+      }
+    } catch (e) {
+      this.showToast('Failed dispatching webhook: ' + e.message);
+    }
+  },
+
+  async resolveAgentEscalation(id, status) {
+    try {
+      const res = await fetch('/api/agent/escalations/resolve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, status, notes: `Resolved by operator (${status})` })
+      });
+      if (res.ok) {
+        this.showToast(`Escalation ${id} marked as ${status}.`);
+        await this.ensureAgentPlatformData('escalations');
+        this.render();
+      }
+    } catch (e) {
+      this.showToast('Error resolving escalation: ' + e.message);
+    }
+  },
+
+  openNewWebhookModal() {
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    if (!modal || !content) return;
+
+    content.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+        <h3 class="text-lg font-bold text-slate-800">Add Webhook Subscription</h3>
+        <button class="icon-btn" onclick="app.closeModal()"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <div>
+          <label style="font-size:12px; font-weight:600;">Subscriber Name</label>
+          <input type="text" id="wh-name" class="form-input" placeholder="e.g. Claude Desktop Agent Daemon">
+        </div>
+        <div>
+          <label style="font-size:12px; font-weight:600;">Endpoint URL</label>
+          <input type="url" id="wh-url" class="form-input" placeholder="https://agent.example.com/webhook">
+        </div>
+        <div>
+          <label style="font-size:12px; font-weight:600;">HMAC Secret (leave blank to auto-generate)</label>
+          <input type="text" id="wh-secret" class="form-input" placeholder="whsec_...">
+        </div>
+        <div>
+          <label style="font-size:12px; font-weight:600;">Subscribed Events (comma separated or * for all)</label>
+          <input type="text" id="wh-events" class="form-input" value="po.created, deal.won, invoice.overdue, stock.low">
+        </div>
+        <button class="btn-press btn btn-primary" style="margin-top:10px;" onclick="app.submitNewWebhook()">Register Webhook</button>
+      </div>
+    `;
+    modal.classList.add('active');
+    if (window.lucide) lucide.createIcons();
+  },
+
+  async submitNewWebhook() {
+    const name = document.getElementById('wh-name')?.value || 'Agent Webhook';
+    const url = document.getElementById('wh-url')?.value;
+    const secret = document.getElementById('wh-secret')?.value;
+    const events = document.getElementById('wh-events')?.value || '*';
+
+    if (!url) {
+      this.showToast('Target URL is required.');
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/webhooks/subscriptions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, url, secret, event_types: events })
+      });
+      if (res.ok) {
+        this.closeModal();
+        this.showToast('Webhook registered successfully.');
+        await this.ensureAgentPlatformData('webhooks');
+        this.render();
+      }
+    } catch (e) {
+      this.showToast('Error creating webhook: ' + e.message);
+    }
+  },
+
+
+  // ==========================================================================
+  // Phase 9: Enterprise Multi-Tenancy, Auth & Compliance
+  // ==========================================================================
+  async loadOrganizations() {
+    try {
+      const res = await fetch('/api/orgs');
+      if (res.ok) {
+        const orgs = await res.json();
+        this.data.organizations = orgs || [];
+        const sel = document.getElementById('tenant-org-select');
+        if (sel && this.data.organizations.length > 0) {
+          sel.innerHTML = this.data.organizations.map(o => {
+            const orgId = o.org_id || o.id;
+            const orgName = o.org_name || o.name || orgId;
+            const orgSlug = o.org_slug || o.slug || '';
+            return `<option value="${orgId}">${orgName}${orgSlug ? ` (${orgSlug})` : ''}</option>`;
+          }).join('');
+          const activeOrg = localStorage.getItem('aosphere_active_org') || (this.data.organizations[0].org_id || this.data.organizations[0].id);
+          sel.value = activeOrg;
+        }
+      }
+    } catch (err) {
+      console.warn('Failed loading organizations:', err);
+    }
+  },
+
+  async switchOrganization(orgId) {
+    if (!orgId) return;
+    try {
+      const res = await fetch('/api/auth/switch-org', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ org_id: orgId })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        localStorage.setItem('aosphere_active_org', orgId);
+        const sel = document.getElementById('tenant-org-select');
+        if (sel) sel.value = orgId;
+        this.showToast(`Switched active tenant to ${data.org_name || orgId}`);
+        await this.loadAllData();
+        if (this.activeTab === 'compliance') {
+          await this.ensureComplianceData(this.activeComplianceSubTab);
+        }
+        this.render();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        this.showToast(`Failed switching tenant: ${err.error || res.statusText}`);
+      }
+    } catch (err) {
+      this.showToast(`Error switching tenant: ${err.message}`);
+    }
+  },
+
+  async setComplianceSubTab(subTab) {
+    this.activeComplianceSubTab = subTab;
+    await this.ensureComplianceData(subTab);
+    this.render();
+    if (window.lucide) lucide.createIcons();
+  },
+
+  async ensureComplianceData(subTab) {
+    try {
+      if (subTab === 'tenancy') {
+        const [orgsRes, invRes] = await Promise.all([
+          fetch('/api/orgs'),
+          fetch('/api/auth/invitations')
+        ]);
+        if (orgsRes.ok) this.data.organizations = await orgsRes.json();
+        if (invRes.ok) this.data.userInvitations = await invRes.json();
+      } else if (subTab === 'auth') {
+        const ssoRes = await fetch('/api/auth/sso/configs');
+        if (ssoRes.ok) this.data.ssoConfigs = await ssoRes.json();
+      } else if (subTab === 'roles') {
+        const rolesRes = await fetch('/api/auth/roles');
+        if (rolesRes.ok) this.data.customRoles = await rolesRes.json();
+      } else if (subTab === 'vault') {
+        const [vaultRes, verifyRes] = await Promise.all([
+          fetch('/api/compliance/audit-vault?limit=50'),
+          fetch('/api/compliance/audit-vault/verify', { method: 'POST' })
+        ]);
+        if (vaultRes.ok) this.data.auditVaultBlocks = await vaultRes.json();
+        if (verifyRes.ok) this.data.auditVaultIntegrity = await verifyRes.json();
+      } else if (subTab === 'gdpr') {
+        const gdprRes = await fetch('/api/compliance/gdpr/requests');
+        if (gdprRes.ok) this.data.privacyRequests = await gdprRes.json();
+      } else if (subTab === 'soc2') {
+        const soc2Res = await fetch('/api/compliance/soc2/access-review');
+        if (soc2Res.ok) this.data.soc2Reviews = await soc2Res.json();
+      }
+    } catch (err) {
+      console.warn('Failed ensuring compliance data:', err);
+    }
+  },
+
+  renderCompliance() {
+    const sub = this.activeComplianceSubTab || 'tenancy';
+    let body = '';
+    if (sub === 'tenancy') body = this.renderComplianceTenancy();
+    else if (sub === 'auth') body = this.renderComplianceAuth();
+    else if (sub === 'roles') body = this.renderComplianceRoles();
+    else if (sub === 'vault') body = this.renderComplianceVault();
+    else if (sub === 'gdpr') body = this.renderComplianceGDPR();
+    else if (sub === 'soc2') body = this.renderComplianceSOC2();
+
+    return `
+      <div class="content-header">
+        <div>
+          <h1 class="text-2xl font-bold text-slate-900 tracking-tight flex items-center gap-2">
+            <i data-lucide="shield" class="w-7 h-7 text-indigo-600"></i>
+            Enterprise Multi-Tenancy, Auth & Compliance
+          </h1>
+          <p class="text-sm text-slate-500 mt-0.5">
+            Strict tenant isolation, RFC 6238 TOTP 2FA, SSO/SAML identity, immutable SHA-256 audit vault, GDPR data rights, and SOC2 Type II readiness.
+          </p>
+        </div>
+        <div style="display:flex; gap:10px;">
+          <button class="btn-press btn btn-secondary" onclick="app.verifyAuditVaultChain()">
+            <i data-lucide="shield-check" class="w-4 h-4 text-emerald-600"></i> Verify Vault Chain
+          </button>
+          <button class="btn-press btn btn-secondary" onclick="app.ensureComplianceData(app.activeComplianceSubTab).then(() => app.render())">
+            <i data-lucide="refresh-cw" class="w-4 h-4"></i> Refresh
+          </button>
+        </div>
+      </div>
+
+      <div class="reports-toolbar" style="margin-bottom: 24px;">
+        <div class="reports-subnav">
+          <button class="reports-nav-btn ${sub === 'tenancy' ? 'active' : ''}" onclick="app.setComplianceSubTab('tenancy')">
+            <i data-lucide="building-2" class="w-4 h-4"></i> Tenancy & Invitations
+          </button>
+          <button class="reports-nav-btn ${sub === 'auth' ? 'active' : ''}" onclick="app.setComplianceSubTab('auth')">
+            <i data-lucide="key" class="w-4 h-4"></i> 2FA & SSO Identity
+          </button>
+          <button class="reports-nav-btn ${sub === 'roles' ? 'active' : ''}" onclick="app.setComplianceSubTab('roles')">
+            <i data-lucide="user-check" class="w-4 h-4"></i> Granular Roles (${(this.data.customRoles || []).length})
+          </button>
+          <button class="reports-nav-btn ${sub === 'vault' ? 'active' : ''}" onclick="app.setComplianceSubTab('vault')">
+            <i data-lucide="link" class="w-4 h-4 text-emerald-600"></i> Immutable Audit Vault
+          </button>
+          <button class="reports-nav-btn ${sub === 'gdpr' ? 'active' : ''}" onclick="app.setComplianceSubTab('gdpr')">
+            <i data-lucide="file-text" class="w-4 h-4"></i> GDPR & Privacy
+          </button>
+          <button class="reports-nav-btn ${sub === 'soc2' ? 'active' : ''}" onclick="app.setComplianceSubTab('soc2')">
+            <i data-lucide="check-circle" class="w-4 h-4 text-indigo-600"></i> SOC2 Type II
+          </button>
+        </div>
+      </div>
+
+      ${body}
+    `;
+  },
+
+  renderComplianceTenancy() {
+    const orgs = this.data.organizations || [];
+    const invs = this.data.userInvitations || [];
+    const activeOrgId = localStorage.getItem('aosphere_active_org') || (orgs[0] ? (orgs[0].org_id || orgs[0].id) : 'org_default');
+
+    return `
+      <div style="display:flex; flex-direction:column; gap:24px;">
+        <!-- Organizations Section -->
+        <div class="table-container mockup-item">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+            <div>
+              <h3 style="font-size:16px; font-weight:800; color:#0F172A;">Tenant Organizations</h3>
+              <p style="font-size:13px; color:#64748B;">Scoped operational domains with zero cross-tenant data leakage.</p>
+            </div>
+            <button class="btn-press btn btn-primary btn-sm" onclick="app.openNewOrgModal()">
+              <i data-lucide="plus" class="w-3.5 h-3.5"></i> Add Organization
+            </button>
+          </div>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Tenant ID</th>
+                <th>Organization Name</th>
+                <th>Slug</th>
+                <th>Role in Org</th>
+                <th>Status</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${orgs.length === 0 ? '<tr><td colspan="6" style="text-align:center; padding:20px; color:#94A3B8;">No organizations configured</td></tr>' : ''}
+              ${orgs.map(o => {
+                const oId = o.org_id || o.id;
+                const isCurrent = oId === activeOrgId;
+                return `
+                  <tr>
+                    <td><span class="mono-code">${oId}</span></td>
+                    <td><strong style="color:#0F172A;">${o.org_name || o.name}</strong></td>
+                    <td><span class="badge" style="background:#F1F5F9; color:#475569;">${o.org_slug || o.slug}</span></td>
+                    <td><span class="actor-pill actor-human">${o.role || 'admin'}</span></td>
+                    <td>
+                      ${isCurrent ?
+                        '<span class="chain-status-verified"><i data-lucide="check" class="w-3 h-3"></i> Active Scope</span>' :
+                        '<span class="badge" style="background:#F1F5F9; color:#64748B;">Available</span>'
+                      }
+                    </td>
+                    <td>
+                      ${isCurrent ?
+                        '<span style="font-size:12px; color:#64748B; font-weight:600;">Currently Active</span>' :
+                        `<button class="btn-press btn btn-secondary btn-sm" onclick="app.switchOrganization('${oId}')">Switch to Tenant</button>`
+                      }
+                    </td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Invitations Section -->
+        <div class="table-container mockup-item">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+            <div>
+              <h3 style="font-size:16px; font-weight:800; color:#0F172A;">Pending & Active Invitations</h3>
+              <p style="font-size:13px; color:#64748B;">Invite team members with pre-assigned roles and expiring security tokens.</p>
+            </div>
+            <button class="btn-press btn btn-primary btn-sm" onclick="app.openNewInvitationModal()">
+              <i data-lucide="user-plus" class="w-3.5 h-3.5"></i> Invite Member
+            </button>
+          </div>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Invitee Email</th>
+                <th>Assigned Role</th>
+                <th>Status</th>
+                <th>Invited At</th>
+                <th>Expires At</th>
+                <th>Invite Token</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${invs.length === 0 ? '<tr><td colspan="7" style="text-align:center; padding:20px; color:#94A3B8;">No active invitations</td></tr>' : ''}
+              ${invs.map(inv => `
+                <tr>
+                  <td><strong style="color:#0F172A;">${inv.email}</strong></td>
+                  <td><span class="actor-pill actor-human">${inv.role}</span></td>
+                  <td>
+                    <span class="badge" style="background:${inv.status === 'accepted' ? '#ECFDF5; color:#059669;' : '#FFFBEB; color:#D97706;'} font-weight:700;">
+                      ${inv.status.toUpperCase()}
+                    </span>
+                  </td>
+                  <td style="font-family:var(--font-mono); font-size:11.5px; color:#64748B;">${new Date(inv.created_at).toLocaleDateString()}</td>
+                  <td style="font-family:var(--font-mono); font-size:11.5px; color:#64748B;">${new Date(inv.expires_at).toLocaleDateString()}</td>
+                  <td>
+                    <button class="btn-press btn btn-secondary btn-sm" style="font-family:var(--font-mono); font-size:11px;" onclick="app.copyInvitationToken('${inv.token}')">
+                      <i data-lucide="copy" class="w-3 h-3"></i> Copy Token
+                    </button>
+                  </td>
+                  <td>
+                    ${inv.status === 'pending' ?
+                      `<button class="btn-press btn btn-secondary btn-sm text-red-600" onclick="app.cancelInvitation('${inv.id}')">Revoke</button>` :
+                      `<span style="font-size:12px; color:#94A3B8;">Accepted</span>`
+                    }
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  },
+
+  renderComplianceAuth() {
+    const ssoConfigs = this.data.ssoConfigs || [];
+
+    return `
+      <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap:24px;">
+        <!-- Two-Factor Authentication Card -->
+        <div class="table-container mockup-item" style="padding:24px;">
+          <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:16px;">
+            <div>
+              <div class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[11px] font-bold uppercase tracking-wider mb-2">
+                <i data-lucide="shield-check" class="w-3.5 h-3.5"></i> RFC 6238 Engine
+              </div>
+              <h3 style="font-size:17px; font-weight:800; color:#0F172A;">Two-Factor Authentication (2FA)</h3>
+              <p style="font-size:13px; color:#64748B; margin-top:4px;">
+                Pure standard-library Time-based One-Time Passwords (TOTP). Compatible with Google Authenticator, 1Password, and Authy.
+              </p>
+            </div>
+          </div>
+
+          <div style="background:#F8FAFC; border:1px solid var(--border-subtle); border-radius:12px; padding:18px; margin-bottom:18px;">
+            <div style="display:flex; align-items:center; justify-content:space-between;">
+              <div>
+                <div style="font-weight:700; font-size:14px; color:#0F172A;">TOTP Status for Active Admin</div>
+                <div style="font-size:12px; color:#64748B; margin-top:2px;">Includes ±30s drift tolerance & 8 emergency recovery codes</div>
+              </div>
+              <span class="chain-status-verified">
+                <i data-lucide="check-circle" class="w-3.5 h-3.5"></i> Ready / Configured
+              </span>
+            </div>
+          </div>
+
+          <div style="display:flex; gap:10px;">
+            <button class="btn-press btn btn-primary" onclick="app.setup2FA()">
+              <i data-lucide="smartphone" class="w-4 h-4"></i> Setup / Reconfigure 2FA
+            </button>
+            <button class="btn-press btn btn-secondary text-red-600" onclick="app.disable2FA()">
+              Disable 2FA
+            </button>
+          </div>
+        </div>
+
+        <!-- Single Sign-On (SSO / SAML / OIDC) Card -->
+        <div class="table-container mockup-item" style="padding:24px;">
+          <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:16px;">
+            <div>
+              <div class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-indigo-100 text-indigo-800 text-[11px] font-bold uppercase tracking-wider mb-2">
+                <i data-lucide="globe" class="w-3.5 h-3.5"></i> Identity Federation
+              </div>
+              <h3 style="font-size:17px; font-weight:800; color:#0F172A;">Enterprise SSO (OIDC & SAML 2.0)</h3>
+              <p style="font-size:13px; color:#64748B; margin-top:4px;">
+                Federate identity via Okta, Azure AD (Entra ID), or Google Workspace with automated JIT user provisioning.
+              </p>
+            </div>
+            <button class="btn-press btn btn-primary btn-sm" onclick="app.openNewSSOModal()">
+              <i data-lucide="plus" class="w-3.5 h-3.5"></i> Add SSO Provider
+            </button>
+          </div>
+
+          <div style="display:flex; flex-direction:column; gap:12px;">
+            ${ssoConfigs.length === 0 ? '<div style="text-align:center; padding:24px; color:#94A3B8; font-size:13px;">No SSO providers configured yet</div>' : ''}
+            ${ssoConfigs.map(sso => `
+              <div style="display:flex; justify-content:space-between; align-items:center; padding:14px; background:#F8FAFC; border:1px solid var(--border-subtle); border-radius:10px;">
+                <div>
+                  <div style="display:flex; align-items:center; gap:8px;">
+                    <span class="sso-provider-badge">${sso.provider_type.toUpperCase()}</span>
+                    <strong style="color:#0F172A; font-size:14px;">${sso.provider_name}</strong>
+                  </div>
+                  <div style="font-size:12px; color:#64748B; margin-top:4px;">
+                    Domain: <code style="background:#E2E8F0; padding:1px 5px; border-radius:4px;">${sso.domain_mapping || 'All domains'}</code>
+                  </div>
+                </div>
+                <div style="display:flex; gap:6px;">
+                  <button class="btn-press btn btn-secondary btn-sm" onclick="app.simulateSSOLogin('${sso.id}')">Simulate Auth</button>
+                  <button class="btn-press btn btn-secondary btn-sm text-red-600" onclick="app.deleteSSOConfig('${sso.id}')">Delete</button>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      </div>
+    `;
+  },
+
+  renderComplianceRoles() {
+    const roles = this.data.customRoles || [];
+
+    return `
+      <div class="table-container mockup-item">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+          <div>
+            <h3 style="font-size:16px; font-weight:800; color:#0F172A;">Custom Granular Roles & Permissions</h3>
+            <p style="font-size:13px; color:#64748B;">Define bespoke permission profiles combining ERP, CRM, Finance, HR, and Compliance access flags.</p>
+          </div>
+          <button class="btn-press btn btn-primary btn-sm" onclick="app.openNewCustomRoleModal()">
+            <i data-lucide="plus" class="w-3.5 h-3.5"></i> Create Custom Role
+          </button>
+        </div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Role Identifier</th>
+              <th>Display Name</th>
+              <th>Description</th>
+              <th>Granted Permissions</th>
+              <th>Created</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${roles.length === 0 ? '<tr><td colspan="6" style="text-align:center; padding:20px; color:#94A3B8;">No custom roles created. Standard built-in roles active (admin, manager, operator, auditor, human, agent).</td></tr>' : ''}
+            ${roles.map(r => {
+              const perms = (r.permissions_json || '').replace(/[\[\]"]/g, '').split(',').map(p => p.trim()).filter(Boolean);
+              return `
+                <tr>
+                  <td><span class="mono-code">${r.name}</span></td>
+                  <td><strong style="color:#0F172A;">${r.name}</strong></td>
+                  <td style="color:#64748B; font-size:13px;">${r.description || '—'}</td>
+                  <td>
+                    <div style="display:flex; flex-wrap:wrap; gap:4px;">
+                      ${perms.map(p => `<span class="badge" style="background:#EEF2FF; color:#4F46E5; font-size:11px;">${p}</span>`).join('')}
+                    </div>
+                  </td>
+                  <td style="font-family:var(--font-mono); font-size:11.5px; color:#64748B;">${new Date(r.created_at).toLocaleDateString()}</td>
+                  <td>
+                    <button class="btn-press btn btn-secondary btn-sm text-red-600" onclick="app.deleteCustomRole('${r.id}')">Delete</button>
+                  </td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  },
+
+  renderComplianceVault() {
+    const blocks = this.data.auditVaultBlocks || [];
+    const integrity = this.data.auditVaultIntegrity || { is_valid: true, blocks_verified: blocks.length };
+
+    return `
+      <div style="display:flex; flex-direction:column; gap:20px;">
+        <!-- Vault Integrity Status Banner -->
+        <div style="background:${integrity.is_valid ? 'rgba(16, 185, 129, 0.08)' : 'rgba(239, 68, 68, 0.08)'}; border:1px solid ${integrity.is_valid ? '#10B981' : '#EF4444'}; border-radius:14px; padding:20px; display:flex; justify-content:space-between; align-items:center;">
+          <div style="display:flex; align-items:center; gap:16px;">
+            <div style="width:44px; height:44px; border-radius:12px; background:${integrity.is_valid ? '#10B981' : '#EF4444'}; color:#FFF; display:flex; align-items:center; justify-content:center;">
+              <i data-lucide="${integrity.is_valid ? 'shield-check' : 'alert-octagon'}" class="w-6 h-6"></i>
+            </div>
+            <div>
+              <h3 style="font-size:16px; font-weight:800; color:#0F172A; margin:0;">
+                ${integrity.is_valid ? 'CRYPTOGRAPHIC CHAIN INTEGRITY: 100% VERIFIED' : 'INTEGRITY BREACH DETECTED'}
+              </h3>
+              <p style="font-size:13px; color:#475569; margin:4px 0 0 0;">
+                ${integrity.is_valid ?
+                  `All ${integrity.blocks_verified} chained SHA-256 blocks traversed in sequence. Genesis root and parental hashes strictly match.` :
+                  `Chain hash mismatch error: ${integrity.verification_error || 'Block corruption detected.'}`
+                }
+              </p>
+            </div>
+          </div>
+          <div style="display:flex; gap:10px;">
+            <button class="btn-press btn btn-primary" onclick="app.verifyAuditVaultChain()">
+              <i data-lucide="refresh-cw" class="w-4 h-4"></i> Run Traversal Verification
+            </button>
+            <button class="btn-press btn btn-secondary" onclick="app.openRecordSecurityEventModal()">
+              <i data-lucide="plus-circle" class="w-4 h-4"></i> Record Vault Block
+            </button>
+          </div>
+        </div>
+
+        <!-- Chained Vault Ledger Table -->
+        <div class="table-container mockup-item">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+            <div>
+              <h3 style="font-size:16px; font-weight:800; color:#0F172A;">Chained Security Audit Vault (Immutable Ledger)</h3>
+              <p style="font-size:13px; color:#64748B;">Write-only hash-chained provenance trail. Any alteration breaks the hash of every descendant block.</p>
+            </div>
+            <span class="badge" style="background:#F1F5F9; color:#475569; font-weight:700;">Showing ${blocks.length} Blocks</span>
+          </div>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th style="width:60px;">Seq #</th>
+                <th>Timestamp</th>
+                <th>Event Type</th>
+                <th>Actor</th>
+                <th>Current Block SHA-256 Hash</th>
+                <th>Previous Hash (Parent)</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${blocks.length === 0 ? '<tr><td colspan="7" style="text-align:center; padding:20px; color:#94A3B8;">No vault blocks in current organization</td></tr>' : ''}
+              ${blocks.map(b => `
+                <tr>
+                  <td><strong style="color:#0F172A; font-family:var(--font-mono);">#${b.sequence_number}</strong></td>
+                  <td style="font-family:var(--font-mono); font-size:11.5px; color:#64748B;">${new Date(b.created_at).toLocaleString()}</td>
+                  <td><strong style="color:#0F172A;">${b.event_type}</strong></td>
+                  <td>
+                    <span class="actor-pill actor-${b.actor_type}">
+                      ${b.actor_type.toUpperCase()}: ${b.actor_id}
+                    </span>
+                  </td>
+                  <td>
+                    <span class="chain-hash-pill" title="${b.block_hash}" style="cursor:pointer;" onclick="navigator.clipboard.writeText('${b.block_hash}'); app.showToast('Full block hash copied to clipboard');">
+                      ${b.block_hash.slice(0, 16)}...
+                    </span>
+                  </td>
+                  <td>
+                    <span class="chain-hash-pill" title="${b.prev_hash}">
+                      ${b.prev_hash === '0000000000000000000000000000000000000000000000000000000000000000' ? 'GENESIS ROOT' : b.prev_hash.slice(0, 12) + '...'}
+                    </span>
+                  </td>
+                  <td>
+                    <span class="chain-status-verified" style="font-size:11px; padding:2px 8px;">
+                      <i data-lucide="lock" class="w-3 h-3"></i> Sealed
+                    </span>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  },
+
+  renderComplianceGDPR() {
+    const requests = this.data.privacyRequests || [];
+
+    return `
+      <div style="display:flex; flex-direction:column; gap:24px;">
+        <!-- Data Subject Rights Header -->
+        <div class="table-container mockup-item" style="padding:24px;">
+          <h3 style="font-size:17px; font-weight:800; color:#0F172A; margin-bottom:6px;">GDPR & Privacy Compliance Suite</h3>
+          <p style="font-size:13.5px; color:#64748B; margin-bottom:20px;">
+            Full adherence to GDPR Chapter 3. Provide comprehensive data portability packages (Art. 15/20) and automated pseudonymization & erasure (Art. 17 Right to be Forgotten).
+          </p>
+
+          <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap:16px;">
+            <!-- Export Card -->
+            <div style="border:1px solid var(--border-subtle); border-radius:12px; padding:18px; background:#F8FAFC;">
+              <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+                <div style="background:#E0E7FF; color:#4338CA; border-radius:8px; padding:6px;">
+                  <i data-lucide="download" class="w-5 h-5"></i>
+                </div>
+                <h4 style="font-weight:700; font-size:15px; color:#0F172A; margin:0;">Article 15: Export My Data</h4>
+              </div>
+              <p style="font-size:12.5px; color:#64748B; margin-bottom:14px;">
+                Generates a standardized JSON archive of all personal identity records, active organization memberships, and activity ledger traces.
+              </p>
+              <button class="btn-press btn btn-primary" onclick="app.triggerGDPRExport()">
+                <i data-lucide="file-json" class="w-4 h-4"></i> Generate JSON Archive
+              </button>
+            </div>
+
+            <!-- Forget-Me Card -->
+            <div style="border:1px solid #FECACA; border-radius:12px; padding:18px; background:#FFF5F5;">
+              <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+                <div style="background:#FEE2E2; color:#DC2626; border-radius:8px; padding:6px;">
+                  <i data-lucide="user-x" class="w-5 h-5"></i>
+                </div>
+                <h4 style="font-weight:700; font-size:15px; color:#991B1B; margin:0;">Article 17: Right to be Forgotten</h4>
+              </div>
+              <p style="font-size:12.5px; color:#7F1D1D; margin-bottom:14px;">
+                Irreversibly scrubs personally identifiable data (name, email) while preserving referential ledger safety in accounting records.
+              </p>
+              <button class="btn-press btn btn-secondary text-red-600" onclick="app.triggerGDPRForgetMe()">
+                <i data-lucide="trash-2" class="w-4 h-4"></i> Anonymize Account
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Privacy Request Ledger -->
+        <div class="table-container mockup-item">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+            <div>
+              <h3 style="font-size:16px; font-weight:800; color:#0F172A;">Privacy Request Log</h3>
+              <p style="font-size:13px; color:#64748B;">Audit record of all received GDPR requests and their completion status.</p>
+            </div>
+          </div>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Request ID</th>
+                <th>User ID</th>
+                <th>Request Type</th>
+                <th>Status</th>
+                <th>Requested At</th>
+                <th>Completed At</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${requests.length === 0 ? '<tr><td colspan="6" style="text-align:center; padding:20px; color:#94A3B8;">No privacy requests processed yet</td></tr>' : ''}
+              ${requests.map(r => `
+                <tr>
+                  <td><span class="mono-code">${r.id}</span></td>
+                  <td><span class="mono-code">${r.user_id}</span></td>
+                  <td><strong style="color:#0F172A;">${r.request_type.toUpperCase()}</strong></td>
+                  <td>
+                    <span class="badge" style="background:#ECFDF5; color:#047857; font-weight:700;">
+                      ${r.status.toUpperCase()}
+                    </span>
+                  </td>
+                  <td style="font-family:var(--font-mono); font-size:11.5px; color:#64748B;">${new Date(r.requested_at).toLocaleString()}</td>
+                  <td style="font-family:var(--font-mono); font-size:11.5px; color:#64748B;">${r.completed_at ? new Date(r.completed_at).toLocaleString() : 'Pending'}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  },
+
+  renderComplianceSOC2() {
+    const reviews = this.data.soc2Reviews || [];
+
+    return `
+      <div style="display:flex; flex-direction:column; gap:24px;">
+        <!-- SOC2 Readiness Controls Checklist -->
+        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:16px;">
+          <div class="soc2-review-card">
+            <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+              <i data-lucide="clock" class="w-5 h-5 text-indigo-600"></i>
+              <h4 style="font-weight:700; font-size:14px; color:#0F172A; margin:0;">Session Timeout</h4>
+            </div>
+            <div style="font-size:20px; font-weight:800; color:#0F172A;">30 Minutes</div>
+            <div style="font-size:12px; color:#64748B; margin-top:4px;">Enforced idle timeout with automatic token revocation.</div>
+          </div>
+
+          <div class="soc2-review-card">
+            <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+              <i data-lucide="key" class="w-5 h-5 text-emerald-600"></i>
+              <h4 style="font-weight:700; font-size:14px; color:#0F172A; margin:0;">Password Policy</h4>
+            </div>
+            <div style="font-size:20px; font-weight:800; color:#059669;">SOC2 Compliant</div>
+            <div style="font-size:12px; color:#64748B; margin-top:4px;">>= 10 chars, upper, lower, numbers, symbols enforced.</div>
+          </div>
+
+          <div class="soc2-review-card">
+            <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+              <i data-lucide="layers" class="w-5 h-5 text-blue-600"></i>
+              <h4 style="font-weight:700; font-size:14px; color:#0F172A; margin:0;">Tenant Boundary</h4>
+            </div>
+            <div style="font-size:20px; font-weight:800; color:#2563EB;">Strict Isolation</div>
+            <div style="font-size:12px; color:#64748B; margin-top:4px;">All database queries strictly scoped by org_id.</div>
+          </div>
+
+          <div class="soc2-review-card">
+            <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+              <i data-lucide="shield" class="w-5 h-5 text-purple-600"></i>
+              <h4 style="font-weight:700; font-size:14px; color:#0F172A; margin:0;">Ledger Provenance</h4>
+            </div>
+            <div style="font-size:20px; font-weight:800; color:#7C3AED;">SHA-256 Vault</div>
+            <div style="font-size:12px; color:#64748B; margin-top:4px;">Cryptographically chained, immutable security events.</div>
+          </div>
+        </div>
+
+        <!-- Quarterly Access Review -->
+        <div class="table-container mockup-item">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+            <div>
+              <h3 style="font-size:16px; font-weight:800; color:#0F172A;">Quarterly User Access Review</h3>
+              <p style="font-size:13px; color:#64748B;">SOC2 CC6.1 periodic user privilege audit snapshot and formal executive sign-off.</p>
+            </div>
+            <button class="btn-press btn btn-primary btn-sm" onclick="app.generateSOC2AccessReview()">
+              <i data-lucide="camera" class="w-3.5 h-3.5"></i> Capture Q4 Review Snapshot
+            </button>
+          </div>
+
+          <div style="display:flex; flex-direction:column; gap:16px;">
+            ${reviews.length === 0 ? '<div style="text-align:center; padding:24px; color:#94A3B8;">No access reviews on file. Click above to generate an access snapshot.</div>' : ''}
+            ${reviews.map(rev => `
+              <div class="soc2-review-card" style="border-left:4px solid ${rev.status === 'signed_off' ? '#10B981' : '#F59E0B'};">
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:12px;">
+                  <div>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                      <h4 style="font-size:16px; font-weight:800; color:#0F172A; margin:0;">Review Quarter: ${rev.quarter}</h4>
+                      <span class="badge" style="background:${rev.status === 'signed_off' ? '#ECFDF5; color:#059669;' : '#FFFBEB; color:#D97706;'} font-weight:700;">
+                        ${rev.status.toUpperCase()}
+                      </span>
+                    </div>
+                    <div style="font-size:12px; color:#64748B; margin-top:4px;">
+                      Snapshot Captured: ${new Date(rev.created_at).toLocaleString()}
+                    </div>
+                  </div>
+                  <div>
+                    ${rev.status === 'pending' ?
+                      `<button class="btn-press btn btn-primary btn-sm" onclick="app.openSignOffSOC2Modal('${rev.id}')">
+                        <i data-lucide="check-square" class="w-3.5 h-3.5"></i> Executive Sign-Off
+                      </button>` :
+                      `<div style="text-align:right;">
+                        <span class="chain-status-verified"><i data-lucide="check" class="w-3 h-3"></i> Signed off by ${rev.reviewed_by}</span>
+                        <div style="font-size:11px; color:#64748B; margin-top:3px;">${rev.signed_at ? new Date(rev.signed_at).toLocaleString() : ''}</div>
+                      </div>`
+                    }
+                  </div>
+                </div>
+
+                <div style="font-family:var(--font-mono); font-size:11.5px; background:#F8FAFC; border:1px solid var(--border-subtle); padding:10px 14px; border-radius:8px; color:#334155;">
+                  <strong>Users Snapshot Payload:</strong>
+                  <div style="max-height:120px; overflow-y:auto; margin-top:6px; word-break:break-all;">
+                    ${rev.snapshot_json}
+                  </div>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      </div>
+    `;
+  },
+
+  // ---------------- Modals & Action Handlers ----------------
+  openNewOrgModal() {
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    if (!modal || !content) return;
+    content.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+        <h3 class="text-lg font-bold text-slate-800">Create New Tenant Organization</h3>
+        <button class="icon-btn" onclick="app.closeModal()"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <div>
+          <label style="font-size:12px; font-weight:600;">Organization Name</label>
+          <input type="text" id="new-org-name" class="form-input" placeholder="e.g. AO Sphere APAC Hub">
+        </div>
+        <div>
+          <label style="font-size:12px; font-weight:600;">Slug Identifier</label>
+          <input type="text" id="new-org-slug" class="form-input" placeholder="e.g. apac">
+        </div>
+        <button class="btn-press btn btn-primary" style="margin-top:10px;" onclick="app.submitNewOrg()">Provision Organization</button>
+      </div>
+    `;
+    modal.classList.add('active');
+    if (window.lucide) lucide.createIcons();
+  },
+
+  async submitNewOrg() {
+    const name = document.getElementById('new-org-name')?.value;
+    const slug = document.getElementById('new-org-slug')?.value;
+    if (!name || !slug) {
+      this.showToast('Name and slug are required');
+      return;
+    }
+    try {
+      const res = await fetch('/api/orgs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, slug })
+      });
+      if (res.ok) {
+        this.closeModal();
+        this.showToast(`Organization '${name}' provisioned successfully`);
+        await this.loadOrganizations();
+        await this.ensureComplianceData('tenancy');
+        this.render();
+      }
+    } catch (e) {
+      this.showToast('Error provisioning organization: ' + e.message);
+    }
+  },
+
+  openNewInvitationModal() {
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    if (!modal || !content) return;
+    content.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+        <h3 class="text-lg font-bold text-slate-800">Invite Team Member</h3>
+        <button class="icon-btn" onclick="app.closeModal()"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <div>
+          <label style="font-size:12px; font-weight:600;">Invitee Email</label>
+          <input type="email" id="inv-email" class="form-input" placeholder="colleague@example.com">
+        </div>
+        <div>
+          <label style="font-size:12px; font-weight:600;">Assigned Role</label>
+          <select id="inv-role" class="form-input">
+            <option value="manager">Manager</option>
+            <option value="operator">Operator</option>
+            <option value="auditor">Auditor</option>
+            <option value="admin">Administrator</option>
+          </select>
+        </div>
+        <button class="btn-press btn btn-primary" style="margin-top:10px;" onclick="app.submitNewInvitation()">Send Invitation</button>
+      </div>
+    `;
+    modal.classList.add('active');
+    if (window.lucide) lucide.createIcons();
+  },
+
+  async submitNewInvitation() {
+    const email = document.getElementById('inv-email')?.value;
+    const role = document.getElementById('inv-role')?.value || 'operator';
+    if (!email) {
+      this.showToast('Email is required');
+      return;
+    }
+    try {
+      const res = await fetch('/api/auth/invitations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, role })
+      });
+      if (res.ok) {
+        this.closeModal();
+        this.showToast(`Invitation sent to ${email}`);
+        await this.ensureComplianceData('tenancy');
+        this.render();
+      }
+    } catch (e) {
+      this.showToast('Error sending invite: ' + e.message);
+    }
+  },
+
+  async cancelInvitation(id) {
+    try {
+      const res = await fetch(`/api/auth/invitations?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (res.ok) {
+        this.showToast('Invitation revoked');
+        await this.ensureComplianceData('tenancy');
+        this.render();
+      }
+    } catch (e) {
+      this.showToast('Failed to revoke invitation: ' + e.message);
+    }
+  },
+
+  copyInvitationToken(token) {
+    navigator.clipboard.writeText(token);
+    this.showToast('Invitation token copied to clipboard');
+  },
+
+  async setup2FA() {
+    try {
+      const res = await fetch('/api/auth/2fa/setup', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        const modal = document.getElementById('action-modal');
+        const content = document.getElementById('modal-content');
+        if (!modal || !content) return;
+        content.innerHTML = `
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+            <h3 class="text-lg font-bold text-slate-800">Two-Factor Authentication Setup</h3>
+            <button class="icon-btn" onclick="app.closeModal()"><i data-lucide="x" class="w-5 h-5"></i></button>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:14px;">
+            <p style="font-size:13px; color:#475569;">
+              Scan this secret into your authenticator application (Google Authenticator, 1Password, Authy), then enter the 6-digit verification code below.
+            </p>
+            <div style="background:#F8FAFC; border:1px solid var(--border-subtle); padding:14px; border-radius:10px; text-align:center;">
+              <div style="font-size:11px; font-weight:700; color:#64748B; text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Base32 TOTP Secret Key</div>
+              <div style="font-family:var(--font-mono); font-size:16px; font-weight:800; color:#0F172A; letter-spacing:2px;">${data.secret}</div>
+            </div>
+            <div>
+              <label style="font-size:12px; font-weight:600;">Authenticator URI (otpauth://)</label>
+              <input type="text" class="form-input" style="font-family:var(--font-mono); font-size:11px;" value="${data.otpauth_uri}" readonly>
+            </div>
+            <div>
+              <label style="font-size:12px; font-weight:600;">Verification Code (6 digits)</label>
+              <input type="text" id="totp-verify-code" class="form-input" placeholder="e.g. 123456" maxlength="6" style="font-size:18px; text-align:center; letter-spacing:4px; font-weight:700;">
+            </div>
+            <button class="btn-press btn btn-primary" onclick="app.verify2FASetup()">Verify & Activate 2FA</button>
+          </div>
+        `;
+        modal.classList.add('active');
+        if (window.lucide) lucide.createIcons();
+      }
+    } catch (e) {
+      this.showToast('Failed initiating 2FA setup: ' + e.message);
+    }
+  },
+
+  async verify2FASetup() {
+    const code = document.getElementById('totp-verify-code')?.value;
+    if (!code || code.length !== 6) {
+      this.showToast('Please enter a 6-digit code');
+      return;
+    }
+    try {
+      const res = await fetch('/api/auth/2fa/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const modal = document.getElementById('action-modal');
+        const content = document.getElementById('modal-content');
+        if (!modal || !content) return;
+        const codes = data.recovery_codes || [];
+        content.innerHTML = `
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+            <h3 class="text-lg font-bold text-slate-800">2FA Activated Successfully</h3>
+            <button class="icon-btn" onclick="app.closeModal()"><i data-lucide="x" class="w-5 h-5"></i></button>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:14px;">
+            <div style="background:#ECFDF5; border:1px solid #A7F3D0; border-radius:10px; padding:14px; color:#065F46; font-size:13px;">
+              Two-Factor Authentication is now enforced for your account. Save these 8 one-time emergency recovery codes in a secure password manager.
+            </div>
+            <div class="recovery-codes-grid">
+              ${codes.map(c => `<div class="recovery-code-chip">${c}</div>`).join('')}
+            </div>
+            <div style="display:flex; gap:10px; margin-top:8px;">
+              <button class="btn-press btn btn-primary" onclick="navigator.clipboard.writeText('${codes.join(', ')}'); app.showToast('Recovery codes copied');">
+                <i data-lucide="copy" class="w-4 h-4"></i> Copy Codes
+              </button>
+              <button class="btn-press btn btn-secondary" onclick="app.closeModal()">I Have Saved My Codes</button>
+            </div>
+          </div>
+        `;
+        if (window.lucide) lucide.createIcons();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        this.showToast('Verification failed: ' + (err.error || 'Invalid TOTP code'));
+      }
+    } catch (e) {
+      this.showToast('Error verifying code: ' + e.message);
+    }
+  },
+
+  async disable2FA() {
+    if (!confirm('Are you sure you want to disable Two-Factor Authentication?')) return;
+    try {
+      const res = await fetch('/api/auth/2fa/disable', { method: 'POST' });
+      if (res.ok) {
+        this.showToast('Two-Factor Authentication has been disabled');
+        await this.ensureComplianceData('auth');
+        this.render();
+      }
+    } catch (e) {
+      this.showToast('Failed to disable 2FA: ' + e.message);
+    }
+  },
+
+  openNewSSOModal() {
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    if (!modal || !content) return;
+    content.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+        <h3 class="text-lg font-bold text-slate-800">Add Enterprise SSO Provider</h3>
+        <button class="icon-btn" onclick="app.closeModal()"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <div>
+          <label style="font-size:12px; font-weight:600;">Provider Display Name</label>
+          <input type="text" id="sso-name" class="form-input" placeholder="e.g. Okta Corporate SSO">
+        </div>
+        <div>
+          <label style="font-size:12px; font-weight:600;">Protocol Type</label>
+          <select id="sso-type" class="form-input">
+            <option value="oidc">OpenID Connect (OIDC)</option>
+            <option value="saml">SAML 2.0</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size:12px; font-weight:600;">Domain Mapping</label>
+          <input type="text" id="sso-domain" class="form-input" placeholder="e.g. enterprise.com">
+        </div>
+        <div>
+          <label style="font-size:12px; font-weight:600;">Issuer URL</label>
+          <input type="url" id="sso-issuer" class="form-input" placeholder="https://login.okta.com/oauth2/default">
+        </div>
+        <div>
+          <label style="font-size:12px; font-weight:600;">SSO Endpoint URL</label>
+          <input type="url" id="sso-url" class="form-input" placeholder="https://login.okta.com/oauth2/v1/authorize">
+        </div>
+        <button class="btn-press btn btn-primary" style="margin-top:10px;" onclick="app.submitNewSSO()">Save SSO Configuration</button>
+      </div>
+    `;
+    modal.classList.add('active');
+    if (window.lucide) lucide.createIcons();
+  },
+
+  async submitNewSSO() {
+    const name = document.getElementById('sso-name')?.value;
+    const type = document.getElementById('sso-type')?.value;
+    const domain = document.getElementById('sso-domain')?.value;
+    const issuer = document.getElementById('sso-issuer')?.value;
+    const sso_url = document.getElementById('sso-url')?.value;
+    if (!name || !issuer) {
+      this.showToast('Provider name and issuer URL are required');
+      return;
+    }
+    try {
+      const res = await fetch('/api/auth/sso/configs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider_name: name,
+          provider_type: type,
+          domain_mapping: domain,
+          issuer_url: issuer,
+          sso_url: sso_url,
+          client_id: 'client_' + Math.random().toString(36).substring(7)
+        })
+      });
+      if (res.ok) {
+        this.closeModal();
+        this.showToast('SSO provider registered');
+        await this.ensureComplianceData('auth');
+        this.render();
+      }
+    } catch (e) {
+      this.showToast('Error registering SSO: ' + e.message);
+    }
+  },
+
+  async deleteSSOConfig(id) {
+    try {
+      const res = await fetch(`/api/auth/sso/configs?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (res.ok) {
+        this.showToast('SSO configuration deleted');
+        await this.ensureComplianceData('auth');
+        this.render();
+      }
+    } catch (e) {
+      this.showToast('Failed deleting SSO config: ' + e.message);
+    }
+  },
+
+  async simulateSSOLogin(configId) {
+    try {
+      const res = await fetch('/api/auth/sso/callback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          config_id: configId,
+          email: 'sso_user@enterprise.com',
+          name: 'Federated Enterprise User'
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        this.showToast(`SSO Auth Simulated: User ${data.user_id} authenticated`);
+      }
+    } catch (e) {
+      this.showToast('SSO simulation failed: ' + e.message);
+    }
+  },
+
+  openNewCustomRoleModal() {
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    if (!modal || !content) return;
+    content.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+        <h3 class="text-lg font-bold text-slate-800">Create Granular Custom Role</h3>
+        <button class="icon-btn" onclick="app.closeModal()"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <div>
+          <label style="font-size:12px; font-weight:600;">Role Identifier</label>
+          <input type="text" id="role-name" class="form-input" placeholder="e.g. inventory_auditor">
+        </div>
+        <div>
+          <label style="font-size:12px; font-weight:600;">Role Description</label>
+          <input type="text" id="role-desc" class="form-input" placeholder="Can inspect stock, warehouse balances, and ledger reports">
+        </div>
+        <div>
+          <label style="font-size:12px; font-weight:600; margin-bottom:6px; display:block;">Select Permissions</label>
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px;">
+            <label style="font-size:12px; display:flex; align-items:center; gap:6px;">
+              <input type="checkbox" name="role-perm" value="erp:read" checked> ERP: Read Inventory
+            </label>
+            <label style="font-size:12px; display:flex; align-items:center; gap:6px;">
+              <input type="checkbox" name="role-perm" value="erp:write"> ERP: Modify Inventory
+            </label>
+            <label style="font-size:12px; display:flex; align-items:center; gap:6px;">
+              <input type="checkbox" name="role-perm" value="finance:read" checked> Finance: Read Ledger
+            </label>
+            <label style="font-size:12px; display:flex; align-items:center; gap:6px;">
+              <input type="checkbox" name="role-perm" value="finance:write"> Finance: Post Entries
+            </label>
+            <label style="font-size:12px; display:flex; align-items:center; gap:6px;">
+              <input type="checkbox" name="role-perm" value="crm:read"> CRM: Read Deals
+            </label>
+            <label style="font-size:12px; display:flex; align-items:center; gap:6px;">
+              <input type="checkbox" name="role-perm" value="hr:read"> HR: Read Roster
+            </label>
+            <label style="font-size:12px; display:flex; align-items:center; gap:6px;">
+              <input type="checkbox" name="role-perm" value="audit:read" checked> Vault: Audit Read
+            </label>
+            <label style="font-size:12px; display:flex; align-items:center; gap:6px;">
+              <input type="checkbox" name="role-perm" value="compliance:admin"> Compliance: Admin
+            </label>
+          </div>
+        </div>
+        <button class="btn-press btn btn-primary" style="margin-top:10px;" onclick="app.submitNewCustomRole()">Save Role Profile</button>
+      </div>
+    `;
+    modal.classList.add('active');
+    if (window.lucide) lucide.createIcons();
+  },
+
+  async submitNewCustomRole() {
+    const name = document.getElementById('role-name')?.value;
+    const description = document.getElementById('role-desc')?.value;
+    const checked = Array.from(document.querySelectorAll('input[name="role-perm"]:checked')).map(el => el.value);
+    if (!name || checked.length === 0) {
+      this.showToast('Role name and at least one permission are required');
+      return;
+    }
+    try {
+      const res = await fetch('/api/auth/roles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, description, permissions: checked })
+      });
+      if (res.ok) {
+        this.closeModal();
+        this.showToast(`Custom role '${name}' created`);
+        await this.ensureComplianceData('roles');
+        this.render();
+      }
+    } catch (e) {
+      this.showToast('Error creating custom role: ' + e.message);
+    }
+  },
+
+  async deleteCustomRole(id) {
+    try {
+      const res = await fetch(`/api/auth/roles?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (res.ok) {
+        this.showToast('Role deleted');
+        await this.ensureComplianceData('roles');
+        this.render();
+      }
+    } catch (e) {
+      this.showToast('Failed to delete role: ' + e.message);
+    }
+  },
+
+  async verifyAuditVaultChain() {
+    try {
+      const res = await fetch('/api/compliance/audit-vault/verify', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        this.data.auditVaultIntegrity = data;
+        if (data.is_valid) {
+          this.showToast(`Vault chain verified: ${data.blocks_verified} blocks intact (SHA-256)`);
+        } else {
+          this.showToast(`Vault error: ${data.verification_error}`);
+        }
+        await this.ensureComplianceData('vault');
+        this.render();
+      }
+    } catch (e) {
+      this.showToast('Error verifying vault chain: ' + e.message);
+    }
+  },
+
+  openRecordSecurityEventModal() {
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    if (!modal || !content) return;
+    content.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+        <h3 class="text-lg font-bold text-slate-800">Record Security Vault Event</h3>
+        <button class="icon-btn" onclick="app.closeModal()"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <div>
+          <label style="font-size:12px; font-weight:600;">Event Type</label>
+          <input type="text" id="vault-event-type" class="form-input" value="sec.policy_change">
+        </div>
+        <div>
+          <label style="font-size:12px; font-weight:600;">Event Details / Payload</label>
+          <textarea id="vault-event-details" class="form-input" rows="3" placeholder="Security event description..."></textarea>
+        </div>
+        <button class="btn-press btn btn-primary" onclick="app.submitRecordSecurityEvent()">Seal into SHA-256 Chain</button>
+      </div>
+    `;
+    modal.classList.add('active');
+    if (window.lucide) lucide.createIcons();
+  },
+
+  async submitRecordSecurityEvent() {
+    const event_type = document.getElementById('vault-event-type')?.value;
+    const details = document.getElementById('vault-event-details')?.value || '';
+    if (!event_type) return;
+    try {
+      const res = await fetch('/api/compliance/audit-vault', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ event_type, details })
+      });
+      if (res.ok) {
+        this.closeModal();
+        this.showToast('Event cryptographically sealed in Audit Vault');
+        await this.ensureComplianceData('vault');
+        this.render();
+      }
+    } catch (e) {
+      this.showToast('Failed to record vault block: ' + e.message);
+    }
+  },
+
+  async triggerGDPRExport() {
+    try {
+      const res = await fetch('/api/compliance/gdpr/export', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `gdpr_personal_data_export_${new Date().toISOString().slice(0, 10)}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+        this.showToast('GDPR Data Export package downloaded');
+        await this.ensureComplianceData('gdpr');
+        this.render();
+      }
+    } catch (e) {
+      this.showToast('Failed generating export: ' + e.message);
+    }
+  },
+
+  async triggerGDPRForgetMe() {
+    if (!confirm('WARNING: Article 17 "Right to be Forgotten" will permanently anonymize your user identity records. Proceed?')) return;
+    try {
+      const res = await fetch('/api/compliance/gdpr/forget-me', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        this.showToast('Account personal data successfully anonymized');
+        await this.ensureComplianceData('gdpr');
+        this.render();
+      }
+    } catch (e) {
+      this.showToast('Error processing forget-me request: ' + e.message);
+    }
+  },
+
+  async generateSOC2AccessReview() {
+    try {
+      const res = await fetch('/api/compliance/soc2/access-review/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ quarter: '2026-Q4' })
+      });
+      if (res.ok) {
+        this.showToast('Quarterly access review snapshot generated');
+        await this.ensureComplianceData('soc2');
+        this.render();
+      }
+    } catch (e) {
+      this.showToast('Error generating SOC2 review: ' + e.message);
+    }
+  },
+
+  openSignOffSOC2Modal(reviewId) {
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    if (!modal || !content) return;
+    content.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+        <h3 class="text-lg font-bold text-slate-800">SOC2 Access Review Formal Sign-Off</h3>
+        <button class="icon-btn" onclick="app.closeModal()"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <div>
+          <label style="font-size:12px; font-weight:600;">Sign-Off Officer / Reviewer Name</label>
+          <input type="text" id="soc2-officer" class="form-input" value="Chief Information Security Officer">
+        </div>
+        <div>
+          <label style="font-size:12px; font-weight:600;">Attestation Notes</label>
+          <textarea id="soc2-notes" class="form-input" rows="3">All active user accounts and privilege grants verified against HR records for Q4. No unauthorized access identified.</textarea>
+        </div>
+        <button class="btn-press btn btn-primary" onclick="app.submitSignOffSOC2('${reviewId}')">Affirm & Sign Off</button>
+      </div>
+    `;
+    modal.classList.add('active');
+    if (window.lucide) lucide.createIcons();
+  },
+
+  async submitSignOffSOC2(reviewId) {
+    const reviewer = document.getElementById('soc2-officer')?.value || 'Compliance Officer';
+    const notes = document.getElementById('soc2-notes')?.value || 'Access verified';
+    try {
+      const res = await fetch('/api/compliance/soc2/access-review/signoff', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: reviewId, reviewed_by: reviewer, notes })
+      });
+      if (res.ok) {
+        this.closeModal();
+        this.showToast('SOC2 Access Review formally signed off');
+        await this.ensureComplianceData('soc2');
+        this.render();
+      }
+    } catch (e) {
+      this.showToast('Error signing off SOC2 review: ' + e.message);
     }
   },
 

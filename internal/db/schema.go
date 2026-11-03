@@ -31,6 +31,8 @@ func InitDB(dbPath string, seedData bool) (*sql.DB, error) {
 	db.SetMaxOpenConns(1) // Single writer connection prevents SQLITE_BUSY deadlock
 	db.SetMaxIdleConns(1)
 
+	ensureLegacyCompat(db)
+
 	if err := createTables(db); err != nil {
 		return nil, fmt.Errorf("failed to create tables: %w", err)
 	}
@@ -465,7 +467,7 @@ func createTables(db *sql.DB) error {
 
 func SeedStarterData(db *sql.DB) error {
 	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM organizations").Scan(&count); err != nil {
+	if err := db.QueryRow("SELECT COUNT(*) FROM organizations WHERE id = 'org_default'").Scan(&count); err != nil {
 		return err
 	}
 	if count > 0 {
@@ -498,10 +500,14 @@ func SeedStarterData(db *sql.DB) error {
 		return fmt.Errorf("failed to seed admin user: %w", err)
 	}
 
+	_, _ = db.Exec(`INSERT OR IGNORE INTO user_organizations (user_id, org_id, role) VALUES
+		('usr_admin_default', 'org_default', 'owner'),
+		('usr_admin_default', 'org_emea', 'admin')`)
+
 	// 3. Seed Default Agent API Key (Token: "ao_sk_agent_default_token_12345")
 	keyHash := auth.HashToken("ao_sk_agent_default_token_12345")
 	_, err = db.Exec(`INSERT INTO api_keys (id, org_id, user_id, name, key_hash, role, allowed_tools) VALUES
-		('key_agent_default', 'org_default', 'usr_admin_default', 'Primary Agent Client', ?, 'operations', '*')`, keyHash)
+		('key_agent_default', 'org_default', 'usr_admin_default', 'Primary Agent Client', ?, 'owner', '*')`, keyHash)
 	if err != nil {
 		return fmt.Errorf("failed to seed agent api key: %w", err)
 	}
@@ -653,4 +659,45 @@ func SeedStarterData(db *sql.DB) error {
 	}
 
 	return nil
+}
+
+func ensureLegacyCompat(db *sql.DB) {
+	addColumnIfNotExists(db, "warehouses", "address", "TEXT NOT NULL DEFAULT ''")
+	addColumnIfNotExists(db, "batch_lots", "sku_id", "TEXT NOT NULL DEFAULT ''")
+	addColumnIfNotExists(db, "warehouse_stocks", "sku_id", "TEXT NOT NULL DEFAULT ''")
+	addColumnIfNotExists(db, "warehouse_stocks", "stock_quantity", "INTEGER NOT NULL DEFAULT 0")
+	addColumnIfNotExists(db, "warehouse_stocks", "reserved_quantity", "INTEGER NOT NULL DEFAULT 0")
+	addColumnIfNotExists(db, "goods_receipt_notes", "received_by", "TEXT NOT NULL DEFAULT 'warehouse_staff'")
+	addColumnIfNotExists(db, "stock_transfers", "items_json", "TEXT NOT NULL DEFAULT '[]'")
+	addColumnIfNotExists(db, "stock_transfers", "created_by", "TEXT NOT NULL DEFAULT 'system'")
+	addColumnIfNotExists(db, "users", "totp_secret", "TEXT DEFAULT ''")
+	addColumnIfNotExists(db, "users", "totp_enabled", "BOOLEAN NOT NULL DEFAULT 0")
+	addColumnIfNotExists(db, "users", "recovery_codes_json", "TEXT DEFAULT '[]'")
+	addColumnIfNotExists(db, "users", "last_active_at", "DATETIME DEFAULT CURRENT_TIMESTAMP")
+}
+
+func addColumnIfNotExists(db *sql.DB, table, column, colDef string) {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	hasTable := false
+	hasCol := false
+	for rows.Next() {
+		hasTable = true
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt *string
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err == nil {
+			if name == column {
+				hasCol = true
+			}
+		}
+	}
+	if hasTable && !hasCol {
+		_, _ = db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, colDef))
+	}
 }

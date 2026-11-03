@@ -9,6 +9,7 @@ import (
 
 	"aosphere/internal/backup"
 	"aosphere/internal/ledger"
+	"aosphere/internal/reports"
 	"aosphere/internal/store"
 	"github.com/google/uuid"
 )
@@ -20,15 +21,18 @@ type WorkflowService struct {
 	idemp   *IdempotencyEngine
 	ledger  *ledger.LedgerService
 	backup  *backup.BackupService
+	reports *reports.ReportService
 }
 
 func NewWorkflowService(s *store.Store) *WorkflowService {
+	ledgerSvc := ledger.NewLedgerService(s.DB())
 	return &WorkflowService{
 		store:   s,
 		policy:  NewPolicyEngine(),
 		idemp:   NewIdempotencyEngine(),
-		ledger:  ledger.NewLedgerService(s.DB()),
+		ledger:  ledgerSvc,
 		backup:  backup.NewBackupService(s.DB(), ""),
+		reports: reports.NewReportService(s.DB(), ledgerSvc),
 	}
 }
 
@@ -50,6 +54,11 @@ func (s *WorkflowService) Ledger() *ledger.LedgerService {
 // Backup returns the database backup service
 func (s *WorkflowService) Backup() *backup.BackupService {
 	return s.backup
+}
+
+// Reports returns the financial intelligence and reporting service
+func (s *WorkflowService) Reports() *reports.ReportService {
+	return s.reports
 }
 
 // TrialBalance returns the financial trial balance verifying debits == credits

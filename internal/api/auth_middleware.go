@@ -78,7 +78,7 @@ func AuthenticateMiddleware(s *store.Store, env ...string) func(http.Handler) ht
 				role, _ := auth.ParseRole(user.Role)
 				authCtx := &auth.AuthContext{
 					UserID:   user.ID,
-					OrgID:    user.OrgID,
+					OrgID:    sess.OrgID,
 					Email:    user.Email,
 					Name:     user.Name,
 					Role:     role,

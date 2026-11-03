@@ -259,6 +259,116 @@ var Registry = map[string]ToolDefinition{
 			"required": []string{"query"},
 		},
 	},
+	"reports_get_pnl": {
+		Name:               "reports_get_pnl",
+		Category:           CategoryReadOnly,
+		Description:        "Generate real-time Profit & Loss statement calculating Revenue, COGS, Gross Profit, OpEx, and Net Profit.",
+		RequiredPermission: auth.PermRead,
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"start_date": map[string]interface{}{"type": "string", "description": "Start date YYYY-MM-DD"},
+				"end_date":   map[string]interface{}{"type": "string", "description": "End date YYYY-MM-DD"},
+			},
+		},
+	},
+	"reports_get_balance_sheet": {
+		Name:               "reports_get_balance_sheet",
+		Category:           CategoryReadOnly,
+		Description:        "Generate real-time Balance Sheet verifying Assets == Liabilities + Equity with general ledger integration.",
+		RequiredPermission: auth.PermRead,
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"as_of": map[string]interface{}{"type": "string", "description": "As-of date YYYY-MM-DD"},
+			},
+		},
+	},
+	"reports_get_executive_kpis": {
+		Name:               "reports_get_executive_kpis",
+		Category:           CategoryReadOnly,
+		Description:        "Retrieve executive dashboard KPIs including MRR, Gross Margin %, Cash Runway in months, and Open Commitments.",
+		RequiredPermission: auth.PermRead,
+		InputSchema: map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		},
+	},
+	"reports_get_inventory_valuation": {
+		Name:               "reports_get_inventory_valuation",
+		Category:           CategoryReadOnly,
+		Description:        "Inspect total stock valuation, warehouse distribution, and dead-stock capital allocations.",
+		RequiredPermission: auth.PermRead,
+		InputSchema: map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		},
+	},
+	"reports_get_sales_velocity": {
+		Name:               "reports_get_sales_velocity",
+		Category:           CategoryReadOnly,
+		Description:        "Analyze sales pipeline velocity, win/loss ratio, average deal size, and lead conversion rates.",
+		RequiredPermission: auth.PermRead,
+		InputSchema: map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		},
+	},
+	"agent_escalate_to_human": {
+		Name:               "agent_escalate_to_human",
+		Category:           CategoryReversibleMutation,
+		Description:        "Escalate an ambiguous request, policy violation, or negative review to human operators with execution context.",
+		RequiredPermission: auth.PermRead,
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"title":              map[string]interface{}{"type": "string", "description": "Short title describing the escalation issue"},
+				"reason":             map[string]interface{}{"type": "string", "description": "Reason for escalation (e.g. ambiguous_input, policy_violation, negative_sentiment)"},
+				"input_context":      map[string]interface{}{"type": "string", "description": "Context, parameters, or user message that triggered escalation"},
+				"recommended_action": map[string]interface{}{"type": "string", "description": "Proposed action for human operator to consider"},
+			},
+			"required": []string{"title", "reason"},
+		},
+	},
+	"agent_get_context": {
+		Name:               "agent_get_context",
+		Category:           CategoryReadOnly,
+		Description:        "Retrieve injected company background, operating currency, tax rates, and supplier lead times.",
+		RequiredPermission: auth.PermRead,
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"category": map[string]interface{}{"type": "string", "description": "Optional category filter: company_profile, tax_currency, financial_policies, supplier_lead_times"},
+			},
+		},
+	},
+	"agent_sanitize_input": {
+		Name:               "agent_sanitize_input",
+		Category:           CategoryReadOnly,
+		Description:        "Scan untrusted external strings for prompt injection, jailbreaks, and instructions smuggling.",
+		RequiredPermission: auth.PermRead,
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"text": map[string]interface{}{"type": "string", "description": "Untrusted text string to validate and sanitize"},
+			},
+			"required": []string{"text"},
+		},
+	},
+	"webhook_test_event": {
+		Name:               "webhook_test_event",
+		Category:           CategoryReversibleMutation,
+		Description:        "Dispatch a signed business event (po.created, deal.won, invoice.overdue, stock.low) to registered agent webhooks.",
+		RequiredPermission: auth.PermAdmin,
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"event_type": map[string]interface{}{"type": "string", "description": "Event identifier (e.g. po.created, deal.won, stock.low)"},
+				"payload":    map[string]interface{}{"type": "object", "description": "Arbitrary payload JSON to send with webhook"},
+			},
+			"required": []string{"event_type"},
+		},
+	},
 }
 
 // ValidateToolInput validates that the arguments map satisfies required fields and basic schema rules

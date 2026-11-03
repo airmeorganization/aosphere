@@ -9,10 +9,12 @@ import (
 	"sync"
 	"time"
 
+	"aosphere/internal/agentplatform"
 	"aosphere/internal/auth"
 	"aosphere/internal/crm"
 	"aosphere/internal/db"
 	"aosphere/internal/finance"
+	"aosphere/internal/hr"
 	"aosphere/internal/ledger"
 	"aosphere/internal/mcp"
 	"aosphere/internal/metrics"
@@ -30,12 +32,14 @@ func getOrgID(r *http.Request) string {
 }
 
 type API struct {
-	store     *store.Store
-	service   *service.WorkflowService
-	crm       *crm.CRMService
-	env       string
-	clients   map[chan string]string // map[msgChan]orgID
-	clientsMu sync.RWMutex
+	store             *store.Store
+	service           *service.WorkflowService
+	crm               *crm.CRMService
+	hr                *hr.HRService
+	webhookDispatcher *agentplatform.WebhookDispatcher
+	env               string
+	clients           map[chan string]string // map[msgChan]orgID
+	clientsMu         sync.RWMutex
 }
 
 func NewAPI(s *store.Store, svc *service.WorkflowService, env string) *API {
@@ -43,15 +47,20 @@ func NewAPI(s *store.Store, svc *service.WorkflowService, env string) *API {
 		svc = service.NewWorkflowService(s)
 	}
 	var crmSvc *crm.CRMService
+	var hrSvc *hr.HRService
 	if s != nil && s.DB() != nil {
-		crmSvc = crm.NewCRMService(s.DB(), ledger.NewLedgerService(s.DB()))
+		ledgerSvc := ledger.NewLedgerService(s.DB())
+		crmSvc = crm.NewCRMService(s.DB(), ledgerSvc)
+		hrSvc = hr.NewHRService(s.DB(), ledgerSvc)
 	}
 	return &API{
-		store:   s,
-		service: svc,
-		crm:     crmSvc,
-		env:     env,
-		clients: make(map[chan string]string),
+		store:             s,
+		service:           svc,
+		crm:               crmSvc,
+		hr:                hrSvc,
+		webhookDispatcher: agentplatform.NewWebhookDispatcher(s),
+		env:               env,
+		clients:           make(map[chan string]string),
 	}
 }
 
@@ -1607,45 +1616,77 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 		writeJSON(w, exps)
 	})
 
-	// HRMS & PRODUCTIVITY
+	// HRMS, SHIFT SCHEDULING & AUTOMATED PAYROLL (PHASE 6)
 	mux.HandleFunc("/api/employees", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "POST" {
+		if r.Method == http.MethodPost {
 			authCtx, ok := a.requireAuth(w, r, auth.PermManageHR)
 			if !ok {
 				return
 			}
-			var req struct {
-				Name       string  `json:"name"`
-				Role       string  `json:"role"`
-				Department string  `json:"department"`
-				Email      string  `json:"email"`
-				Phone      string  `json:"phone"`
-				HourlyRate float64 `json:"hourly_rate"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			var emp db.Employee
+			if err := json.NewDecoder(r.Body).Decode(&emp); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			if strings.TrimSpace(req.Name) == "" {
+			if strings.TrimSpace(emp.Name) == "" {
 				http.Error(w, "name is required", http.StatusBadRequest)
 				return
 			}
-			actorType := "human"
-			if authCtx.IsAPIKey {
-				actorType = "agent"
+			var created *db.Employee
+			var err error
+			if a.hr != nil {
+				created, err = a.hr.CreateEmployee(r.Context(), authCtx.OrgID, emp)
+			} else {
+				created, err = a.store.CreateEmployeeForOrg(authCtx.OrgID, emp.Name, emp.Role, emp.Department, emp.Email, emp.Phone, emp.HourlyRate, "human", authCtx.UserID)
 			}
-			emp, err := a.store.CreateEmployeeForOrg(authCtx.OrgID, req.Name, req.Role, req.Department, req.Email, req.Phone, req.HourlyRate, actorType, authCtx.UserID)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			a.BroadcastForOrg(authCtx.OrgID, "employee_added", fmt.Sprintf("{\"id\":\"%s\",\"name\":\"%s\"}", emp.ID, emp.Name))
+			a.BroadcastForOrg(authCtx.OrgID, "employee_added", fmt.Sprintf("{\"id\":\"%s\",\"name\":\"%s\"}", created.ID, created.Name))
 			w.WriteHeader(http.StatusCreated)
-			writeJSON(w, emp)
+			writeJSON(w, created)
 			return
 		}
+		if r.Method == http.MethodPut {
+			authCtx, ok := a.requireAuth(w, r, auth.PermManageHR)
+			if !ok {
+				return
+			}
+			var emp db.Employee
+			if err := json.NewDecoder(r.Body).Decode(&emp); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if emp.ID == "" {
+				http.Error(w, "id is required for update", http.StatusBadRequest)
+				return
+			}
+			if a.hr == nil {
+				http.Error(w, "HR service unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			updated, err := a.hr.UpdateEmployee(r.Context(), authCtx.OrgID, emp)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			a.BroadcastForOrg(authCtx.OrgID, "employee_updated", fmt.Sprintf("{\"id\":\"%s\",\"name\":\"%s\"}", updated.ID, updated.Name))
+			writeJSON(w, updated)
+			return
+		}
+
 		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
 		if !ok {
+			return
+		}
+		if a.hr != nil {
+			emps, err := a.hr.GetEmployees(r.Context(), authCtx.OrgID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, emps)
 			return
 		}
 		emps, err := a.store.GetEmployeesForOrg(authCtx.OrgID)
@@ -1654,6 +1695,399 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 			return
 		}
 		writeJSON(w, emps)
+	})
+
+	mux.HandleFunc("/api/shifts/conflicts", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		if a.hr == nil {
+			writeJSON(w, []interface{}{})
+			return
+		}
+		conflicts, err := a.hr.DetectShiftConflicts(r.Context(), authCtx.OrgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if conflicts == nil {
+			conflicts = []hr.ShiftConflict{}
+		}
+		writeJSON(w, conflicts)
+	})
+
+	mux.HandleFunc("/api/timeclock/event", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		var evt db.TimeclockEvent
+		if err := json.NewDecoder(r.Body).Decode(&evt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if evt.EmployeeID == "" {
+			http.Error(w, "employee_id is required", http.StatusBadRequest)
+			return
+		}
+		if a.hr == nil {
+			http.Error(w, "HR service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		rec, err := a.hr.RecordTimeclockEvent(r.Context(), authCtx.OrgID, evt)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		a.BroadcastForOrg(authCtx.OrgID, "timeclock_punch", fmt.Sprintf("{\"employee_id\":\"%s\",\"event_type\":\"%s\"}", rec.EmployeeID, rec.EventType))
+		w.WriteHeader(http.StatusCreated)
+		writeJSON(w, rec)
+	})
+
+	mux.HandleFunc("/api/timeclock/status", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		empID := r.URL.Query().Get("employee_id")
+		if empID == "" {
+			// Default to first employee in org
+			if a.hr != nil {
+				emps, _ := a.hr.GetEmployees(r.Context(), authCtx.OrgID)
+				if len(emps) > 0 {
+					empID = emps[0].ID
+				}
+			}
+		}
+		if empID == "" {
+			writeJSON(w, map[string]interface{}{"current_state": "clocked_out", "events_count": 0, "events": []interface{}{}})
+			return
+		}
+		status, err := a.hr.GetTimeclockStatus(r.Context(), authCtx.OrgID, empID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, status)
+	})
+
+	mux.HandleFunc("/api/payroll/preview", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		period := r.URL.Query().Get("period")
+		if period == "" {
+			period = time.Now().Format("2006-01")
+		}
+		if a.hr == nil {
+			http.Error(w, "HR service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		run, payslips, err := a.hr.CalculatePayrollPreview(r.Context(), authCtx.OrgID, period)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]interface{}{
+			"period":                 period,
+			"total_gross_cents":      run.TotalGrossCents,
+			"total_tax_cents":        run.TotalTaxCents,
+			"total_deductions_cents": run.TotalDeductionsCents,
+			"total_net_cents":        run.TotalNetCents,
+			"total_gross_dollars":    run.TotalGrossDollars,
+			"total_tax_dollars":      run.TotalTaxDollars,
+			"total_net_dollars":      run.TotalNetDollars,
+			"run":                    run,
+			"payslips":               payslips,
+		})
+	})
+
+	mux.HandleFunc("/api/payroll/run", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		authCtx, ok := a.requireAuth(w, r, auth.PermManageHR)
+		if !ok {
+			return
+		}
+		var req struct {
+			Period      string `json:"period"`
+			PaymentDate string `json:"payment_date"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if a.hr == nil {
+			http.Error(w, "HR service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		run, payslips, err := a.hr.ExecutePayrollRun(r.Context(), authCtx.OrgID, req.Period, req.PaymentDate, authCtx.UserID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		a.BroadcastForOrg(authCtx.OrgID, "payroll_executed", fmt.Sprintf("{\"id\":\"%s\",\"period\":\"%s\",\"total_net\":%.2f}", run.ID, run.Period, run.TotalNetDollars))
+		w.WriteHeader(http.StatusCreated)
+		writeJSON(w, map[string]interface{}{
+			"id":                     run.ID,
+			"period":                 run.Period,
+			"journal_entry_id":       run.JournalEntryID,
+			"total_gross_cents":      run.TotalGrossCents,
+			"total_tax_cents":        run.TotalTaxCents,
+			"total_deductions_cents": run.TotalDeductionsCents,
+			"total_net_cents":        run.TotalNetCents,
+			"run":                    run,
+			"payslips":               payslips,
+		})
+	})
+
+	mux.HandleFunc("/api/payroll/history", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		if a.hr == nil {
+			writeJSON(w, []interface{}{})
+			return
+		}
+		runs, err := a.hr.GetPayrollRuns(r.Context(), authCtx.OrgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if runs == nil {
+			runs = []db.PayrollRun{}
+		}
+		writeJSON(w, runs)
+	})
+
+	mux.HandleFunc("/api/payroll/payslips", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		runID := r.URL.Query().Get("payroll_run_id")
+		empID := r.URL.Query().Get("employee_id")
+		if a.hr == nil {
+			writeJSON(w, []interface{}{})
+			return
+		}
+		slips, err := a.hr.GetPayslips(r.Context(), authCtx.OrgID, runID, empID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if slips == nil {
+			slips = []db.Payslip{}
+		}
+		writeJSON(w, slips)
+	})
+
+	mux.HandleFunc("/api/payroll/payslip/pdf", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		id := r.URL.Query().Get("payslip_id")
+		if id == "" {
+			id = r.URL.Query().Get("id")
+		}
+		if id == "" {
+			http.Error(w, "payslip id is required", http.StatusBadRequest)
+			return
+		}
+		if a.hr == nil {
+			http.Error(w, "HR service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		ps, emp, err := a.hr.GetPayslip(r.Context(), authCtx.OrgID, id)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		var comp db.CompanyProfile
+		if a.service != nil {
+			if cp, err := a.service.GetCompanyProfile(r.Context(), authCtx.OrgID); err == nil && cp != nil {
+				comp = *cp
+			}
+		}
+		if comp.CompanyName == "" {
+			comp.CompanyName = "AO Sphere Enterprise"
+			comp.Address = "100 Innovation Way, Suite 400"
+		}
+		curCode := comp.Currency
+		if curCode == "" {
+			curCode = "USD"
+		}
+		curInfo := finance.GetCurrency(curCode)
+
+		pdfBytes, err := pdf.GeneratePayslipPDF(comp, curInfo, emp, ps)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to generate payslip PDF: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/pdf")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=\"payslip-%s-%s.pdf\"", ps.Period, ps.ID))
+		w.Write(pdfBytes)
+	})
+
+	mux.HandleFunc("/api/leaves/policies", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		if a.hr == nil {
+			writeJSON(w, []interface{}{})
+			return
+		}
+		pols, err := a.hr.GetLeavePolicies(r.Context(), authCtx.OrgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, pols)
+	})
+
+	mux.HandleFunc("/api/leaves/requests", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+			if !ok {
+				return
+			}
+			var req db.LeaveRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if req.EmployeeID == "" || req.StartDate == "" || req.EndDate == "" {
+				http.Error(w, "employee_id, start_date, and end_date are required", http.StatusBadRequest)
+				return
+			}
+			if a.hr == nil {
+				http.Error(w, "HR service unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			submitted, err := a.hr.SubmitLeaveRequest(r.Context(), authCtx.OrgID, req)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			a.BroadcastForOrg(authCtx.OrgID, "leave_requested", fmt.Sprintf("{\"id\":\"%s\",\"employee_id\":\"%s\"}", submitted.ID, submitted.EmployeeID))
+			w.WriteHeader(http.StatusCreated)
+			writeJSON(w, submitted)
+			return
+		}
+
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		empID := r.URL.Query().Get("employee_id")
+		status := r.URL.Query().Get("status")
+		if a.hr == nil {
+			writeJSON(w, []interface{}{})
+			return
+		}
+		reqs, err := a.hr.GetLeaveRequests(r.Context(), authCtx.OrgID, empID, status)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if reqs == nil {
+			reqs = []db.LeaveRequest{}
+		}
+		writeJSON(w, reqs)
+	})
+
+	mux.HandleFunc("/api/leaves/review", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		authCtx, ok := a.requireAuth(w, r, auth.PermManageHR)
+		if !ok {
+			return
+		}
+		var req struct {
+			RequestID   string `json:"request_id"`
+			Status      string `json:"status"` // approved, rejected
+			ReviewNotes string `json:"review_notes"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if a.hr == nil {
+			http.Error(w, "HR service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if err := a.hr.ReviewLeaveRequest(r.Context(), authCtx.OrgID, req.RequestID, req.Status, authCtx.UserID, req.ReviewNotes); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		a.BroadcastForOrg(authCtx.OrgID, "leave_reviewed", fmt.Sprintf("{\"request_id\":\"%s\",\"status\":\"%s\"}", req.RequestID, req.Status))
+		writeJSON(w, map[string]string{"status": "ok"})
+	})
+
+	mux.HandleFunc("/api/hr/documents", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			authCtx, ok := a.requireAuth(w, r, auth.PermManageHR)
+			if !ok {
+				return
+			}
+			var doc db.HRDocument
+			if err := json.NewDecoder(r.Body).Decode(&doc); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if doc.EmployeeID == "" || doc.Title == "" {
+				http.Error(w, "employee_id and title are required", http.StatusBadRequest)
+				return
+			}
+			if a.hr == nil {
+				http.Error(w, "HR service unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			doc.UploadedBy = authCtx.UserID
+			uploaded, err := a.hr.UploadHRDocument(r.Context(), authCtx.OrgID, doc)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			a.BroadcastForOrg(authCtx.OrgID, "hr_document_uploaded", fmt.Sprintf("{\"id\":\"%s\",\"employee_id\":\"%s\"}", uploaded.ID, uploaded.EmployeeID))
+			w.WriteHeader(http.StatusCreated)
+			writeJSON(w, uploaded)
+			return
+		}
+
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		empID := r.URL.Query().Get("employee_id")
+		docType := r.URL.Query().Get("document_type")
+		if a.hr == nil {
+			writeJSON(w, []interface{}{})
+			return
+		}
+		docs, err := a.hr.GetHRDocuments(r.Context(), authCtx.OrgID, empID, docType)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if docs == nil {
+			docs = []db.HRDocument{}
+		}
+		writeJSON(w, docs)
 	})
 
 	mux.HandleFunc("/api/timesheets", func(w http.ResponseWriter, r *http.Request) {
@@ -2266,4 +2700,566 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 		}
 		writeJSON(w, profile)
 	})
+
+	// ----------------- PHASE 7: FINANCIAL INTELLIGENCE & ANALYTICS -----------------
+
+	mux.HandleFunc("/api/reports/pnl", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		startDate := r.URL.Query().Get("start_date")
+		endDate := r.URL.Query().Get("end_date")
+		report, err := a.service.Reports().GetProfitAndLoss(r.Context(), authCtx.OrgID, startDate, endDate)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, report)
+	})
+
+	mux.HandleFunc("/api/reports/balance-sheet", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		asOf := r.URL.Query().Get("as_of")
+		report, err := a.service.Reports().GetBalanceSheet(r.Context(), authCtx.OrgID, asOf)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, report)
+	})
+
+	mux.HandleFunc("/api/reports/cash-flow", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		startDate := r.URL.Query().Get("start_date")
+		endDate := r.URL.Query().Get("end_date")
+		report, err := a.service.Reports().GetCashFlowStatement(r.Context(), authCtx.OrgID, startDate, endDate)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, report)
+	})
+
+	mux.HandleFunc("/api/reports/aging-ar", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		asOf := r.URL.Query().Get("as_of")
+		report, err := a.service.Reports().GetAgedReceivables(r.Context(), authCtx.OrgID, asOf)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, report)
+	})
+
+	mux.HandleFunc("/api/reports/aging-ap", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		asOf := r.URL.Query().Get("as_of")
+		report, err := a.service.Reports().GetAgedPayables(r.Context(), authCtx.OrgID, asOf)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, report)
+	})
+
+	mux.HandleFunc("/api/reports/inventory-valuation", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		report, err := a.service.Reports().GetInventoryValuation(r.Context(), authCtx.OrgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, report)
+	})
+
+	mux.HandleFunc("/api/reports/inventory-turnover", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		report, err := a.service.Reports().GetInventoryTurnover(r.Context(), authCtx.OrgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, report)
+	})
+
+	mux.HandleFunc("/api/reports/sales-velocity", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		report, err := a.service.Reports().GetSalesVelocity(r.Context(), authCtx.OrgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, report)
+	})
+
+	mux.HandleFunc("/api/reports/executive-kpis", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		report, err := a.service.Reports().GetExecutiveKPIs(r.Context(), authCtx.OrgID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, report)
+	})
+
+	mux.HandleFunc("/api/reports/export", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		exportType := r.URL.Query().Get("type")
+		if exportType == "" {
+			exportType = r.URL.Query().Get("export_type")
+		}
+		if exportType == "" {
+			exportType = r.URL.Query().Get("entity")
+		}
+		if exportType == "" {
+			exportType = "pnl"
+		}
+		fileFormat := r.URL.Query().Get("format")
+		if fileFormat == "" {
+			fileFormat = r.URL.Query().Get("file_format")
+		}
+		startDate := r.URL.Query().Get("start_date")
+		endDate := r.URL.Query().Get("end_date")
+
+		content, contentType, filename, err := a.service.Reports().ExportData(r.Context(), authCtx.OrgID, exportType, fileFormat, startDate, endDate)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(content)
+	})
+
+	// ==================== PHASE 8: AUTONOMOUS MCP PLATFORM & WEBHOOKS ====================
+
+	// 1. Webhook Subscriptions
+	mux.HandleFunc("/api/webhooks/subscriptions", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		if r.Method == http.MethodGet {
+			subs, err := a.store.GetWebhookSubscriptions(authCtx.OrgID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, subs)
+			return
+		}
+
+		if r.Method == http.MethodPost {
+			var raw map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+				http.Error(w, "invalid request body", http.StatusBadRequest)
+				return
+			}
+			name, _ := raw["name"].(string)
+			if name == "" {
+				name = "Webhook Subscription"
+			}
+			urlStr, _ := raw["url"].(string)
+			if urlStr == "" {
+				http.Error(w, "missing webhook url", http.StatusBadRequest)
+				return
+			}
+			secret, _ := raw["secret"].(string)
+			if secret == "" {
+				secret = "whsec_" + uuid.New().String()[:16]
+			}
+			evStr := `["*"]`
+			if evRaw, ok := raw["event_types"]; ok {
+				if s, isStr := evRaw.(string); isStr {
+					evStr = s
+				} else if arrBytes, err := json.Marshal(evRaw); err == nil {
+					evStr = string(arrBytes)
+				}
+			}
+
+			sub, err := a.store.CreateWebhookSubscription(db.WebhookSubscription{
+				OrgID:      authCtx.OrgID,
+				Name:       name,
+				URL:        urlStr,
+				Secret:     secret,
+				EventTypes: evStr,
+				IsActive:   true,
+			})
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			writeJSON(w, sub)
+			return
+		}
+
+		if r.Method == http.MethodDelete {
+			id := r.URL.Query().Get("id")
+			if id == "" {
+				http.Error(w, "missing subscription id", http.StatusBadRequest)
+				return
+			}
+			if err := a.store.DeleteWebhookSubscription(id); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, map[string]interface{}{"status": "deleted", "id": id})
+			return
+		}
+
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	})
+
+	// 2. Webhook Deliveries
+	mux.HandleFunc("/api/webhooks/deliveries", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		delivs, err := a.store.GetWebhookDeliveries(authCtx.OrgID, 100)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, delivs)
+	})
+
+	mux.HandleFunc("/api/webhooks/deliveries/redeliver", func(w http.ResponseWriter, r *http.Request) {
+		_, ok := a.requireAuth(w, r, auth.PermAdmin)
+		if !ok {
+			return
+		}
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			var body struct {
+				ID string `json:"id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			id = body.ID
+		}
+		if id == "" {
+			http.Error(w, "missing delivery id", http.StatusBadRequest)
+			return
+		}
+		deliv, err := a.webhookDispatcher.Redeliver(r.Context(), id)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, deliv)
+	})
+
+	// 3. Webhook Test Dispatch
+	mux.HandleFunc("/api/webhooks/test-dispatch", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		var body struct {
+			EventType string                 `json:"event_type"`
+			Payload   map[string]interface{} `json:"payload"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.EventType == "" {
+			body.EventType = "po.created"
+		}
+		if body.Payload == nil {
+			body.Payload = map[string]interface{}{
+				"sample_po_number": "PO-TEST-" + uuid.New().String()[:6],
+				"amount":           1250.00,
+				"currency":         "USD",
+				"supplier":         "Acme Industrial Supply",
+				"timestamp":        time.Now().UTC().Format(time.RFC3339),
+			}
+		}
+
+		delivs, err := a.webhookDispatcher.DispatchEvent(r.Context(), authCtx.OrgID, body.EventType, body.Payload)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]interface{}{
+			"status":            "dispatched",
+			"event_type":        body.EventType,
+			"deliveries_count":  len(delivs),
+			"deliveries":        delivs,
+		})
+	})
+
+	// 4. Per-Agent Configs & Quotas
+	mux.HandleFunc("/api/agent/configs", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		if r.Method == http.MethodGet {
+			cfgs, err := a.store.GetAgentConfigs(authCtx.OrgID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, cfgs)
+			return
+		}
+		if r.Method == http.MethodPost {
+			var body db.AgentConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "invalid request body", http.StatusBadRequest)
+				return
+			}
+			body.OrgID = authCtx.OrgID
+			cfg, err := a.store.UpsertAgentConfig(body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, cfg)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	})
+
+	// 5. Agent Execution Replay
+	mux.HandleFunc("/api/agent/executions", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		execs, err := a.store.GetAgentExecutions(authCtx.OrgID, 100)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, execs)
+	})
+
+	mux.HandleFunc("/api/agent/executions/detail", func(w http.ResponseWriter, r *http.Request) {
+		_, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			http.Error(w, "missing execution id", http.StatusBadRequest)
+			return
+		}
+		exec, err := a.store.GetAgentExecutionByID(id)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		writeJSON(w, exec)
+	})
+
+	// 6. Human Escalations
+	mux.HandleFunc("/api/agent/escalations", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		if r.Method == http.MethodGet {
+			status := r.URL.Query().Get("status")
+			escs, err := a.store.GetAgentEscalations(authCtx.OrgID, status)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, escs)
+			return
+		}
+		if r.Method == http.MethodPost {
+			var body db.AgentEscalation
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "invalid request body", http.StatusBadRequest)
+				return
+			}
+			body.OrgID = authCtx.OrgID
+			esc, err := a.store.CreateAgentEscalation(body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			writeJSON(w, esc)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	})
+
+	mux.HandleFunc("/api/agent/escalations/resolve", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		var body struct {
+			ID     string `json:"id"`
+			Status string `json:"status"` // approved, rejected, resolved
+			Notes  string `json:"notes"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if body.ID == "" {
+			http.Error(w, "missing escalation id", http.StatusBadRequest)
+			return
+		}
+		if body.Status == "" {
+			body.Status = "resolved"
+		}
+		if err := a.store.ResolveAgentEscalation(body.ID, body.Status, authCtx.UserID, body.Notes); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]interface{}{
+			"status":        body.Status,
+			"escalation_id": body.ID,
+			"resolved_at":   time.Now().Format(time.RFC3339),
+		})
+	})
+
+	// 7. Context Memory Scoping
+	mux.HandleFunc("/api/agent/context", func(w http.ResponseWriter, r *http.Request) {
+		authCtx, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		if r.Method == http.MethodGet {
+			category := r.URL.Query().Get("category")
+			mems, err := a.store.GetAgentContextMemory(authCtx.OrgID, category)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, mems)
+			return
+		}
+		if r.Method == http.MethodPost {
+			var body db.AgentContextMemory
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "invalid request body", http.StatusBadRequest)
+				return
+			}
+			body.OrgID = authCtx.OrgID
+			mem, err := a.store.UpsertAgentContextMemory(body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, mem)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	})
+
+	// 8. Prompt Injection Defense & Input Sanitization
+	mux.HandleFunc("/api/agent/sanitize", func(w http.ResponseWriter, r *http.Request) {
+		_, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		var body struct {
+			Text string `json:"text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		res := agentplatform.SanitizeInput(body.Text)
+		writeJSON(w, res)
+	})
+
+	// 9. Dynamic Tool Registry & Schema Introspection
+	toolIntrospectHandler := func(w http.ResponseWriter, r *http.Request) {
+		_, ok := a.requireAuth(w, r, auth.PermRead)
+		if !ok {
+			return
+		}
+		var tools []map[string]interface{}
+		for _, t := range mcp.Registry {
+			tools = append(tools, map[string]interface{}{
+				"name":               t.Name,
+				"description":        t.Description,
+				"category":           string(t.Category),
+				"requiredPermission": string(t.RequiredPermission),
+				"inputSchema":        t.InputSchema,
+				"outputSchema":       t.OutputSchema,
+			})
+		}
+		writeJSON(w, map[string]interface{}{
+			"tools_count": len(tools),
+			"tools":       tools,
+		})
+	}
+	mux.HandleFunc("/api/mcp/introspect", toolIntrospectHandler)
+	mux.HandleFunc("/api/mcp/tools", toolIntrospectHandler)
+
+	// ----------------- PHASE 9: ENTERPRISE MULTI-TENANCY, AUTH & COMPLIANCE -----------------
+
+	// 1. Multi-Company & Tenant Switching
+	mux.HandleFunc("/api/orgs", a.HandleOrgs)
+	mux.HandleFunc("/api/auth/switch-org", a.HandleSwitchOrg)
+
+	// 2. 2FA / TOTP (RFC 6238)
+	mux.HandleFunc("/api/auth/2fa/setup", a.Handle2FASetup)
+	mux.HandleFunc("/api/auth/2fa/verify", a.Handle2FAVerify)
+	mux.HandleFunc("/api/auth/2fa/disable", a.Handle2FADisable)
+	mux.HandleFunc("/api/auth/2fa/challenge", a.Handle2FAChallenge)
+
+	// 3. User Invitations & Password Resets
+	mux.HandleFunc("/api/auth/invitations", a.HandleInvitations)
+	mux.HandleFunc("/api/auth/invitations/accept", a.HandleAcceptInvitation)
+	mux.HandleFunc("/api/auth/password-reset/request", a.HandlePasswordResetRequest)
+	mux.HandleFunc("/api/auth/password-reset/confirm", a.HandlePasswordResetConfirm)
+
+	// 4. Enterprise SSO Configs
+	mux.HandleFunc("/api/auth/sso/configs", a.HandleSSOConfigs)
+	mux.HandleFunc("/api/auth/sso/callback", a.HandleSSOCallback)
+
+	// 5. Custom Role Builder
+	mux.HandleFunc("/api/auth/roles", a.HandleCustomRoles)
+
+	// 6. Immutable Security Audit Vault (SHA-256 Chain)
+	mux.HandleFunc("/api/compliance/audit-vault", a.HandleAuditVault)
+	mux.HandleFunc("/api/compliance/audit-vault/verify", a.HandleAuditVaultVerify)
+
+	// 7. GDPR Privacy Suite
+	mux.HandleFunc("/api/compliance/gdpr/requests", a.HandleGDPRRequests)
+	mux.HandleFunc("/api/compliance/gdpr/export", a.HandleGDPRExport)
+	mux.HandleFunc("/api/compliance/gdpr/forget-me", a.HandleGDPRForgetMe)
+
+	// 8. SOC2 Access Reviews
+	mux.HandleFunc("/api/compliance/soc2/access-review", a.HandleSOC2AccessReview)
+	mux.HandleFunc("/api/compliance/soc2/access-review/generate", a.HandleSOC2GenerateReview)
+	mux.HandleFunc("/api/compliance/soc2/access-review/signoff", a.HandleSOC2SignOff)
 }

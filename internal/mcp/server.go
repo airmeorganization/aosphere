@@ -12,7 +12,9 @@ import (
 	"sync"
 	"time"
 
+	"aosphere/internal/agentplatform"
 	"aosphere/internal/auth"
+	"aosphere/internal/db"
 	"aosphere/internal/metrics"
 	"aosphere/internal/service"
 	"aosphere/internal/store"
@@ -25,6 +27,7 @@ type JSONRPCRequest struct {
 	ID      interface{}     `json:"id"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
+	AgentID string          `json:"agent_id,omitempty"`
 }
 
 type JSONRPCResponse struct {
@@ -48,13 +51,14 @@ type SessionContext struct {
 }
 
 type MCPServer struct {
-	store       *store.Store
-	service     *service.WorkflowService
-	sessions    map[string]*SessionContext
-	rateLimiter *RateLimiter
-	killSwitch  *KillSwitchManager
-	env         string
-	mu          sync.RWMutex
+	store             *store.Store
+	service           *service.WorkflowService
+	sessions          map[string]*SessionContext
+	rateLimiter       *RateLimiter
+	killSwitch        *KillSwitchManager
+	webhookDispatcher *agentplatform.WebhookDispatcher
+	env               string
+	mu                sync.RWMutex
 }
 
 func NewMCPServer(s *store.Store, svc *service.WorkflowService) *MCPServer {
@@ -62,13 +66,18 @@ func NewMCPServer(s *store.Store, svc *service.WorkflowService) *MCPServer {
 		svc = service.NewWorkflowService(s)
 	}
 	return &MCPServer{
-		store:       s,
-		service:     svc,
-		sessions:    make(map[string]*SessionContext),
-		rateLimiter: NewRateLimiter(60, 5),
-		killSwitch:  DefaultKillSwitch(),
-		env:         "development",
+		store:             s,
+		service:           svc,
+		sessions:          make(map[string]*SessionContext),
+		rateLimiter:       NewRateLimiter(60, 5),
+		killSwitch:        DefaultKillSwitch(),
+		webhookDispatcher: agentplatform.NewWebhookDispatcher(s),
+		env:               "development",
 	}
+}
+
+func (m *MCPServer) WebhookDispatcher() *agentplatform.WebhookDispatcher {
+	return m.webhookDispatcher
 }
 
 func (m *MCPServer) SetEnv(env string) {
@@ -298,29 +307,60 @@ func (m *MCPServer) HandlePostMessage(w http.ResponseWriter, r *http.Request) {
 		m.mu.RUnlock()
 	}
 
+	var req JSONRPCRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	// If no existing session found, authenticate directly from request headers
 	if sessCtx == nil {
 		authCtx, agentID, err := m.authenticateRequest(r)
 		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"error":   "unauthorized",
-				"message": fmt.Sprintf("MCP authentication required: %v", err),
-			})
-			return
+			if m.env != "production" {
+				agentName := r.Header.Get("X-Agent-ID")
+				if agentName == "" && req.AgentID != "" {
+					agentName = req.AgentID
+				}
+				if agentName == "" {
+					agentName = "agent_default"
+				}
+				authCtx = &auth.AuthContext{
+					UserID:   "usr_dev_agent",
+					OrgID:    "org_default",
+					Email:    "agent@aosphere.local",
+					Name:     agentName,
+					Role:     auth.RoleAdmin,
+					IsAPIKey: true,
+				}
+				agentID = agentName
+			} else {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":   "unauthorized",
+					"message": fmt.Sprintf("MCP authentication required: %v", err),
+				})
+				return
+			}
+		} else {
+			if hdrAgent := r.Header.Get("X-Agent-ID"); hdrAgent != "" {
+				agentID = hdrAgent
+			} else if req.AgentID != "" {
+				agentID = req.AgentID
+			}
 		}
 		sessCtx = &SessionContext{
 			ID:      "direct_" + uuid.New().String()[:8],
 			AuthCtx: authCtx,
 			AgentID: agentID,
 		}
-	}
-
-	var req JSONRPCRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	} else {
+		if req.AgentID != "" {
+			sessCtx.AgentID = req.AgentID
+		} else if hdrAgent := r.Header.Get("X-Agent-ID"); hdrAgent != "" {
+			sessCtx.AgentID = hdrAgent
+		}
 	}
 
 	resp := m.ProcessRequestWithContext(&req, sessCtx)
@@ -445,14 +485,19 @@ func (m *MCPServer) ProcessRequestWithContext(req *JSONRPCRequest, sessCtx *Sess
 	}
 }
 
+func (m *MCPServer) GetToolDefinitions() []map[string]interface{} {
+	return m.getToolDefinitions()
+}
+
 func (m *MCPServer) getToolDefinitions() []map[string]interface{} {
 	var list []map[string]interface{}
 	for _, tool := range Registry {
 		def := map[string]interface{}{
-			"name":        tool.Name,
-			"description": tool.Description,
-			"category":    string(tool.Category),
-			"inputSchema": tool.InputSchema,
+			"name":               tool.Name,
+			"description":        tool.Description,
+			"category":           string(tool.Category),
+			"requiredPermission": string(tool.RequiredPermission),
+			"inputSchema":        tool.InputSchema,
 		}
 		if tool.OutputSchema != nil {
 			def["outputSchema"] = tool.OutputSchema
@@ -499,8 +544,32 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 	}
 	orgID := sessCtx.AuthCtx.OrgID
 	agentID := sessCtx.AgentID
+	if req.AgentID != "" {
+		agentID = req.AgentID
+	}
 
-	// 2. Rate Limiting and Concurrency Control
+	// 2. Rate Limiting and Budget Quota Enforcement
+	cfg, _ := m.store.GetAgentConfigByHash(agentID)
+	if cfg == nil {
+		cfg, _ = m.store.GetAgentConfigByID(agentID)
+	}
+	if cfg != nil {
+		if !cfg.IsActive {
+			return &JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Error:   &RPCError{Code: -32029, Message: fmt.Sprintf("Agent %s is deactivated by administrator [-32029]", cfg.Name)},
+			}
+		}
+		if cfg.DailyBudgetCents > 0 && cfg.CurrentDayUsageCents >= cfg.DailyBudgetCents {
+			return &JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Error:   &RPCError{Code: -32029, Message: fmt.Sprintf("rate limit exceeded: daily budget cap reached (%d / %d cents) [-32029]", cfg.CurrentDayUsageCents, cfg.DailyBudgetCents)},
+			}
+		}
+	}
+
 	releaseSlot, err := m.rateLimiter.Acquire(agentID)
 	if err != nil {
 		_ = m.store.LogAuditForOrg(orgID, "agent", agentID, "MCP_RATELIMIT_EXCEEDED", "tools", params.Name, err.Error(), "{}")
@@ -865,6 +934,128 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 			textResult = string(bytes)
 		}
 
+	case "reports_get_pnl":
+		startDate, _ := params.Arguments["start_date"].(string)
+		endDate, _ := params.Arguments["end_date"].(string)
+		pnl, err := m.service.Reports().GetProfitAndLoss(toolCtx, orgID, startDate, endDate)
+		if err != nil {
+			textResult = fmt.Sprintf("Error generating P&L: %v", err)
+			isErr = true
+		} else {
+			bytes, _ := json.MarshalIndent(pnl, "", "  ")
+			textResult = string(bytes)
+		}
+
+	case "reports_get_balance_sheet":
+		asOf, _ := params.Arguments["as_of"].(string)
+		bs, err := m.service.Reports().GetBalanceSheet(toolCtx, orgID, asOf)
+		if err != nil {
+			textResult = fmt.Sprintf("Error generating Balance Sheet: %v", err)
+			isErr = true
+		} else {
+			bytes, _ := json.MarshalIndent(bs, "", "  ")
+			textResult = string(bytes)
+		}
+
+	case "reports_get_executive_kpis":
+		kpis, err := m.service.Reports().GetExecutiveKPIs(toolCtx, orgID)
+		if err != nil {
+			textResult = fmt.Sprintf("Error fetching executive KPIs: %v", err)
+			isErr = true
+		} else {
+			bytes, _ := json.MarshalIndent(kpis, "", "  ")
+			textResult = string(bytes)
+		}
+
+	case "reports_get_inventory_valuation":
+		inv, err := m.service.Reports().GetInventoryValuation(toolCtx, orgID)
+		if err != nil {
+			textResult = fmt.Sprintf("Error fetching inventory valuation: %v", err)
+			isErr = true
+		} else {
+			bytes, _ := json.MarshalIndent(inv, "", "  ")
+			textResult = string(bytes)
+		}
+
+	case "reports_get_sales_velocity":
+		vel, err := m.service.Reports().GetSalesVelocity(toolCtx, orgID)
+		if err != nil {
+			textResult = fmt.Sprintf("Error analyzing sales velocity: %v", err)
+			isErr = true
+		} else {
+			bytes, _ := json.MarshalIndent(vel, "", "  ")
+			textResult = string(bytes)
+		}
+
+	case "agent_escalate_to_human":
+		title, _ := params.Arguments["title"].(string)
+		reason, _ := params.Arguments["reason"].(string)
+		inputCtx, _ := params.Arguments["input_context"].(string)
+		recAction, _ := params.Arguments["recommended_action"].(string)
+
+		esc, err := m.store.CreateAgentEscalation(db.AgentEscalation{
+			OrgID:             orgID,
+			AgentID:           agentID,
+			Title:             title,
+			Reason:            reason,
+			InputContextJSON:  inputCtx,
+			RecommendedAction: recAction,
+		})
+		if err != nil {
+			textResult = fmt.Sprintf("Error recording escalation: %v", err)
+			isErr = true
+		} else {
+			// Also create a human approval ticket
+			_, _ = m.store.CreateApprovalForOrg(orgID, "agent_escalation", title,
+				fmt.Sprintf("Agent %s escalated: %s. Action: %s", agentID, reason, recAction),
+				fmt.Sprintf(`{"escalation_id":"%s","input_context":%q}`, esc.ID, inputCtx),
+				"agent", agentID)
+
+			textResult = fmt.Sprintf("Successfully escalated to human review queue. Escalation ID: %s. Status: pending.", esc.ID)
+		}
+
+	case "agent_get_context":
+		category, _ := params.Arguments["category"].(string)
+		mems, err := m.store.GetAgentContextMemory(orgID, category)
+		if err != nil {
+			textResult = fmt.Sprintf("Error retrieving context memory: %v", err)
+			isErr = true
+		} else {
+			ctxMap := make(map[string]map[string]string)
+			for _, mem := range mems {
+				if _, ok := ctxMap[mem.Category]; !ok {
+					ctxMap[mem.Category] = make(map[string]string)
+				}
+				ctxMap[mem.Category][mem.Key] = mem.Value
+			}
+			bytes, _ := json.MarshalIndent(ctxMap, "", "  ")
+			textResult = string(bytes)
+		}
+
+	case "agent_sanitize_input":
+		rawText, _ := params.Arguments["text"].(string)
+		res := agentplatform.SanitizeInput(rawText)
+		bytes, _ := json.MarshalIndent(res, "", "  ")
+		textResult = string(bytes)
+
+	case "webhook_test_event":
+		evType, _ := params.Arguments["event_type"].(string)
+		payloadMap, _ := params.Arguments["payload"].(map[string]interface{})
+		if payloadMap == nil {
+			payloadMap = map[string]interface{}{
+				"test":      true,
+				"timestamp": time.Now().UTC().Format(time.RFC3339),
+				"triggered_by": agentID,
+			}
+		}
+		delivs, err := m.webhookDispatcher.DispatchEvent(toolCtx, orgID, evType, payloadMap)
+		if err != nil {
+			textResult = fmt.Sprintf("Error dispatching webhook event: %v", err)
+			isErr = true
+		} else {
+			textResult = fmt.Sprintf("Dispatched event %q to %d webhook subscribers.", evType, len(delivs))
+		}
+
 	default:
 		return &JSONRPCResponse{
 			JSONRPC: "2.0",
@@ -902,6 +1093,10 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 	durationMS := time.Since(startTime).Milliseconds()
 	argsJSON := TruncateJSON(params.Arguments, 1000)
 	resJSON := TruncateJSON(textResult, 1000)
+	errMsg := ""
+	if isErr {
+		errMsg = textResult
+	}
 	_ = RecordAgentExecution(context.Background(), m.store.DB(), AgentExecution{
 		OrgID:         orgID,
 		AgentID:       agentID,
@@ -910,9 +1105,13 @@ func (m *MCPServer) handleToolCall(req *JSONRPCRequest, sessCtx *SessionContext)
 		ArgumentsJSON: argsJSON,
 		ResultJSON:    resJSON,
 		IsError:       isErr,
+		ErrorMessage:  errMsg,
 		DurationMS:    durationMS,
+		CostCents:     1, // 1 cent nominal cost per tool call
+		MutationsJSON: "[]",
 		CreatedAt:     startTime,
 	})
+	_ = m.store.IncrementAgentDailyUsage(agentID, 1)
 
 	// Record in Prometheus metrics
 	statusMetric := "success"

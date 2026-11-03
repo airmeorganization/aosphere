@@ -12,15 +12,19 @@ type Organization struct {
 }
 
 type User struct {
-	ID           string    `json:"id"`
-	OrgID        string    `json:"org_id"`
-	Email        string    `json:"email"`
-	PasswordHash string    `json:"-"`
-	Name         string    `json:"name"`
-	Role         string    `json:"role"` // owner, admin, finance, operations, hr, employee, readonly
-	IsActive     bool      `json:"is_active"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID                string     `json:"id"`
+	OrgID             string     `json:"org_id"`
+	Email             string     `json:"email"`
+	PasswordHash      string     `json:"-"`
+	Name              string     `json:"name"`
+	Role              string     `json:"role"` // owner, admin, finance, operations, hr, employee, readonly
+	IsActive          bool       `json:"is_active"`
+	TOTPSecret        string     `json:"-"`
+	TOTPEnabled       bool       `json:"totp_enabled"`
+	RecoveryCodesJSON string     `json:"-"`
+	LastActiveAt      *time.Time `json:"last_active_at,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
 type Session struct {
@@ -149,17 +153,119 @@ type Expense struct {
 }
 
 type Employee struct {
+	ID                    string    `json:"id"`
+	OrgID                 string    `json:"org_id"`
+	Name                  string    `json:"name"`
+	Role                  string    `json:"role"`
+	JobTitle              string    `json:"job_title,omitempty"`
+	Department            string    `json:"department"`
+	ReportingManagerID    string    `json:"reporting_manager_id,omitempty"`
+	EmploymentType        string    `json:"employment_type,omitempty"` // full_time, part_time, contractor
+	SalaryType            string    `json:"salary_type,omitempty"`     // hourly, monthly_fixed
+	HourlyRate            float64   `json:"hourly_rate"`
+	MonthlySalary         float64   `json:"monthly_salary,omitempty"`
+	Status                string    `json:"status"`
+	Email                 string    `json:"email"`
+	Phone                 string    `json:"phone"`
+	TaxID                 string    `json:"tax_id,omitempty"`
+	BankName              string    `json:"bank_name,omitempty"`
+	BankAccountNumber     string    `json:"bank_account_number,omitempty"`
+	BankRoutingNumber     string    `json:"bank_routing_number,omitempty"`
+	EmergencyContactName  string    `json:"emergency_contact_name,omitempty"`
+	EmergencyContactPhone string    `json:"emergency_contact_phone,omitempty"`
+	HiredAt               string    `json:"hired_at"`
+	CreatedAt             time.Time `json:"created_at"`
+}
+
+type TimeclockEvent struct {
+	ID            string    `json:"id"`
+	OrgID         string    `json:"org_id"`
+	EmployeeID    string    `json:"employee_id"`
+	ShiftID       string    `json:"shift_id,omitempty"`
+	EventType     string    `json:"event_type"` // clock_in, clock_out, break_start, break_end
+	Timestamp     time.Time `json:"timestamp"`
+	IPAddress     string    `json:"ip_address,omitempty"`
+	LocationNotes string    `json:"location_notes,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+type PayrollRun struct {
+	ID                  string    `json:"id"`
+	OrgID               string    `json:"org_id"`
+	Period              string    `json:"period"` // YYYY-MM
+	TotalGrossCents     int64     `json:"total_gross_cents"`
+	TotalTaxCents       int64     `json:"total_tax_cents"`
+	TotalDeductionsCents int64    `json:"total_deductions_cents"`
+	TotalNetCents       int64     `json:"total_net_cents"`
+	TotalGrossDollars   float64   `json:"total_gross_dollars"`
+	TotalTaxDollars     float64   `json:"total_tax_dollars"`
+	TotalNetDollars     float64   `json:"total_net_dollars"`
+	Status              string    `json:"status"` // draft, approved, paid
+	PaymentDate         string    `json:"payment_date"`
+	JournalEntryID      string    `json:"journal_entry_id,omitempty"`
+	PayslipsCount       int       `json:"payslips_count"`
+	CreatedAt           time.Time `json:"created_at"`
+}
+
+type Payslip struct {
+	ID                  string    `json:"id"`
+	OrgID               string    `json:"org_id"`
+	PayrollRunID        string    `json:"payroll_run_id"`
+	EmployeeID          string    `json:"employee_id"`
+	EmployeeName        string    `json:"employee_name,omitempty"`
+	Period              string    `json:"period"`
+	SalaryType          string    `json:"salary_type"`
+	HourlyRate          float64   `json:"hourly_rate"`
+	MonthlySalary       float64   `json:"monthly_salary"`
+	RegularHours        float64   `json:"regular_hours"`
+	OvertimeHours       float64   `json:"overtime_hours"`
+	GrossPay            float64   `json:"gross_pay"`
+	TaxWithholding      float64   `json:"tax_withholding"`
+	SocialContributions float64   `json:"social_contributions"`
+	BenefitsDeductions  float64   `json:"benefits_deductions"`
+	NetPay              float64   `json:"net_pay"`
+	Status              string    `json:"status"` // generated, paid
+	PaymentDate         string    `json:"payment_date,omitempty"`
+	CreatedAt           time.Time `json:"created_at"`
+}
+
+type LeavePolicy struct {
 	ID         string    `json:"id"`
 	OrgID      string    `json:"org_id"`
 	Name       string    `json:"name"`
-	Role       string    `json:"role"`
-	Department string    `json:"department"`
-	HourlyRate float64   `json:"hourly_rate"`
-	Status     string    `json:"status"`
-	Email      string    `json:"email"`
-	Phone      string    `json:"phone"`
-	HiredAt    string    `json:"hired_at"`
+	Code       string    `json:"code"` // vacation, sick, parental, unpaid
+	AnnualDays int       `json:"annual_days"`
 	CreatedAt  time.Time `json:"created_at"`
+}
+
+type LeaveRequest struct {
+	ID           string    `json:"id"`
+	OrgID        string    `json:"org_id"`
+	EmployeeID   string    `json:"employee_id"`
+	EmployeeName string    `json:"employee_name,omitempty"`
+	LeaveType    string    `json:"leave_type"`
+	StartDate    string    `json:"start_date"`
+	EndDate      string    `json:"end_date"`
+	DaysCount    int       `json:"days_count"`
+	Reason       string    `json:"reason"`
+	Status       string    `json:"status"` // pending, approved, rejected
+	ReviewedBy   string    `json:"reviewed_by,omitempty"`
+	ReviewNotes  string    `json:"review_notes,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+type HRDocument struct {
+	ID           string    `json:"id"`
+	OrgID        string    `json:"org_id"`
+	EmployeeID   string    `json:"employee_id"`
+	EmployeeName string    `json:"employee_name,omitempty"`
+	Title        string    `json:"title"`
+	DocumentType string    `json:"document_type"` // contract, nda, id_proof, evaluation, tax_form
+	FileName     string    `json:"file_name"`
+	FileContent  string    `json:"file_content"`
+	FileSize     int64     `json:"file_size"`
+	UploadedBy   string    `json:"uploaded_by"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 type Shift struct {
@@ -472,6 +578,429 @@ type JournalLine struct {
 	Description string    `json:"description"`
 	CreatedAt   time.Time `json:"created_at,omitempty"`
 }
+
+// ----------------- PHASE 7 REPORTING & ANALYTICS MODELS -----------------
+
+type SavedReport struct {
+	ID             string    `json:"id"`
+	OrgID          string    `json:"org_id"`
+	Name           string    `json:"name"`
+	ReportType     string    `json:"report_type"`
+	ParametersJSON string    `json:"parameters_json"`
+	CreatedBy      string    `json:"created_by"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+type DataExport struct {
+	ID            string    `json:"id"`
+	OrgID         string    `json:"org_id"`
+	ExportType    string    `json:"export_type"`
+	FileFormat    string    `json:"file_format"`
+	RecordCount   int       `json:"record_count"`
+	FileSizeBytes int64     `json:"file_size_bytes"`
+	CreatedBy     string    `json:"created_by"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+type PnLLineItem struct {
+	AccountCode string  `json:"account_code"`
+	AccountName string  `json:"account_name"`
+	AmountCents int64   `json:"amount_cents"`
+	Amount      float64 `json:"amount"`
+}
+
+type PnLReport struct {
+	OrgID             string        `json:"org_id"`
+	StartDate         string        `json:"start_date"`
+	EndDate           string        `json:"end_date"`
+	RevenueCents      int64         `json:"revenue_cents"`
+	Revenue           float64       `json:"revenue"`
+	COGSCents         int64         `json:"cogs_cents"`
+	COGS              float64       `json:"cogs"`
+	GrossProfitCents  int64         `json:"gross_profit_cents"`
+	GrossProfit       float64       `json:"gross_profit"`
+	GrossMarginPct    float64       `json:"gross_margin_pct"`
+	OpExCents         int64         `json:"opex_cents"`
+	OpEx              float64       `json:"opex"`
+	NetProfitCents    int64         `json:"net_profit_cents"`
+	NetProfit         float64       `json:"net_profit"`
+	RevenueItems      []PnLLineItem `json:"revenue_items"`
+	COGSItems         []PnLLineItem `json:"cogs_items"`
+	OpExItems         []PnLLineItem `json:"opex_items"`
+}
+
+type BalanceSheetAccount struct {
+	Code        string  `json:"code"`
+	Name        string  `json:"name"`
+	AmountCents int64   `json:"amount_cents"`
+	Amount      float64 `json:"amount"`
+}
+
+type BalanceSheetReport struct {
+	OrgID                 string                `json:"org_id"`
+	AsOf                  string                `json:"as_of"`
+	CurrentAssets         []BalanceSheetAccount `json:"current_assets"`
+	TotalAssetsCents      int64                 `json:"total_assets_cents"`
+	TotalAssets           float64               `json:"total_assets"`
+	CurrentLiabilities    []BalanceSheetAccount `json:"current_liabilities"`
+	TotalLiabilitiesCents int64                 `json:"total_liabilities_cents"`
+	TotalLiabilities      float64               `json:"total_liabilities"`
+	EquityItems           []BalanceSheetAccount `json:"equity_items"`
+	TotalEquityCents      int64                 `json:"total_equity_cents"`
+	TotalEquity           float64               `json:"total_equity"`
+	IsBalanced            bool                  `json:"is_balanced"`
+}
+
+type CashFlowActivity struct {
+	Category    string  `json:"category"`
+	Description string  `json:"description"`
+	AmountCents int64   `json:"amount_cents"`
+	Amount      float64 `json:"amount"`
+}
+
+type CashFlowReport struct {
+	OrgID               string             `json:"org_id"`
+	StartDate           string             `json:"start_date"`
+	EndDate             string             `json:"end_date"`
+	OperatingActivities []CashFlowActivity `json:"operating_activities"`
+	OperatingNetCents   int64              `json:"operating_net_cents"`
+	OperatingNet        float64            `json:"operating_net"`
+	InvestingActivities []CashFlowActivity `json:"investing_activities"`
+	InvestingNetCents   int64              `json:"investing_net_cents"`
+	InvestingNet        float64            `json:"investing_net"`
+	FinancingActivities []CashFlowActivity `json:"financing_activities"`
+	FinancingNetCents   int64              `json:"financing_net_cents"`
+	FinancingNet        float64            `json:"financing_net"`
+	NetCashChangeCents  int64              `json:"net_cash_change_cents"`
+	NetCashChange       float64            `json:"net_cash_change"`
+	BeginningCashCents  int64              `json:"beginning_cash_cents"`
+	BeginningCash       float64            `json:"beginning_cash"`
+	EndingCashCents     int64              `json:"ending_cash_cents"`
+	EndingCash          float64            `json:"ending_cash"`
+}
+
+type AgedItem struct {
+	ID           string  `json:"id"`
+	Number       string  `json:"number"`
+	EntityID     string  `json:"entity_id"`
+	EntityName   string  `json:"entity_name"`
+	IssueDate    string  `json:"issue_date"`
+	DueDate      string  `json:"due_date"`
+	AmountCents  int64   `json:"amount_cents"`
+	Amount       float64 `json:"amount"`
+	DaysOverdue  int     `json:"days_overdue"`
+	Bracket      string  `json:"bracket"` // current, 1_30, 31_60, 61_90, 90_plus
+}
+
+type AgedReport struct {
+	OrgID         string     `json:"org_id"`
+	ReportType    string     `json:"report_type"` // receivables, payables
+	AsOf          string     `json:"as_of"`
+	CurrentCents  int64      `json:"current_cents"`
+	Days1To30Cents int64     `json:"days_1_30_cents"`
+	Days31To60Cents int64    `json:"days_31_60_cents"`
+	Days61To90Cents int64    `json:"days_61_90_cents"`
+	Days90PlusCents int64    `json:"days_90_plus_cents"`
+	TotalCents    int64      `json:"total_cents"`
+	Current       float64    `json:"current"`
+	Days1To30     float64    `json:"days_1_30"`
+	Days31To60    float64    `json:"days_31_60"`
+	Days61To90    float64    `json:"days_61_90"`
+	Days90Plus    float64    `json:"days_90_plus"`
+	Total         float64    `json:"total"`
+	Items         []AgedItem `json:"items"`
+}
+
+type SKUValuation struct {
+	SKUID             string  `json:"sku_id"`
+	SKUCode           string  `json:"sku_code"`
+	SKUName           string  `json:"sku_name"`
+	Category          string  `json:"category"`
+	StockQuantity     int     `json:"stock_quantity"`
+	ReservedQuantity  int     `json:"reserved_quantity"`
+	UnitCost          float64 `json:"unit_cost"`
+	SellingPrice      float64 `json:"selling_price"`
+	CostValuation     float64 `json:"cost_valuation"`
+	RetailValuation   float64 `json:"retail_valuation"`
+	PotentialProfit   float64 `json:"potential_profit"`
+}
+
+type WarehouseValuation struct {
+	WarehouseID   string  `json:"warehouse_id"`
+	WarehouseName string  `json:"warehouse_name"`
+	TotalItems    int     `json:"total_items"`
+	TotalUnits    int     `json:"total_units"`
+	CostValuation float64 `json:"cost_valuation"`
+}
+
+type InventoryValuationReport struct {
+	OrgID                string               `json:"org_id"`
+	AsOf                 string               `json:"as_of"`
+	TotalSKUs            int                  `json:"total_skus"`
+	TotalUnitsOnHand     int                  `json:"total_units_on_hand"`
+	TotalCostValuation   float64              `json:"total_cost_valuation"`
+	TotalRetailValuation float64              `json:"total_retail_valuation"`
+	SKUs                 []SKUValuation       `json:"skus"`
+	Warehouses           []WarehouseValuation `json:"warehouses"`
+}
+
+type DeadStockItem struct {
+	SKUID         string  `json:"sku_id"`
+	SKUCode       string  `json:"sku_code"`
+	SKUName       string  `json:"sku_name"`
+	Category      string  `json:"category"`
+	StockQuantity int     `json:"stock_quantity"`
+	UnitCost      float64 `json:"unit_cost"`
+	TiedUpCapital float64 `json:"tied_up_capital"`
+	DaysInactive  int     `json:"days_inactive"`
+	LastActivity  string  `json:"last_activity"`
+}
+
+type InventoryTurnoverReport struct {
+	OrgID               string          `json:"org_id"`
+	AsOf                string          `json:"as_of"`
+	TrailingPeriodDays  int             `json:"trailing_period_days"`
+	COGSTrailing        float64         `json:"cogs_trailing"`
+	AvgInventoryValue   float64         `json:"avg_inventory_value"`
+	TurnoverRatio       float64         `json:"turnover_ratio"`
+	DaysSalesOfInventory float64        `json:"days_sales_of_inventory"` // DSI
+	DeadStockCount      int             `json:"dead_stock_count"`
+	DeadStockValue      float64         `json:"dead_stock_value"`
+	DeadStock           []DeadStockItem `json:"dead_stock"`
+}
+
+type StageMetric struct {
+	Stage       string  `json:"stage"`
+	DealCount   int     `json:"deal_count"`
+	TotalValue  float64 `json:"total_value"`
+	AvgValue    float64 `json:"avg_value"`
+	Probability int     `json:"probability"`
+}
+
+type SalesVelocityReport struct {
+	OrgID                  string        `json:"org_id"`
+	TotalDeals             int           `json:"total_deals"`
+	WonDeals               int           `json:"won_deals"`
+	LostDeals              int           `json:"lost_deals"`
+	OpenDeals              int           `json:"open_deals"`
+	WinLossRatio           float64       `json:"win_loss_ratio"`
+	TotalWonValue          float64       `json:"total_won_value"`
+	AverageDealSize        float64       `json:"average_deal_size"`
+	AvgSalesCycleDays      float64       `json:"avg_sales_cycle_days"`
+	PipelineValue          float64       `json:"pipeline_value"`
+	WeightedPipelineValue  float64       `json:"weighted_pipeline_value"`
+	TotalLeads             int           `json:"total_leads"`
+	ConvertedLeads         int           `json:"converted_leads"`
+	LeadConversionRate     float64       `json:"lead_conversion_rate"`
+	Stages                 []StageMetric `json:"stages"`
+}
+
+type ExecutiveKPIsReport struct {
+	OrgID                     string  `json:"org_id"`
+	GeneratedAt               string  `json:"generated_at"`
+	MRR                       float64 `json:"mrr"`
+	GrossMarginPct            float64 `json:"gross_margin_pct"`
+	OperatingCash             float64 `json:"operating_cash"`
+	MonthlyBurnRate           float64 `json:"monthly_burn_rate"`
+	CashRunwayMonths          float64 `json:"cash_runway_months"`
+	OpenPurchaseCommitments   float64 `json:"open_purchase_commitments"`
+	PendingApprovalsCount     int     `json:"pending_approvals_count"`
+	TotalRevenueYTD           float64 `json:"total_revenue_ytd"`
+	NetProfitYTD              float64 `json:"net_profit_ytd"`
+	TotalInventoryValuation   float64 `json:"total_inventory_valuation"`
+	AccountsReceivableCurrent float64 `json:"accounts_receivable_current"`
+	AccountsReceivableOverdue float64 `json:"accounts_receivable_overdue"`
+}
+
+// ----------------- PHASE 8: AUTONOMOUS MCP AGENT PLATFORM & WEBHOOKS -----------------
+
+type WebhookSubscription struct {
+	ID         string    `json:"id"`
+	OrgID      string    `json:"org_id"`
+	Name       string    `json:"name"`
+	URL        string    `json:"url"`
+	Secret     string    `json:"secret"`
+	EventTypes string    `json:"event_types"` // JSON array or comma separated
+	IsActive   bool      `json:"is_active"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+type WebhookDelivery struct {
+	ID             string     `json:"id"`
+	OrgID          string     `json:"org_id"`
+	SubscriptionID string     `json:"subscription_id"`
+	EventID        string     `json:"event_id"`
+	EventType      string     `json:"event_type"`
+	PayloadJSON    string     `json:"payload_json"`
+	Status         string     `json:"status"` // pending, delivered, failed
+	StatusCode     int        `json:"status_code"`
+	ResponseBody   string     `json:"response_body"`
+	RetryCount     int        `json:"retry_count"`
+	MaxRetries     int        `json:"max_retries"`
+	NextRetryAt    *time.Time `json:"next_retry_at,omitempty"`
+	DeliveredAt    *time.Time `json:"delivered_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+}
+
+type AgentConfig struct {
+	ID                   string     `json:"id"`
+	OrgID                string     `json:"org_id"`
+	Name                 string     `json:"name"`
+	APIKeyHash           string     `json:"api_key_hash"`
+	ToolQuotaPerMinute   int        `json:"tool_quota_per_minute"`
+	DailyBudgetCents     int        `json:"daily_budget_cents"`
+	CurrentDayUsageCents int        `json:"current_day_usage_cents"`
+	ConcurrentLimit      int        `json:"concurrent_limit"`
+	ActiveSlots          int        `json:"active_slots"`
+	IsActive             bool       `json:"is_active"`
+	LastUsedAt           *time.Time `json:"last_used_at,omitempty"`
+	CreatedAt            time.Time  `json:"created_at"`
+}
+
+type AgentExecutionRecord struct {
+	ID            string    `json:"id"`
+	OrgID         string    `json:"org_id"`
+	AgentID       string    `json:"agent_id"`
+	ToolName      string    `json:"tool_name"`
+	Category      string    `json:"category"`
+	ArgumentsJSON string    `json:"arguments_json"`
+	ResultJSON    string    `json:"result_json"`
+	IsError       bool      `json:"is_error"`
+	ErrorMessage  string    `json:"error_message,omitempty"`
+	DurationMS    int64     `json:"duration_ms"`
+	CostCents     int       `json:"cost_cents"`
+	MutationsJSON string    `json:"mutations_json"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+type AgentEscalation struct {
+	ID                string     `json:"id"`
+	OrgID             string     `json:"org_id"`
+	AgentID           string     `json:"agent_id"`
+	ExecutionID       string     `json:"execution_id,omitempty"`
+	Title             string     `json:"title"`
+	Reason            string     `json:"reason"`
+	Status            string     `json:"status"` // pending, approved, rejected, resolved
+	InputContextJSON  string     `json:"input_context_json"`
+	RecommendedAction string     `json:"recommended_action"`
+	ReviewerID        string     `json:"reviewer_id,omitempty"`
+	ReviewerNotes     string     `json:"reviewer_notes,omitempty"`
+	ResolvedAt        *time.Time `json:"resolved_at,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+}
+
+type AgentContextMemory struct {
+	ID          string    `json:"id"`
+	OrgID       string    `json:"org_id"`
+	Category    string    `json:"category"`
+	Key         string    `json:"key"`
+	Value       string    `json:"value"`
+	Description string    `json:"description"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type SanitizeResult struct {
+	IsSafe          bool     `json:"is_safe"`
+	RiskScore       float64  `json:"risk_score"`
+	FlaggedPatterns []string `json:"flagged_patterns"`
+	SanitizedText   string   `json:"sanitized_text"`
+}
+
+// ----------------- PHASE 9: ENTERPRISE MULTI-TENANCY, AUTH & COMPLIANCE -----------------
+
+type UserOrganization struct {
+	UserID    string    `json:"user_id"`
+	OrgID     string    `json:"org_id"`
+	OrgName   string    `json:"org_name,omitempty"`
+	OrgSlug   string    `json:"org_slug,omitempty"`
+	Role      string    `json:"role"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type UserInvitation struct {
+	ID        string    `json:"id"`
+	OrgID     string    `json:"org_id"`
+	Email     string    `json:"email"`
+	Role      string    `json:"role"`
+	TokenHash string    `json:"-"`
+	InvitedBy string    `json:"invited_by"`
+	Status    string    `json:"status"` // pending, accepted, expired
+	ExpiresAt time.Time `json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type PasswordReset struct {
+	ID        string    `json:"id"`
+	UserID    string    `json:"user_id"`
+	TokenHash string    `json:"-"`
+	Status    string    `json:"status"` // pending, used, expired
+	ExpiresAt time.Time `json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type SSOConfig struct {
+	ID            string    `json:"id"`
+	OrgID         string    `json:"org_id"`
+	Provider      string    `json:"provider"` // google, azure, okta, oidc, saml
+	ClientID      string    `json:"client_id"`
+	ClientSecret  string    `json:"-"`
+	IssuerURL     string    `json:"issuer_url"`
+	DomainMapping string    `json:"domain_mapping"`
+	IsEnabled     bool      `json:"is_enabled"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+type CustomRole struct {
+	ID              string    `json:"id"`
+	OrgID           string    `json:"org_id"`
+	Name            string    `json:"name"`
+	Description     string    `json:"description"`
+	PermissionsJSON string    `json:"permissions_json"`
+	IsSystem        bool      `json:"is_system"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+type AuditChainBlock struct {
+	ID             string    `json:"id"`
+	OrgID          string    `json:"org_id"`
+	SequenceNumber int64     `json:"sequence_number"`
+	ActorType      string    `json:"actor_type"` // user, agent, system
+	ActorID        string    `json:"actor_id"`
+	Action         string    `json:"action"`
+	ResourceType   string    `json:"resource_type"`
+	ResourceID     string    `json:"resource_id"`
+	PayloadHash    string    `json:"payload_hash"`
+	PrevBlockHash  string    `json:"prev_block_hash"`
+	BlockHash      string    `json:"block_hash"`
+	Timestamp      time.Time `json:"timestamp"`
+}
+
+type PrivacyRequest struct {
+	ID          string     `json:"id"`
+	OrgID       string     `json:"org_id"`
+	UserID      string     `json:"user_id"`
+	RequestType string     `json:"request_type"` // export_data, forget_me
+	Status      string     `json:"status"`       // pending, completed, rejected
+	ResultJSON  string     `json:"result_json"`
+	RequestedAt time.Time  `json:"requested_at"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+}
+
+type SOC2AccessReview struct {
+	ID           string     `json:"id"`
+	OrgID        string     `json:"org_id"`
+	Quarter      string     `json:"quarter"`
+	Status       string     `json:"status"` // pending, approved
+	ReviewedBy   string     `json:"reviewed_by"`
+	Notes        string     `json:"notes"`
+	SnapshotJSON string     `json:"snapshot_json"`
+	ReviewedAt   *time.Time `json:"reviewed_at,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+}
+
+
+
 
 
 

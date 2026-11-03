@@ -17,7 +17,10 @@ type AgentExecution struct {
 	ArgumentsJSON string    `json:"arguments_json"`
 	ResultJSON    string    `json:"result_json"`
 	IsError       bool      `json:"is_error"`
+	ErrorMessage  string    `json:"error_message,omitempty"`
 	DurationMS    int64     `json:"duration_ms"`
+	CostCents     int       `json:"cost_cents"`
+	MutationsJSON string    `json:"mutations_json"`
 	CreatedAt     time.Time `json:"created_at"`
 }
 
@@ -32,17 +35,20 @@ func RecordAgentExecution(ctx context.Context, db *sql.DB, exec AgentExecution) 
 	if exec.OrgID == "" {
 		exec.OrgID = "org_default"
 	}
+	if exec.MutationsJSON == "" {
+		exec.MutationsJSON = "[]"
+	}
 	if exec.CreatedAt.IsZero() {
 		exec.CreatedAt = time.Now()
 	}
 
 	query := `INSERT INTO agent_executions 
-		(id, org_id, agent_id, tool_name, category, arguments_json, result_json, is_error, duration_ms, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		(id, org_id, agent_id, tool_name, category, arguments_json, result_json, is_error, error_message, duration_ms, cost_cents, mutations_json, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	_, err := db.ExecContext(ctx, query,
 		exec.ID, exec.OrgID, exec.AgentID, exec.ToolName, exec.Category,
-		exec.ArgumentsJSON, exec.ResultJSON, exec.IsError, exec.DurationMS, exec.CreatedAt)
+		exec.ArgumentsJSON, exec.ResultJSON, exec.IsError, exec.ErrorMessage, exec.DurationMS, exec.CostCents, exec.MutationsJSON, exec.CreatedAt)
 	return err
 }
 
@@ -51,7 +57,7 @@ func GetAgentExecutions(ctx context.Context, db *sql.DB, orgID string, limit int
 	if limit <= 0 {
 		limit = 50
 	}
-	query := `SELECT id, org_id, agent_id, tool_name, category, arguments_json, result_json, is_error, duration_ms, created_at 
+	query := `SELECT id, org_id, agent_id, tool_name, category, arguments_json, result_json, is_error, COALESCE(error_message, ''), duration_ms, COALESCE(cost_cents, 0), COALESCE(mutations_json, '[]'), created_at 
 		FROM agent_executions 
 		WHERE org_id = ? 
 		ORDER BY created_at DESC 
@@ -66,7 +72,7 @@ func GetAgentExecutions(ctx context.Context, db *sql.DB, orgID string, limit int
 	var list []AgentExecution
 	for rows.Next() {
 		var e AgentExecution
-		if err := rows.Scan(&e.ID, &e.OrgID, &e.AgentID, &e.ToolName, &e.Category, &e.ArgumentsJSON, &e.ResultJSON, &e.IsError, &e.DurationMS, &e.CreatedAt); err == nil {
+		if err := rows.Scan(&e.ID, &e.OrgID, &e.AgentID, &e.ToolName, &e.Category, &e.ArgumentsJSON, &e.ResultJSON, &e.IsError, &e.ErrorMessage, &e.DurationMS, &e.CostCents, &e.MutationsJSON, &e.CreatedAt); err == nil {
 			list = append(list, e)
 		}
 	}

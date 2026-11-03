@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 )
 
@@ -553,6 +554,451 @@ var Migrations = []Migration{
 		SELECT 'stg_saas_won_' || id, id, 'pipe_saas_' || id, 'Active ARR', 'won', 4, 100, 0, '#10b981' FROM organizations;
 		`,
 	},
+	{
+		Version: 9,
+		Name:    "009_phase6_hrms_payroll_leaves",
+		SQL: `
+		-- 1. Enhance Employees schema with compensation, direct deposit, tax ID & emergency contacts
+		ALTER TABLE employees ADD COLUMN job_title TEXT DEFAULT '';
+		ALTER TABLE employees ADD COLUMN reporting_manager_id TEXT DEFAULT '';
+		ALTER TABLE employees ADD COLUMN employment_type TEXT DEFAULT 'full_time';
+		ALTER TABLE employees ADD COLUMN salary_type TEXT DEFAULT 'hourly';
+		ALTER TABLE employees ADD COLUMN monthly_salary REAL DEFAULT 0.0;
+		ALTER TABLE employees ADD COLUMN tax_id TEXT DEFAULT '';
+		ALTER TABLE employees ADD COLUMN bank_name TEXT DEFAULT '';
+		ALTER TABLE employees ADD COLUMN bank_account_number TEXT DEFAULT '';
+		ALTER TABLE employees ADD COLUMN bank_routing_number TEXT DEFAULT '';
+		ALTER TABLE employees ADD COLUMN emergency_contact_name TEXT DEFAULT '';
+		ALTER TABLE employees ADD COLUMN emergency_contact_phone TEXT DEFAULT '';
+
+		-- Update existing seed employees with realistic compensation & compliance metadata
+		UPDATE employees SET job_title = role WHERE job_title IS NULL OR job_title = '';
+		UPDATE employees SET salary_type = 'hourly', monthly_salary = hourly_rate * 160 WHERE (monthly_salary IS NULL OR monthly_salary = 0.0);
+		UPDATE employees SET tax_id = 'TAX-US-' || substr(id, 5, 8), bank_name = 'Silicon Valley National Bank', bank_account_number = '8829103948', bank_routing_number = '121000358' WHERE tax_id IS NULL OR tax_id = '';
+		UPDATE employees SET emergency_contact_name = 'Family Contact', emergency_contact_phone = '+1 (555) 019-2831' WHERE emergency_contact_name IS NULL OR emergency_contact_name = '';
+
+		-- 2. Time & Attendance (Digital Timeclock Punch Events)
+		CREATE TABLE IF NOT EXISTS timeclock_events (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			employee_id TEXT NOT NULL REFERENCES employees(id),
+			shift_id TEXT REFERENCES shifts(id),
+			event_type TEXT NOT NULL, -- clock_in, clock_out, break_start, break_end
+			timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			ip_address TEXT NOT NULL DEFAULT '',
+			location_notes TEXT NOT NULL DEFAULT '',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		-- 3. Payroll Runs & Itemized Payslips
+		CREATE TABLE IF NOT EXISTS payroll_runs (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			period TEXT NOT NULL, -- YYYY-MM
+			total_gross_cents INTEGER NOT NULL DEFAULT 0,
+			total_tax_cents INTEGER NOT NULL DEFAULT 0,
+			total_deductions_cents INTEGER NOT NULL DEFAULT 0,
+			total_net_cents INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT 'draft', -- draft, approved, paid
+			payment_date TEXT NOT NULL DEFAULT '',
+			journal_entry_id TEXT REFERENCES journal_entries(id),
+			payslips_count INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(org_id, period)
+		);
+
+		CREATE TABLE IF NOT EXISTS payslips (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			payroll_run_id TEXT REFERENCES payroll_runs(id) ON DELETE CASCADE,
+			employee_id TEXT NOT NULL REFERENCES employees(id),
+			period TEXT NOT NULL,
+			salary_type TEXT NOT NULL DEFAULT 'hourly',
+			hourly_rate REAL NOT NULL DEFAULT 0.0,
+			monthly_salary REAL NOT NULL DEFAULT 0.0,
+			regular_hours REAL NOT NULL DEFAULT 0.0,
+			overtime_hours REAL NOT NULL DEFAULT 0.0,
+			gross_pay REAL NOT NULL DEFAULT 0.0,
+			tax_withholding REAL NOT NULL DEFAULT 0.0,
+			social_contributions REAL NOT NULL DEFAULT 0.0,
+			benefits_deductions REAL NOT NULL DEFAULT 0.0,
+			net_pay REAL NOT NULL DEFAULT 0.0,
+			status TEXT NOT NULL DEFAULT 'generated', -- generated, paid
+			payment_date TEXT NOT NULL DEFAULT '',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(org_id, payroll_run_id, employee_id)
+		);
+
+		-- 4. Leave Policies & PTO Management
+		CREATE TABLE IF NOT EXISTS leave_policies (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			name TEXT NOT NULL,
+			code TEXT NOT NULL, -- vacation, sick, parental, unpaid
+			annual_days INTEGER NOT NULL DEFAULT 15,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(org_id, code)
+		);
+
+		CREATE TABLE IF NOT EXISTS leave_requests (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			employee_id TEXT NOT NULL REFERENCES employees(id),
+			leave_type TEXT NOT NULL,
+			start_date TEXT NOT NULL,
+			end_date TEXT NOT NULL,
+			days_count INTEGER NOT NULL DEFAULT 1,
+			reason TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'pending', -- pending, approved, rejected
+			reviewed_by TEXT NOT NULL DEFAULT '',
+			review_notes TEXT NOT NULL DEFAULT '',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		-- 5. HR Document Vault & Compliance
+		CREATE TABLE IF NOT EXISTS hr_documents (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			employee_id TEXT NOT NULL REFERENCES employees(id),
+			title TEXT NOT NULL,
+			document_type TEXT NOT NULL, -- contract, nda, id_proof, evaluation, tax_form
+			file_name TEXT NOT NULL,
+			file_content TEXT NOT NULL,
+			file_size INTEGER NOT NULL DEFAULT 0,
+			uploaded_by TEXT NOT NULL DEFAULT 'HR Operations',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		-- 6. Indexes
+		CREATE INDEX IF NOT EXISTS idx_timeclock_emp ON timeclock_events(org_id, employee_id, timestamp);
+		CREATE INDEX IF NOT EXISTS idx_payroll_runs_period ON payroll_runs(org_id, period);
+		CREATE INDEX IF NOT EXISTS idx_payslips_emp ON payslips(org_id, employee_id, period);
+		CREATE INDEX IF NOT EXISTS idx_leave_requests_emp ON leave_requests(org_id, employee_id, status);
+		CREATE INDEX IF NOT EXISTS idx_hr_documents_emp ON hr_documents(org_id, employee_id, document_type);
+
+		-- 7. Chart of Accounts: Seed Standard Payroll Accounts
+		INSERT OR IGNORE INTO accounts (id, org_id, code, name, type, normal_balance, is_active)
+		SELECT 'acc_5200_' || id, id, '5200', 'Salaries & Wages Expense', 'expense', 'debit', 1 FROM organizations;
+
+		INSERT OR IGNORE INTO accounts (id, org_id, code, name, type, normal_balance, is_active)
+		SELECT 'acc_2150_' || id, id, '2150', 'Payroll Withholding Taxes & Deductions', 'liability', 'credit', 1 FROM organizations;
+
+		INSERT OR IGNORE INTO accounts (id, org_id, code, name, type, normal_balance, is_active)
+		SELECT 'acc_2200_' || id, id, '2200', 'Payroll Clearing & Accrued Wages', 'liability', 'credit', 1 FROM organizations;
+
+		-- 8. Seed Default Leave Policies
+		INSERT OR IGNORE INTO leave_policies (id, org_id, name, code, annual_days)
+		SELECT 'lp_vac_' || id, id, 'Paid Vacation Time', 'vacation', 15 FROM organizations;
+
+		INSERT OR IGNORE INTO leave_policies (id, org_id, name, code, annual_days)
+		SELECT 'lp_sick_' || id, id, 'Sick & Medical Leave', 'sick', 10 FROM organizations;
+
+		INSERT OR IGNORE INTO leave_policies (id, org_id, name, code, annual_days)
+		SELECT 'lp_par_' || id, id, 'Parental & Family Leave', 'parental', 30 FROM organizations;
+
+		INSERT OR IGNORE INTO leave_policies (id, org_id, name, code, annual_days)
+		SELECT 'lp_unp_' || id, id, 'Unpaid Leave of Absence', 'unpaid', 0 FROM organizations;
+		`,
+	},
+	{
+		Version: 10,
+		Name:    "010_phase7_financial_analytics_and_exports",
+		SQL: `
+		CREATE TABLE IF NOT EXISTS saved_reports (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			name TEXT NOT NULL,
+			report_type TEXT NOT NULL, -- pnl, balance_sheet, cash_flow, aging_ar, aging_ap, inventory_valuation, sales_velocity
+			parameters_json TEXT NOT NULL DEFAULT '{}',
+			created_by TEXT NOT NULL DEFAULT 'system',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS data_exports (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			export_type TEXT NOT NULL, -- pnl, balance_sheet, invoices, purchase_orders, employees, inventory
+			file_format TEXT NOT NULL, -- csv, pdf, json
+			record_count INTEGER NOT NULL DEFAULT 0,
+			file_size_bytes INTEGER NOT NULL DEFAULT 0,
+			created_by TEXT NOT NULL DEFAULT 'system',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_saved_reports_org ON saved_reports(org_id, report_type);
+		CREATE INDEX IF NOT EXISTS idx_data_exports_org ON data_exports(org_id, created_at);
+		`,
+	},
+	{
+		Version: 11,
+		Name:    "011_phase8_autonomous_mcp_platform_and_webhooks",
+		SQL: `
+		CREATE TABLE IF NOT EXISTS webhook_subscriptions (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			name TEXT NOT NULL,
+			url TEXT NOT NULL,
+			secret TEXT NOT NULL,
+			event_types TEXT NOT NULL DEFAULT '["*"]',
+			is_active BOOLEAN NOT NULL DEFAULT 1,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS webhook_deliveries (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			subscription_id TEXT NOT NULL REFERENCES webhook_subscriptions(id),
+			event_id TEXT NOT NULL,
+			event_type TEXT NOT NULL,
+			payload_json TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending', -- pending, delivered, failed
+			status_code INTEGER DEFAULT 0,
+			response_body TEXT DEFAULT '',
+			retry_count INTEGER NOT NULL DEFAULT 0,
+			max_retries INTEGER NOT NULL DEFAULT 3,
+			next_retry_at DATETIME,
+			delivered_at DATETIME,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS agent_configs (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			name TEXT NOT NULL,
+			api_key_hash TEXT NOT NULL UNIQUE,
+			tool_quota_per_minute INTEGER NOT NULL DEFAULT 60,
+			daily_budget_cents INTEGER NOT NULL DEFAULT 5000,
+			current_day_usage_cents INTEGER NOT NULL DEFAULT 0,
+			concurrent_limit INTEGER NOT NULL DEFAULT 5,
+			active_slots INTEGER NOT NULL DEFAULT 0,
+			is_active BOOLEAN NOT NULL DEFAULT 1,
+			last_used_at DATETIME,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS agent_executions (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			agent_id TEXT NOT NULL,
+			tool_name TEXT NOT NULL,
+			category TEXT NOT NULL DEFAULT 'read_only',
+			arguments_json TEXT NOT NULL DEFAULT '{}',
+			result_json TEXT NOT NULL DEFAULT '{}',
+			is_error BOOLEAN NOT NULL DEFAULT 0,
+			error_message TEXT DEFAULT '',
+			duration_ms INTEGER NOT NULL DEFAULT 0,
+			cost_cents INTEGER NOT NULL DEFAULT 0,
+			mutations_json TEXT NOT NULL DEFAULT '[]',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		ALTER TABLE agent_executions ADD COLUMN error_message TEXT DEFAULT '';
+		ALTER TABLE agent_executions ADD COLUMN cost_cents INTEGER NOT NULL DEFAULT 0;
+		ALTER TABLE agent_executions ADD COLUMN mutations_json TEXT NOT NULL DEFAULT '[]';
+
+		CREATE TABLE IF NOT EXISTS agent_escalations (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			agent_id TEXT NOT NULL,
+			execution_id TEXT,
+			title TEXT NOT NULL,
+			reason TEXT NOT NULL, -- ambiguous_input, negative_sentiment, high_risk_threshold, policy_violation
+			status TEXT NOT NULL DEFAULT 'pending', -- pending, approved, rejected, resolved
+			input_context_json TEXT NOT NULL DEFAULT '{}',
+			recommended_action TEXT DEFAULT '',
+			reviewer_id TEXT DEFAULT '',
+			reviewer_notes TEXT DEFAULT '',
+			resolved_at DATETIME,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS agent_context_memory (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			category TEXT NOT NULL DEFAULT 'company_profile', -- company_profile, financial_policies, supplier_lead_times, tax_currency
+			key TEXT NOT NULL,
+			value TEXT NOT NULL,
+			description TEXT DEFAULT '',
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(org_id, key)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_webhook_sub_org ON webhook_subscriptions(org_id, is_active);
+		CREATE INDEX IF NOT EXISTS idx_webhook_deliv_sub ON webhook_deliveries(subscription_id, status);
+		CREATE INDEX IF NOT EXISTS idx_agent_configs_org ON agent_configs(org_id);
+		CREATE INDEX IF NOT EXISTS idx_agent_exec_org ON agent_executions(org_id, created_at);
+		CREATE INDEX IF NOT EXISTS idx_agent_escal_org ON agent_escalations(org_id, status);
+		CREATE INDEX IF NOT EXISTS idx_agent_ctx_org ON agent_context_memory(org_id, category);
+
+		-- Seed default agent config
+		INSERT OR IGNORE INTO agent_configs (id, org_id, name, api_key_hash, tool_quota_per_minute, daily_budget_cents, concurrent_limit)
+		SELECT 'cfg_claude_desktop_' || id, id, 'Claude Desktop Assistant', 'hash_claude_desktop_default', 60, 10000, 5 FROM organizations;
+
+		INSERT OR IGNORE INTO agent_configs (id, org_id, name, api_key_hash, tool_quota_per_minute, daily_budget_cents, concurrent_limit)
+		SELECT 'cfg_auto_procure_' || id, id, 'Autonomous Procurement Daemon', 'hash_auto_procure_default', 30, 5000, 3 FROM organizations;
+
+		-- Seed default context memory
+		INSERT OR IGNORE INTO agent_context_memory (id, org_id, category, key, value, description)
+		SELECT 'ctx_comp_name_' || id, id, 'company_profile', 'company_legal_name', 'AO Sphere Global Inc.', 'Official registered entity name' FROM organizations;
+
+		INSERT OR IGNORE INTO agent_context_memory (id, org_id, category, key, value, description)
+		SELECT 'ctx_currency_' || id, id, 'tax_currency', 'active_currency', 'USD', 'Default operating currency' FROM organizations;
+
+		INSERT OR IGNORE INTO agent_context_memory (id, org_id, category, key, value, description)
+		SELECT 'ctx_tax_rate_' || id, id, 'tax_currency', 'standard_sales_tax_rate', '0.0825', 'Standard sales tax percentage (8.25%)' FROM organizations;
+
+		INSERT OR IGNORE INTO agent_context_memory (id, org_id, category, key, value, description)
+		SELECT 'ctx_po_limit_' || id, id, 'financial_policies', 'po_auto_approval_threshold_cents', '50000', 'Purchase orders above $500.00 require human manager signoff' FROM organizations;
+
+		INSERT OR IGNORE INTO agent_context_memory (id, org_id, category, key, value, description)
+		SELECT 'ctx_lead_time_' || id, id, 'supplier_lead_times', 'standard_reorder_lead_days', '7', 'Average supplier lead time for inventory reorders' FROM organizations;
+		`,
+	},
+	{
+		Version: 12,
+		Name:    "012_phase9_enterprise_multitenancy_auth_compliance",
+		SQL: `
+		-- 1. Multi-Tenant Organization Associations
+		CREATE TABLE IF NOT EXISTS user_organizations (
+			user_id TEXT NOT NULL REFERENCES users(id),
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			role TEXT NOT NULL DEFAULT 'member',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY(user_id, org_id)
+		);
+
+		-- Seed EMEA organization for multi-tenant switching
+		INSERT OR IGNORE INTO organizations (id, name, slug)
+		VALUES ('org_emea', 'AO Sphere EMEA Operations', 'emea');
+
+		-- Associate existing users with their default org and seed EMEA membership for admin
+		INSERT OR IGNORE INTO user_organizations (user_id, org_id, role)
+		SELECT id, org_id, role FROM users;
+
+		INSERT OR IGNORE INTO user_organizations (user_id, org_id, role)
+		SELECT id, 'org_emea', 'admin' FROM users WHERE id IN ('usr_admin', 'usr_dev');
+
+		-- 2. 2FA / TOTP and Session Activity Enhancements
+		ALTER TABLE users ADD COLUMN totp_secret TEXT DEFAULT '';
+		ALTER TABLE users ADD COLUMN totp_enabled BOOLEAN NOT NULL DEFAULT 0;
+		ALTER TABLE users ADD COLUMN recovery_codes_json TEXT DEFAULT '[]';
+		ALTER TABLE users ADD COLUMN last_active_at DATETIME;
+		UPDATE users SET last_active_at = CURRENT_TIMESTAMP WHERE last_active_at IS NULL;
+
+		-- 3. User Invitations & Password Resets
+		CREATE TABLE IF NOT EXISTS user_invitations (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			email TEXT NOT NULL,
+			role TEXT NOT NULL DEFAULT 'member',
+			token_hash TEXT NOT NULL UNIQUE,
+			invited_by TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'pending',
+			expires_at DATETIME NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS password_resets (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL REFERENCES users(id),
+			token_hash TEXT NOT NULL UNIQUE,
+			status TEXT NOT NULL DEFAULT 'pending',
+			expires_at DATETIME NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		-- 4. Enterprise SSO Configs (OIDC / SAML)
+		CREATE TABLE IF NOT EXISTS sso_configs (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			provider TEXT NOT NULL,
+			client_id TEXT NOT NULL DEFAULT '',
+			client_secret TEXT NOT NULL DEFAULT '',
+			issuer_url TEXT NOT NULL DEFAULT '',
+			domain_mapping TEXT NOT NULL DEFAULT '',
+			is_enabled BOOLEAN NOT NULL DEFAULT 1,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(org_id, provider)
+		);
+
+		-- 5. Granular Custom Role Builder
+		CREATE TABLE IF NOT EXISTS custom_roles (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			name TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			permissions_json TEXT NOT NULL DEFAULT '[]',
+			is_system BOOLEAN NOT NULL DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(org_id, name)
+		);
+
+		-- Seed system roles
+		INSERT OR IGNORE INTO custom_roles (id, org_id, name, description, permissions_json, is_system)
+		SELECT 'role_admin_' || id, id, 'Administrator', 'Full system access and tenant administration', '["read","manage_inventory","manage_orders","approve_orders","manage_finance","manage_payroll","manage_hr","manage_users","admin"]', 1 FROM organizations;
+
+		INSERT OR IGNORE INTO custom_roles (id, org_id, name, description, permissions_json, is_system)
+		SELECT 'role_finance_' || id, id, 'Finance Director', 'Invoicing, general ledger, payroll and budget approval', '["read","manage_orders","approve_orders","manage_finance","manage_payroll"]', 1 FROM organizations;
+
+		INSERT OR IGNORE INTO custom_roles (id, org_id, name, description, permissions_json, is_system)
+		SELECT 'role_hr_' || id, id, 'HR Specialist', 'Employee lifecycle, shifts, timesheets and leave management', '["read","manage_payroll","manage_hr","manage_users"]', 1 FROM organizations;
+
+		INSERT OR IGNORE INTO custom_roles (id, org_id, name, description, permissions_json, is_system)
+		SELECT 'role_inventory_' || id, id, 'Inventory Specialist', 'SKU catalog, multi-warehouse stock adjustments, and GRN 3-way matching', '["read","manage_inventory","manage_orders"]', 1 FROM organizations;
+
+		INSERT OR IGNORE INTO custom_roles (id, org_id, name, description, permissions_json, is_system)
+		SELECT 'role_auditor_' || id, id, 'Compliance Auditor', 'Read-only access to audit trail, financial ledger, and SOC2 reviews', '["read"]', 1 FROM organizations;
+
+		-- 6. Immutable Security Audit Vault with SHA-256 Chain Hashing
+		CREATE TABLE IF NOT EXISTS audit_chain_vault (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			sequence_number INTEGER NOT NULL,
+			actor_type TEXT NOT NULL DEFAULT 'user',
+			actor_id TEXT NOT NULL,
+			action TEXT NOT NULL,
+			resource_type TEXT NOT NULL,
+			resource_id TEXT NOT NULL,
+			payload_hash TEXT NOT NULL,
+			prev_block_hash TEXT NOT NULL,
+			block_hash TEXT NOT NULL,
+			timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+
+		-- 7. GDPR Privacy Requests (Export & Forget Me)
+		CREATE TABLE IF NOT EXISTS privacy_requests (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			user_id TEXT NOT NULL REFERENCES users(id),
+			request_type TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			result_json TEXT NOT NULL DEFAULT '{}',
+			requested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			completed_at DATETIME
+		);
+
+		-- 8. SOC2 Access Reviews
+		CREATE TABLE IF NOT EXISTS soc2_access_reviews (
+			id TEXT PRIMARY KEY,
+			org_id TEXT NOT NULL REFERENCES organizations(id),
+			quarter TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			reviewed_by TEXT DEFAULT '',
+			notes TEXT DEFAULT '',
+			snapshot_json TEXT NOT NULL DEFAULT '{}',
+			reviewed_at DATETIME,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_user_orgs ON user_organizations(user_id, org_id);
+		CREATE INDEX IF NOT EXISTS idx_user_invites ON user_invitations(org_id, status);
+		CREATE INDEX IF NOT EXISTS idx_pwd_resets ON password_resets(user_id, status);
+		CREATE INDEX IF NOT EXISTS idx_audit_chain ON audit_chain_vault(org_id, sequence_number);
+		CREATE INDEX IF NOT EXISTS idx_privacy_req ON privacy_requests(org_id, user_id);
+		CREATE INDEX IF NOT EXISTS idx_soc2_rev ON soc2_access_reviews(org_id, quarter);
+		`,
+	},
 }
 
 // RunMigrations applies all pending migrations in sequential order
@@ -582,9 +1028,19 @@ func RunMigrations(db *sql.DB) error {
 			return fmt.Errorf("failed to start migration transaction: %w", err)
 		}
 
-		if _, err := tx.Exec(m.SQL); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("failed executing migration %d (%s): %w", m.Version, m.Name, err)
+		statements := strings.Split(m.SQL, ";")
+		for _, stmt := range statements {
+			stmt = strings.TrimSpace(stmt)
+			if stmt == "" {
+				continue
+			}
+			if _, err := tx.Exec(stmt); err != nil {
+				if strings.Contains(err.Error(), "duplicate column name") {
+					continue
+				}
+				tx.Rollback()
+				return fmt.Errorf("failed executing migration %d (%s) on stmt [%s]: %w", m.Version, m.Name, stmt, err)
+			}
 		}
 
 		if _, err := tx.Exec(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)`,

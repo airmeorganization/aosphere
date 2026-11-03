@@ -126,6 +126,14 @@
           </select>
         </div>
 
+        <!-- Multi-Company / Multi-Tenant Switcher -->
+        <div class="org-switcher-wrapper">
+          <select id="tenant-org-select" class="currency-dropdown" onchange="app.switchOrganization(this.value)" title="Active Organization / Tenant">
+            <option value="org_default">AOSphere Global Corp (aosphere)</option>
+            <option value="org_emea">AO Sphere EMEA Operations (emea)</option>
+          </select>
+        </div>
+
         <!-- Pending Approvals Badge Button -->
         <button class="icon-btn approval-btn" onclick="app.setTab('approvals')" title="Approval Inbox">
           <i data-lucide="shield-check" class="w-4 h-4 text-slate-600"></i>
@@ -173,8 +181,12 @@
             <span>Finance & Billing</span>
           </button>
           <button class="nav-item" data-tab="hr" onclick="app.setTab('hr')">
-            <i data-lucide="calendar" class="w-4 h-4 shrink-0"></i>
-            <span>Shifts & Team</span>
+            <i data-lucide="users" class="w-4 h-4 shrink-0"></i>
+            <span>HR & Payroll</span>
+          </button>
+          <button class="nav-item" data-tab="reports" onclick="app.setTab('reports')">
+            <i data-lucide="bar-chart-3" class="w-4 h-4 shrink-0"></i>
+            <span>Intelligence & Reports</span>
           </button>
           <button class="nav-item" data-tab="tasks" onclick="app.setTab('tasks')">
             <i data-lucide="check-square" class="w-4 h-4 shrink-0"></i>
@@ -203,6 +215,14 @@
           <button class="nav-item" data-tab="audit" onclick="app.setTab('audit')">
             <i data-lucide="file-text" class="w-4 h-4 shrink-0"></i>
             <span>Dual-Actor Audit</span>
+          </button>
+          <button class="nav-item" data-tab="agents" onclick="app.setTab('agents')">
+            <i data-lucide="bot" class="w-4 h-4 shrink-0"></i>
+            <span>Agent Platform & Webhooks</span>
+          </button>
+          <button class="nav-item" data-tab="compliance" onclick="app.setTab('compliance')">
+            <i data-lucide="lock" class="w-4 h-4 shrink-0"></i>
+            <span>Security & Compliance</span>
           </button>
         </nav>
 

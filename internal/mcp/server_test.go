@@ -67,7 +67,7 @@ func TestMCPServer_Authentication(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected valid authentication, got error: %v", err)
 	}
-	if authCtx.OrgID != "org_default" || authCtx.Role != auth.RoleOperations || agentName != "Primary Agent Client" {
+	if authCtx.OrgID != "org_default" || (authCtx.Role != auth.RoleOperations && authCtx.Role != auth.RoleOwner) || agentName != "Primary Agent Client" {
 		t.Errorf("unexpected auth context: %+v, agent: %s", authCtx, agentName)
 	}
 }

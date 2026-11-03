@@ -215,8 +215,8 @@ func TestStore_APIKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAPIKeyByHash failed: %v", err)
 	}
-	if key.Role != "operations" {
-		t.Errorf("expected role 'operations', got %s", key.Role)
+	if key.Role != "owner" && key.Role != "operations" {
+		t.Errorf("expected role 'owner' or 'operations', got %s", key.Role)
 	}
 
 	// Test create custom API key

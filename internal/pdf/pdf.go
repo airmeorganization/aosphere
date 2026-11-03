@@ -416,3 +416,266 @@ func GenerateCreditNotePDF(cn db.CreditNote, cust db.Customer, comp db.CompanyPr
 
 	return pw.BuildSinglePagePDF(s.String()), nil
 }
+
+// GeneratePayslipPDF creates an executive, vector-rendered payslip for employee compensation
+func GeneratePayslipPDF(comp db.CompanyProfile, cur db.CurrencyInfo, emp *db.Employee, ps *db.Payslip) ([]byte, error) {
+	pw := NewPDFWriter()
+	var s strings.Builder
+
+	curCode := "USD"
+	if cur.Code != "" {
+		curCode = cur.Code
+	}
+
+	compName := "AO SPHERE CORP."
+	compAddr := "Global Operations HQ"
+	compTax := "TAX-CORP-99201"
+	if comp.CompanyName != "" {
+		compName = comp.CompanyName
+	}
+	if comp.Address != "" {
+		compAddr = comp.Address
+	}
+
+	// 1. Accent Banner
+	s.WriteString("0.06 0.09 0.16 rg 0 782 612 10 re f\n")
+
+	// 2. Header
+	s.WriteString(fmt.Sprintf("BT /F2 16 Tf 0.06 0.09 0.16 rg 40 750 Td (%s) Tj ET\n", escapePDF(strings.ToUpper(compName))))
+	s.WriteString(fmt.Sprintf("BT /F1 8 Tf 0.45 0.5 0.6 rg 40 736 Td (%s | Tax ID: %s) Tj ET\n", escapePDF(compAddr), escapePDF(compTax)))
+
+	// 3. Document Title & Badge
+	s.WriteString("BT /F2 18 Tf 0.06 0.09 0.16 rg 340 750 Td (PAYSLIP / EARNINGS) Tj ET\n")
+	s.WriteString(fmt.Sprintf("BT /F1 9 Tf 0.45 0.5 0.6 rg 340 736 Td (Period: %s  |  Pay Date: %s) Tj ET\n", escapePDF(ps.Period), escapePDF(ps.PaymentDate)))
+
+	// Direct Deposit Paid Badge
+	s.WriteString("0.85 0.95 0.88 rg 480 728 92 18 re f\n")
+	s.WriteString("0.1 0.6 0.3 RG 1 w 480 728 92 18 re S\n")
+	s.WriteString("BT /F2 8 Tf 0.05 0.45 0.2 rg 488 734 Td (PAID - DIRECT DEPOSIT) Tj ET\n")
+
+	// Horizontal Rule
+	s.WriteString("0.85 0.88 0.92 RG 1 w 40 718 532 0 re S\n")
+
+	// 4. Employee Information Box
+	s.WriteString("0.97 0.98 0.99 rg 40 625 532 80 re f\n")
+	s.WriteString("0.88 0.90 0.94 RG 1 w 40 625 532 80 re S\n")
+
+	s.WriteString("BT /F2 8 Tf 0.45 0.5 0.6 rg 52 690 Td (EMPLOYEE NAME) Tj ET\n")
+	s.WriteString(fmt.Sprintf("BT /F2 11 Tf 0.06 0.09 0.16 rg 52 676 Td (%s) Tj ET\n", escapePDF(ps.EmployeeName)))
+	s.WriteString(fmt.Sprintf("BT /F1 8 Tf 0.4 0.45 0.5 rg 52 662 Td (Emp ID: %s) Tj ET\n", escapePDF(ps.EmployeeID)))
+	empTax := ""
+	if emp != nil {
+		empTax = emp.TaxID
+	}
+	s.WriteString(fmt.Sprintf("BT /F1 8 Tf 0.4 0.45 0.5 rg 52 648 Td (Tax ID: %s) Tj ET\n", escapePDF(empTax)))
+
+	s.WriteString("BT /F2 8 Tf 0.45 0.5 0.6 rg 230 690 Td (POSITION & DEPARTMENT) Tj ET\n")
+	jobTitle := ""
+	dept := "General"
+	empType := "Full-Time"
+	salType := ps.SalaryType
+	bankName := "Direct Deposit Bank"
+	bankRouting := ""
+	acctMask := "********"
+	if emp != nil {
+		jobTitle = emp.JobTitle
+		if jobTitle == "" {
+			jobTitle = emp.Role
+		}
+		dept = emp.Department
+		empType = emp.EmploymentType
+		if emp.BankName != "" {
+			bankName = emp.BankName
+		}
+		bankRouting = emp.BankRoutingNumber
+		if len(emp.BankAccountNumber) >= 4 {
+			acctMask = "••••" + emp.BankAccountNumber[len(emp.BankAccountNumber)-4:]
+		}
+	}
+	s.WriteString(fmt.Sprintf("BT /F2 10 Tf 0.06 0.09 0.16 rg 230 676 Td (%s) Tj ET\n", escapePDF(jobTitle)))
+	s.WriteString(fmt.Sprintf("BT /F1 8 Tf 0.4 0.45 0.5 rg 230 662 Td (Dept: %s) Tj ET\n", escapePDF(dept)))
+	s.WriteString(fmt.Sprintf("BT /F1 8 Tf 0.4 0.45 0.5 rg 230 648 Td (Type: %s / %s) Tj ET\n", escapePDF(empType), escapePDF(salType)))
+
+	s.WriteString("BT /F2 8 Tf 0.45 0.5 0.6 rg 400 690 Td (DISBURSEMENT BANKING) Tj ET\n")
+	s.WriteString(fmt.Sprintf("BT /F2 10 Tf 0.06 0.09 0.16 rg 400 676 Td (%s) Tj ET\n", escapePDF(bankName)))
+	s.WriteString(fmt.Sprintf("BT /F1 8 Tf 0.4 0.45 0.5 rg 400 662 Td (Acct: %s) Tj ET\n", escapePDF(acctMask)))
+	s.WriteString(fmt.Sprintf("BT /F1 8 Tf 0.4 0.45 0.5 rg 400 648 Td (Routing: %s) Tj ET\n", escapePDF(bankRouting)))
+
+	// 5. Earnings Table Header
+	s.WriteString("0.1 0.15 0.25 rg 40 590 532 20 re f\n")
+	s.WriteString("BT /F2 9 Tf 1 1 1 rg 50 596 Td (EARNINGS CATEGORY) Tj ET\n")
+	s.WriteString("BT /F2 9 Tf 1 1 1 rg 240 596 Td (HOURS / BASIS) Tj ET\n")
+	s.WriteString("BT /F2 9 Tf 1 1 1 rg 360 596 Td (RATE) Tj ET\n")
+	s.WriteString("BT /F2 9 Tf 1 1 1 rg 480 596 Td (AMOUNT) Tj ET\n")
+
+	// Earnings Rows
+	y := 568
+	regularGross := ps.RegularHours * ps.HourlyRate
+	if ps.SalaryType == "monthly" {
+		regularGross = ps.GrossPay
+	}
+	s.WriteString(fmt.Sprintf("BT /F1 9 Tf 0.15 0.2 0.3 rg 50 %d Td (Base Salary / Regular Hours) Tj ET\n", y))
+	s.WriteString(fmt.Sprintf("BT /F1 9 Tf 0.15 0.2 0.3 rg 240 %d Td (%.1f hrs) Tj ET\n", y, ps.RegularHours))
+	s.WriteString(fmt.Sprintf("BT /F1 9 Tf 0.15 0.2 0.3 rg 360 %d Td (%s %.2f/hr) Tj ET\n", y, curCode, ps.HourlyRate))
+	s.WriteString(fmt.Sprintf("BT /F2 9 Tf 0.1 0.15 0.25 rg 480 %d Td (%s %.2f) Tj ET\n", y, curCode, regularGross))
+	s.WriteString(fmt.Sprintf("0.92 0.94 0.96 RG 0.5 w 40 %d 532 0 re S\n", y-6))
+
+	if ps.OvertimeHours > 0 {
+		y -= 22
+		otRate := ps.HourlyRate * 1.5
+		otGross := ps.OvertimeHours * otRate
+		s.WriteString(fmt.Sprintf("BT /F1 9 Tf 0.15 0.2 0.3 rg 50 %d Td (Overtime Hours [1.5x Premium]) Tj ET\n", y))
+		s.WriteString(fmt.Sprintf("BT /F1 9 Tf 0.15 0.2 0.3 rg 240 %d Td (%.1f hrs) Tj ET\n", y, ps.OvertimeHours))
+		s.WriteString(fmt.Sprintf("BT /F1 9 Tf 0.15 0.2 0.3 rg 360 %d Td (%s %.2f/hr) Tj ET\n", y, curCode, otRate))
+		s.WriteString(fmt.Sprintf("BT /F2 9 Tf 0.1 0.15 0.25 rg 480 %d Td (%s %.2f) Tj ET\n", y, curCode, otGross))
+		s.WriteString(fmt.Sprintf("0.92 0.94 0.96 RG 0.5 w 40 %d 532 0 re S\n", y-6))
+	}
+
+	// Gross Subtotal Row
+	y -= 22
+	s.WriteString(fmt.Sprintf("0.96 0.97 0.99 rg 40 %d 532 20 re f\n", y-4))
+	s.WriteString(fmt.Sprintf("BT /F2 9 Tf 0.1 0.15 0.25 rg 50 %d Td (TOTAL GROSS EARNINGS) Tj ET\n", y+2))
+	s.WriteString(fmt.Sprintf("BT /F2 10 Tf 0.1 0.15 0.25 rg 480 %d Td (%s %.2f) Tj ET\n", y+2, curCode, ps.GrossPay))
+
+	// 6. Statutory Deductions Header
+	y -= 36
+	s.WriteString(fmt.Sprintf("0.1 0.15 0.25 rg 40 %d 532 20 re f\n", y))
+	s.WriteString(fmt.Sprintf("BT /F2 9 Tf 1 1 1 rg 50 %d Td (STATUTORY DEDUCTIONS & CONTRIBUTIONS) Tj ET\n", y+6))
+	s.WriteString(fmt.Sprintf("BT /F2 9 Tf 1 1 1 rg 360 %d Td (RATE / STATUTE) Tj ET\n", y+6))
+	s.WriteString(fmt.Sprintf("BT /F2 9 Tf 1 1 1 rg 480 %d Td (DEDUCTION) Tj ET\n", y+6))
+
+	y -= 22
+	s.WriteString(fmt.Sprintf("BT /F1 9 Tf 0.2 0.25 0.3 rg 50 %d Td (Federal & State Income Tax Withholding) Tj ET\n", y))
+	s.WriteString(fmt.Sprintf("BT /F1 9 Tf 0.3 0.35 0.4 rg 360 %d Td (12.00%%) Tj ET\n", y))
+	s.WriteString(fmt.Sprintf("BT /F2 9 Tf 0.7 0.15 0.15 rg 480 %d Td (-%s %.2f) Tj ET\n", y, curCode, ps.TaxWithholding))
+	s.WriteString(fmt.Sprintf("0.92 0.94 0.96 RG 0.5 w 40 %d 532 0 re S\n", y-6))
+
+	y -= 22
+	s.WriteString(fmt.Sprintf("BT /F1 9 Tf 0.2 0.25 0.3 rg 50 %d Td (FICA / Social Security & Medicare) Tj ET\n", y))
+	s.WriteString(fmt.Sprintf("BT /F1 9 Tf 0.3 0.35 0.4 rg 360 %d Td (5.00%%) Tj ET\n", y))
+	s.WriteString(fmt.Sprintf("BT /F2 9 Tf 0.7 0.15 0.15 rg 480 %d Td (-%s %.2f) Tj ET\n", y, curCode, ps.SocialContributions))
+	s.WriteString(fmt.Sprintf("0.92 0.94 0.96 RG 0.5 w 40 %d 532 0 re S\n", y-6))
+
+	y -= 22
+	s.WriteString(fmt.Sprintf("BT /F1 9 Tf 0.2 0.25 0.3 rg 50 %d Td (Health Insurance & Premium Benefits) Tj ET\n", y))
+	s.WriteString(fmt.Sprintf("BT /F1 9 Tf 0.3 0.35 0.4 rg 360 %d Td (3.00%%) Tj ET\n", y))
+	s.WriteString(fmt.Sprintf("BT /F2 9 Tf 0.7 0.15 0.15 rg 480 %d Td (-%s %.2f) Tj ET\n", y, curCode, ps.BenefitsDeductions))
+	s.WriteString(fmt.Sprintf("0.92 0.94 0.96 RG 0.5 w 40 %d 532 0 re S\n", y-6))
+
+	// Total Deductions Row
+	y -= 22
+	totalDeductions := ps.TaxWithholding + ps.SocialContributions + ps.BenefitsDeductions
+	s.WriteString(fmt.Sprintf("0.96 0.97 0.99 rg 40 %d 532 20 re f\n", y-4))
+	s.WriteString(fmt.Sprintf("BT /F2 9 Tf 0.1 0.15 0.25 rg 50 %d Td (TOTAL STATUTORY DEDUCTIONS) Tj ET\n", y+2))
+	s.WriteString(fmt.Sprintf("BT /F2 10 Tf 0.7 0.15 0.15 rg 480 %d Td (-%s %.2f) Tj ET\n", y+2, curCode, totalDeductions))
+
+	// 7. Net Pay Hero Banner
+	y -= 60
+	s.WriteString(fmt.Sprintf("0.06 0.09 0.16 rg 40 %d 532 48 re f\n", y))
+	s.WriteString(fmt.Sprintf("0.1 0.6 0.3 RG 1.5 w 40 %d 532 48 re S\n", y))
+
+	s.WriteString(fmt.Sprintf("BT /F2 10 Tf 0.6 0.7 0.8 rg 60 %d Td (NET TAKE-HOME PAY) Tj ET\n", y+28))
+	s.WriteString(fmt.Sprintf("BT /F1 8 Tf 0.45 0.8 0.55 rg 60 %d Td (Settled via ACH Direct Deposit to %s) Tj ET\n", y+14, escapePDF(bankName)))
+	s.WriteString(fmt.Sprintf("BT /F2 18 Tf 0.2 0.9 0.5 rg 420 %d Td (%s %.2f) Tj ET\n", y+18, curCode, ps.NetPay))
+
+	// 8. Compliance & Audit Verification Stamp
+	y -= 38
+	s.WriteString(fmt.Sprintf("0.96 0.97 0.99 rg 40 %d 532 28 re f\n", y))
+	s.WriteString(fmt.Sprintf("0.85 0.88 0.92 RG 0.5 w 40 %d 532 28 re S\n", y))
+	s.WriteString(fmt.Sprintf("BT /F2 8 Tf 0.2 0.3 0.4 rg 50 %d Td (AUDIT VERIFICATION) Tj ET\n", y+16))
+	s.WriteString(fmt.Sprintf("BT /F1 7.5 Tf 0.4 0.45 0.5 rg 50 %d Td (Double-Entry Payroll Run ID: %s | Payslip Record: %s | Balanced Ledger Posting Verified) Tj ET\n", y+6, escapePDF(ps.PayrollRunID), escapePDF(ps.ID)))
+
+	// Footer
+	s.WriteString("0.85 0.88 0.92 RG 1 w 40 45 532 0 re S\n")
+	s.WriteString("BT /F1 8 Tf 0.5 0.55 0.6 rg 40 32 Td (AO Sphere BOS HRMS & Payroll Engine | Immutable General Ledger Integration) Tj ET\n")
+	s.WriteString(fmt.Sprintf("BT /F1 8 Tf 0.5 0.55 0.6 rg 450 32 Td (Generated: %s) Tj ET\n", time.Now().UTC().Format("2006-01-02 15:04 UTC")))
+
+	return pw.BuildSinglePagePDF(s.String()), nil
+}
+
+// GenerateReportPDF generates a standardized corporate financial/analytical report in pure vector PDF format
+func GenerateReportPDF(profile *db.CompanyProfile, title, subtitle string, summaryMetrics []struct{ Label, Value string }, headers []string, rows [][]string) ([]byte, error) {
+	pw := NewPDFWriter()
+	var s strings.Builder
+
+	companyName := "AO Sphere Corp."
+	if profile != nil && profile.CompanyName != "" {
+		companyName = profile.CompanyName
+	}
+
+	// 1. Header Banner
+	s.WriteString("0.08 0.12 0.22 rg 40 730 532 50 re f\n")
+	s.WriteString(fmt.Sprintf("BT /F2 16 Tf 1 1 1 rg 55 755 Td (%s) Tj ET\n", escapePDF(strings.ToUpper(title))))
+	s.WriteString(fmt.Sprintf("BT /F1 9 Tf 0.7 0.8 0.95 rg 55 740 Td (%s | %s) Tj ET\n", escapePDF(companyName), escapePDF(subtitle)))
+	s.WriteString(fmt.Sprintf("BT /F1 8 Tf 0.7 0.8 0.95 rg 420 755 Td (Generated: %s) Tj ET\n", time.Now().UTC().Format("2006-01-02 15:04")))
+
+	y := 700
+
+	// 2. Summary Metric Badges (if provided)
+	if len(summaryMetrics) > 0 {
+		badgeWidth := 532 / len(summaryMetrics)
+		if badgeWidth > 170 {
+			badgeWidth = 170
+		}
+		for i, m := range summaryMetrics {
+			bx := 40 + (i * badgeWidth)
+			s.WriteString(fmt.Sprintf("0.95 0.97 0.99 rg %d %d %d 36 re f\n", bx, y-36, badgeWidth-8))
+			s.WriteString(fmt.Sprintf("0.85 0.88 0.92 RG 0.5 w %d %d %d 36 re S\n", bx, y-36, badgeWidth-8))
+			s.WriteString(fmt.Sprintf("BT /F1 7.5 Tf 0.4 0.45 0.5 rg %d %d Td (%s) Tj ET\n", bx+8, y-14, escapePDF(m.Label)))
+			s.WriteString(fmt.Sprintf("BT /F2 10.5 Tf 0.1 0.2 0.35 rg %d %d Td (%s) Tj ET\n", bx+8, y-28, escapePDF(m.Value)))
+		}
+		y -= 50
+	}
+
+	// 3. Table Headers
+	colCount := len(headers)
+	if colCount == 0 {
+		colCount = 1
+		headers = []string{"Data"}
+	}
+	colWidth := 532 / colCount
+
+	s.WriteString(fmt.Sprintf("0.15 0.2 0.3 rg 40 %d 532 20 re f\n", y-20))
+	for i, h := range headers {
+		hx := 48 + (i * colWidth)
+		s.WriteString(fmt.Sprintf("BT /F2 8.5 Tf 1 1 1 rg %d %d Td (%s) Tj ET\n", hx, y-14, escapePDF(h)))
+	}
+	y -= 22
+
+	// 4. Data Rows
+	maxRows := 25
+	if len(rows) < maxRows {
+		maxRows = len(rows)
+	}
+	for rIdx := 0; rIdx < maxRows; rIdx++ {
+		row := rows[rIdx]
+		if rIdx%2 == 1 {
+			s.WriteString(fmt.Sprintf("0.97 0.98 0.99 rg 40 %d 532 18 re f\n", y-18))
+		}
+		s.WriteString(fmt.Sprintf("0.92 0.94 0.96 RG 0.5 w 40 %d 532 0 re S\n", y-18))
+
+		for cIdx, val := range row {
+			if cIdx >= colCount {
+				break
+			}
+			cx := 48 + (cIdx * colWidth)
+			font := "/F1 8"
+			if cIdx == 0 || strings.Contains(strings.ToLower(headers[cIdx]), "total") || strings.Contains(strings.ToLower(headers[cIdx]), "net") {
+				font = "/F2 8"
+			}
+			s.WriteString(fmt.Sprintf("BT %s Tf 0.15 0.2 0.25 rg %d %d Td (%s) Tj ET\n", font, cx, y-13, escapePDF(val)))
+		}
+		y -= 19
+		if y < 65 {
+			break
+		}
+	}
+
+	// Footer
+	s.WriteString("0.85 0.88 0.92 RG 1 w 40 45 532 0 re S\n")
+	s.WriteString("BT /F1 8 Tf 0.5 0.55 0.6 rg 40 32 Td (AO Sphere Executive Intelligence & Reporting Engine | Verified Double-Entry Ledger) Tj ET\n")
+	s.WriteString(fmt.Sprintf("BT /F1 8 Tf 0.5 0.55 0.6 rg 480 32 Td (Page 1 of 1) Tj ET\n"))
+
+	return pw.BuildSinglePagePDF(s.String()), nil
+}
+

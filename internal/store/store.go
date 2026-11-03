@@ -126,6 +126,19 @@ func (s *Store) DecideApproval(id, decision, decidedBy string) error {
 	return s.DecideApprovalForOrg("org_default", id, decision, decidedBy)
 }
 
+func (s *Store) CreateApprovalForOrg(orgID, actionType, title, description, payloadJSON, requestedByType, requestedByID string) (string, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	apprID := "appr_" + uuid.New().String()[:12]
+	_, err := s.db.Exec(`
+		INSERT INTO approvals (id, org_id, action_type, title, description, payload_json, status, requested_by_type, requested_by_id, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+		apprID, orgID, actionType, title, description, payloadJSON, requestedByType, requestedByID, time.Now(),
+	)
+	return apprID, err
+}
+
 func (s *Store) DecideApprovalForOrg(orgID, id, decision, decidedBy string) error {
 	if orgID == "" {
 		orgID = "org_default"
@@ -1605,26 +1618,498 @@ func (s *Store) GetJournalEntriesForOrg(orgID string, limit int) ([]db.JournalEn
 		if err := rows.Scan(&je.ID, &je.OrgID, &je.EntryNumber, &je.SourceType, &je.SourceID, &je.Memo, &je.Status, &je.PostedAt, &je.CreatedBy, &je.CreatedAt); err != nil {
 			return nil, err
 		}
+		entries = append(entries, je)
+	}
+	rows.Close()
 
+	for i := range entries {
 		// Fetch lines for this entry
 		lineRows, err := s.db.Query(`
 			SELECT jl.id, jl.org_id, jl.entry_id, jl.account_id, a.code, a.name, jl.entry_type, jl.amount_cents, jl.description, jl.created_at
 			FROM journal_lines jl
 			JOIN accounts a ON jl.account_id = a.id
-			WHERE jl.entry_id = ? ORDER BY jl.entry_type DESC, jl.rowid ASC`, je.ID)
+			WHERE jl.entry_id = ? ORDER BY jl.entry_type DESC, jl.rowid ASC`, entries[i].ID)
 		if err == nil {
 			for lineRows.Next() {
 				var l db.JournalLine
 				if err := lineRows.Scan(&l.ID, &l.OrgID, &l.EntryID, &l.AccountID, &l.AccountCode, &l.AccountName, &l.EntryType, &l.AmountCents, &l.Description, &l.CreatedAt); err == nil {
 					l.Amount = float64(l.AmountCents) / 100.0
-					je.Lines = append(je.Lines, l)
+					entries[i].Lines = append(entries[i].Lines, l)
 				}
 			}
 			lineRows.Close()
 		}
-
-		entries = append(entries, je)
 	}
 	return entries, nil
 }
+
+// ----------------- PHASE 8: AUTONOMOUS MCP AGENT PLATFORM & WEBHOOKS -----------------
+
+// Webhooks
+func (s *Store) CreateWebhookSubscription(sub db.WebhookSubscription) (*db.WebhookSubscription, error) {
+	if sub.ID == "" {
+		sub.ID = "wsub_" + uuid.New().String()[:12]
+	}
+	if sub.OrgID == "" {
+		sub.OrgID = "org_default"
+	}
+	if sub.EventTypes == "" {
+		sub.EventTypes = `["*"]`
+	}
+	now := time.Now()
+	sub.CreatedAt = now
+	sub.UpdatedAt = now
+	sub.IsActive = true
+
+	_, err := s.db.Exec(`
+		INSERT INTO webhook_subscriptions (id, org_id, name, url, secret, event_types, is_active, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sub.ID, sub.OrgID, sub.Name, sub.URL, sub.Secret, sub.EventTypes, sub.IsActive, sub.CreatedAt, sub.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &sub, nil
+}
+
+func (s *Store) GetWebhookSubscriptions(orgID string) ([]db.WebhookSubscription, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	rows, err := s.db.Query(`
+		SELECT id, org_id, name, url, secret, event_types, is_active, created_at, updated_at
+		FROM webhook_subscriptions
+		WHERE org_id = ? ORDER BY created_at DESC`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []db.WebhookSubscription
+	for rows.Next() {
+		var sub db.WebhookSubscription
+		if err := rows.Scan(&sub.ID, &sub.OrgID, &sub.Name, &sub.URL, &sub.Secret, &sub.EventTypes, &sub.IsActive, &sub.CreatedAt, &sub.UpdatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, sub)
+	}
+	return list, nil
+}
+
+func (s *Store) GetWebhookSubscription(id string) (*db.WebhookSubscription, error) {
+	var sub db.WebhookSubscription
+	err := s.db.QueryRow(`
+		SELECT id, org_id, name, url, secret, event_types, is_active, created_at, updated_at
+		FROM webhook_subscriptions WHERE id = ?`, id).Scan(
+		&sub.ID, &sub.OrgID, &sub.Name, &sub.URL, &sub.Secret, &sub.EventTypes, &sub.IsActive, &sub.CreatedAt, &sub.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &sub, nil
+}
+
+func (s *Store) DeleteWebhookSubscription(id string) error {
+	_, err := s.db.Exec("DELETE FROM webhook_subscriptions WHERE id = ?", id)
+	return err
+}
+
+func (s *Store) CreateWebhookDelivery(deliv db.WebhookDelivery) (*db.WebhookDelivery, error) {
+	if deliv.ID == "" {
+		deliv.ID = "wdel_" + uuid.New().String()[:12]
+	}
+	if deliv.OrgID == "" {
+		deliv.OrgID = "org_default"
+	}
+	if deliv.Status == "" {
+		deliv.Status = "pending"
+	}
+	if deliv.MaxRetries <= 0 {
+		deliv.MaxRetries = 3
+	}
+	deliv.CreatedAt = time.Now()
+
+	_, err := s.db.Exec(`
+		INSERT INTO webhook_deliveries (id, org_id, subscription_id, event_id, event_type, payload_json, status, status_code, response_body, retry_count, max_retries, next_retry_at, delivered_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		deliv.ID, deliv.OrgID, deliv.SubscriptionID, deliv.EventID, deliv.EventType, deliv.PayloadJSON,
+		deliv.Status, deliv.StatusCode, deliv.ResponseBody, deliv.RetryCount, deliv.MaxRetries, deliv.NextRetryAt, deliv.DeliveredAt, deliv.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &deliv, nil
+}
+
+func (s *Store) UpdateWebhookDeliveryStatus(id, status string, statusCode int, responseBody string, nextRetry *time.Time) error {
+	now := time.Now()
+	var deliveredAt *time.Time
+	if status == "delivered" {
+		deliveredAt = &now
+	}
+	_, err := s.db.Exec(`
+		UPDATE webhook_deliveries
+		SET status = ?, status_code = ?, response_body = ?, next_retry_at = ?, delivered_at = COALESCE(?, delivered_at), retry_count = retry_count + 1
+		WHERE id = ?`,
+		status, statusCode, responseBody, nextRetry, deliveredAt, id,
+	)
+	return err
+}
+
+func (s *Store) GetWebhookDeliveries(orgID string, limit int) ([]db.WebhookDelivery, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(`
+		SELECT id, org_id, subscription_id, event_id, event_type, payload_json, status, status_code, response_body, retry_count, max_retries, next_retry_at, delivered_at, created_at
+		FROM webhook_deliveries
+		WHERE org_id = ? ORDER BY created_at DESC LIMIT ?`, orgID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []db.WebhookDelivery
+	for rows.Next() {
+		var d db.WebhookDelivery
+		if err := rows.Scan(&d.ID, &d.OrgID, &d.SubscriptionID, &d.EventID, &d.EventType, &d.PayloadJSON, &d.Status, &d.StatusCode, &d.ResponseBody, &d.RetryCount, &d.MaxRetries, &d.NextRetryAt, &d.DeliveredAt, &d.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, d)
+	}
+	return list, nil
+}
+
+func (s *Store) GetWebhookDelivery(id string) (*db.WebhookDelivery, error) {
+	var d db.WebhookDelivery
+	err := s.db.QueryRow(`
+		SELECT id, org_id, subscription_id, event_id, event_type, payload_json, status, status_code, response_body, retry_count, max_retries, next_retry_at, delivered_at, created_at
+		FROM webhook_deliveries WHERE id = ?`, id).Scan(
+		&d.ID, &d.OrgID, &d.SubscriptionID, &d.EventID, &d.EventType, &d.PayloadJSON, &d.Status, &d.StatusCode, &d.ResponseBody, &d.RetryCount, &d.MaxRetries, &d.NextRetryAt, &d.DeliveredAt, &d.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
+// Agent Configs & Quotas
+func (s *Store) GetAgentConfigs(orgID string) ([]db.AgentConfig, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	rows, err := s.db.Query(`
+		SELECT id, org_id, name, api_key_hash, tool_quota_per_minute, daily_budget_cents, current_day_usage_cents, concurrent_limit, active_slots, is_active, last_used_at, created_at
+		FROM agent_configs
+		WHERE org_id = ? ORDER BY name ASC`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []db.AgentConfig
+	for rows.Next() {
+		var c db.AgentConfig
+		if err := rows.Scan(&c.ID, &c.OrgID, &c.Name, &c.APIKeyHash, &c.ToolQuotaPerMinute, &c.DailyBudgetCents, &c.CurrentDayUsageCents, &c.ConcurrentLimit, &c.ActiveSlots, &c.IsActive, &c.LastUsedAt, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, c)
+	}
+	return list, nil
+}
+
+func (s *Store) GetAgentConfigByHash(hash string) (*db.AgentConfig, error) {
+	var c db.AgentConfig
+	err := s.db.QueryRow(`
+		SELECT id, org_id, name, api_key_hash, tool_quota_per_minute, daily_budget_cents, current_day_usage_cents, concurrent_limit, active_slots, is_active, last_used_at, created_at
+		FROM agent_configs WHERE api_key_hash = ?`, hash).Scan(
+		&c.ID, &c.OrgID, &c.Name, &c.APIKeyHash, &c.ToolQuotaPerMinute, &c.DailyBudgetCents, &c.CurrentDayUsageCents, &c.ConcurrentLimit, &c.ActiveSlots, &c.IsActive, &c.LastUsedAt, &c.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+func (s *Store) GetAgentConfigByID(id string) (*db.AgentConfig, error) {
+	var c db.AgentConfig
+	err := s.db.QueryRow(`
+		SELECT id, org_id, name, api_key_hash, tool_quota_per_minute, daily_budget_cents, current_day_usage_cents, concurrent_limit, active_slots, is_active, last_used_at, created_at
+		FROM agent_configs WHERE id = ?`, id).Scan(
+		&c.ID, &c.OrgID, &c.Name, &c.APIKeyHash, &c.ToolQuotaPerMinute, &c.DailyBudgetCents, &c.CurrentDayUsageCents, &c.ConcurrentLimit, &c.ActiveSlots, &c.IsActive, &c.LastUsedAt, &c.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+func (s *Store) UpsertAgentConfig(cfg db.AgentConfig) (*db.AgentConfig, error) {
+	if cfg.ID == "" {
+		cfg.ID = "cfg_" + uuid.New().String()[:8]
+	}
+	if cfg.OrgID == "" {
+		cfg.OrgID = "org_default"
+	}
+	if cfg.ToolQuotaPerMinute <= 0 {
+		cfg.ToolQuotaPerMinute = 60
+	}
+	if cfg.DailyBudgetCents <= 0 {
+		cfg.DailyBudgetCents = 5000
+	}
+	if cfg.ConcurrentLimit <= 0 {
+		cfg.ConcurrentLimit = 5
+	}
+	cfg.IsActive = true
+	cfg.CreatedAt = time.Now()
+
+	_, err := s.db.Exec(`
+		INSERT INTO agent_configs (id, org_id, name, api_key_hash, tool_quota_per_minute, daily_budget_cents, current_day_usage_cents, concurrent_limit, active_slots, is_active, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(api_key_hash) DO UPDATE SET
+			name = excluded.name,
+			tool_quota_per_minute = excluded.tool_quota_per_minute,
+			daily_budget_cents = excluded.daily_budget_cents,
+			concurrent_limit = excluded.concurrent_limit,
+			is_active = excluded.is_active`,
+		cfg.ID, cfg.OrgID, cfg.Name, cfg.APIKeyHash, cfg.ToolQuotaPerMinute, cfg.DailyBudgetCents, cfg.CurrentDayUsageCents, cfg.ConcurrentLimit, cfg.ActiveSlots, cfg.IsActive, cfg.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+func (s *Store) IncrementAgentDailyUsage(idOrHash string, cents int) error {
+	now := time.Now()
+	_, err := s.db.Exec(`
+		UPDATE agent_configs
+		SET current_day_usage_cents = current_day_usage_cents + ?, last_used_at = ?
+		WHERE id = ? OR api_key_hash = ?`, cents, now, idOrHash, idOrHash)
+	return err
+}
+
+// Agent Executions Replay
+func (s *Store) CreateAgentExecution(exec db.AgentExecutionRecord) (*db.AgentExecutionRecord, error) {
+	if exec.ID == "" {
+		exec.ID = "exec_" + uuid.New().String()[:12]
+	}
+	if exec.OrgID == "" {
+		exec.OrgID = "org_default"
+	}
+	if exec.Category == "" {
+		exec.Category = "read_only"
+	}
+	if exec.ArgumentsJSON == "" {
+		exec.ArgumentsJSON = "{}"
+	}
+	if exec.ResultJSON == "" {
+		exec.ResultJSON = "{}"
+	}
+	if exec.MutationsJSON == "" {
+		exec.MutationsJSON = "[]"
+	}
+	exec.CreatedAt = time.Now()
+
+	_, err := s.db.Exec(`
+		INSERT INTO agent_executions (id, org_id, agent_id, tool_name, category, arguments_json, result_json, is_error, error_message, duration_ms, cost_cents, mutations_json, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		exec.ID, exec.OrgID, exec.AgentID, exec.ToolName, exec.Category, exec.ArgumentsJSON, exec.ResultJSON,
+		exec.IsError, exec.ErrorMessage, exec.DurationMS, exec.CostCents, exec.MutationsJSON, exec.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &exec, nil
+}
+
+func (s *Store) GetAgentExecutions(orgID string, limit int) ([]db.AgentExecutionRecord, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(`
+		SELECT id, org_id, agent_id, tool_name, category, arguments_json, result_json, is_error, COALESCE(error_message, ''), duration_ms, COALESCE(cost_cents, 0), COALESCE(mutations_json, '[]'), created_at
+		FROM agent_executions
+		WHERE org_id = ? ORDER BY created_at DESC LIMIT ?`, orgID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []db.AgentExecutionRecord
+	for rows.Next() {
+		var e db.AgentExecutionRecord
+		if err := rows.Scan(&e.ID, &e.OrgID, &e.AgentID, &e.ToolName, &e.Category, &e.ArgumentsJSON, &e.ResultJSON, &e.IsError, &e.ErrorMessage, &e.DurationMS, &e.CostCents, &e.MutationsJSON, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, e)
+	}
+	return list, nil
+}
+
+func (s *Store) GetAgentExecutionByID(id string) (*db.AgentExecutionRecord, error) {
+	var e db.AgentExecutionRecord
+	err := s.db.QueryRow(`
+		SELECT id, org_id, agent_id, tool_name, category, arguments_json, result_json, is_error, COALESCE(error_message, ''), duration_ms, COALESCE(cost_cents, 0), COALESCE(mutations_json, '[]'), created_at
+		FROM agent_executions WHERE id = ?`, id).Scan(
+		&e.ID, &e.OrgID, &e.AgentID, &e.ToolName, &e.Category, &e.ArgumentsJSON, &e.ResultJSON, &e.IsError, &e.ErrorMessage, &e.DurationMS, &e.CostCents, &e.MutationsJSON, &e.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &e, nil
+}
+
+// Agent Escalations
+func (s *Store) CreateAgentEscalation(esc db.AgentEscalation) (*db.AgentEscalation, error) {
+	if esc.ID == "" {
+		esc.ID = "esc_" + uuid.New().String()[:12]
+	}
+	if esc.OrgID == "" {
+		esc.OrgID = "org_default"
+	}
+	if esc.Status == "" {
+		esc.Status = "pending"
+	}
+	if esc.InputContextJSON == "" {
+		esc.InputContextJSON = "{}"
+	}
+	esc.CreatedAt = time.Now()
+
+	_, err := s.db.Exec(`
+		INSERT INTO agent_escalations (id, org_id, agent_id, execution_id, title, reason, status, input_context_json, recommended_action, reviewer_id, reviewer_notes, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		esc.ID, esc.OrgID, esc.AgentID, esc.ExecutionID, esc.Title, esc.Reason, esc.Status, esc.InputContextJSON, esc.RecommendedAction, esc.ReviewerID, esc.ReviewerNotes, esc.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &esc, nil
+}
+
+func (s *Store) GetAgentEscalations(orgID, status string) ([]db.AgentEscalation, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	var rows *sql.Rows
+	var err error
+	if status != "" && status != "all" {
+		rows, err = s.db.Query(`
+			SELECT id, org_id, agent_id, execution_id, title, reason, status, input_context_json, recommended_action, reviewer_id, reviewer_notes, resolved_at, created_at
+			FROM agent_escalations
+			WHERE org_id = ? AND status = ? ORDER BY created_at DESC`, orgID, status)
+	} else {
+		rows, err = s.db.Query(`
+			SELECT id, org_id, agent_id, execution_id, title, reason, status, input_context_json, recommended_action, reviewer_id, reviewer_notes, resolved_at, created_at
+			FROM agent_escalations
+			WHERE org_id = ? ORDER BY created_at DESC`, orgID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []db.AgentEscalation
+	for rows.Next() {
+		var esc db.AgentEscalation
+		if err := rows.Scan(&esc.ID, &esc.OrgID, &esc.AgentID, &esc.ExecutionID, &esc.Title, &esc.Reason, &esc.Status, &esc.InputContextJSON, &esc.RecommendedAction, &esc.ReviewerID, &esc.ReviewerNotes, &esc.ResolvedAt, &esc.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, esc)
+	}
+	return list, nil
+}
+
+func (s *Store) GetAgentEscalationByID(id string) (*db.AgentEscalation, error) {
+	var esc db.AgentEscalation
+	err := s.db.QueryRow(`
+		SELECT id, org_id, agent_id, execution_id, title, reason, status, input_context_json, recommended_action, reviewer_id, reviewer_notes, resolved_at, created_at
+		FROM agent_escalations WHERE id = ?`, id).Scan(
+		&esc.ID, &esc.OrgID, &esc.AgentID, &esc.ExecutionID, &esc.Title, &esc.Reason, &esc.Status, &esc.InputContextJSON, &esc.RecommendedAction, &esc.ReviewerID, &esc.ReviewerNotes, &esc.ResolvedAt, &esc.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &esc, nil
+}
+
+func (s *Store) ResolveAgentEscalation(id, status, reviewerID, reviewerNotes string) error {
+	now := time.Now()
+	_, err := s.db.Exec(`
+		UPDATE agent_escalations
+		SET status = ?, reviewer_id = ?, reviewer_notes = ?, resolved_at = ?
+		WHERE id = ?`,
+		status, reviewerID, reviewerNotes, now, id,
+	)
+	return err
+}
+
+// Agent Context Memory
+func (s *Store) GetAgentContextMemory(orgID, category string) ([]db.AgentContextMemory, error) {
+	if orgID == "" {
+		orgID = "org_default"
+	}
+	var rows *sql.Rows
+	var err error
+	if category != "" && category != "all" {
+		rows, err = s.db.Query(`
+			SELECT id, org_id, category, key, value, description, updated_at
+			FROM agent_context_memory
+			WHERE org_id = ? AND category = ? ORDER BY key ASC`, orgID, category)
+	} else {
+		rows, err = s.db.Query(`
+			SELECT id, org_id, category, key, value, description, updated_at
+			FROM agent_context_memory
+			WHERE org_id = ? ORDER BY category ASC, key ASC`, orgID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []db.AgentContextMemory
+	for rows.Next() {
+		var m db.AgentContextMemory
+		if err := rows.Scan(&m.ID, &m.OrgID, &m.Category, &m.Key, &m.Value, &m.Description, &m.UpdatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, m)
+	}
+	return list, nil
+}
+
+func (s *Store) UpsertAgentContextMemory(mem db.AgentContextMemory) (*db.AgentContextMemory, error) {
+	if mem.ID == "" {
+		mem.ID = "ctx_" + uuid.New().String()[:8]
+	}
+	if mem.OrgID == "" {
+		mem.OrgID = "org_default"
+	}
+	if mem.Category == "" {
+		mem.Category = "company_profile"
+	}
+	mem.UpdatedAt = time.Now()
+
+	_, err := s.db.Exec(`
+		INSERT INTO agent_context_memory (id, org_id, category, key, value, description, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(org_id, key) DO UPDATE SET
+			category = excluded.category,
+			value = excluded.value,
+			description = excluded.description,
+			updated_at = excluded.updated_at`,
+		mem.ID, mem.OrgID, mem.Category, mem.Key, mem.Value, mem.Description, mem.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &mem, nil
+}
+
 

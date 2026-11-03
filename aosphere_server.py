@@ -11,7 +11,18 @@ import json
 import sqlite3
 import argparse
 import mimetypes
-from datetime import datetime, timezone
+import csv
+import io
+import re
+import uuid
+import base64
+import struct
+import random
+import hashlib
+import hmac
+import urllib.request
+import urllib.error
+from datetime import datetime, timezone, timedelta
 
 def utcnow_str():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -21,6 +32,129 @@ def utc_today_str():
 
 def utcnow_iso():
     return datetime.now(timezone.utc).isoformat()
+
+def escape_pdf(s):
+    if not s:
+        return ""
+    return str(s).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+def generate_payslip_pdf(ps):
+    title = f"PAYSLIP - {ps.get('employee_name', 'Employee')} ({ps.get('period', '')})"
+    lines = [
+        "AO SPHERE CORP. - EARNINGS STATEMENT",
+        f"Period: {ps.get('period', '')}  |  Status: {str(ps.get('status', 'PAID')).upper()}  |  Payment Date: {ps.get('payment_date', '')}",
+        "--------------------------------------------------------------------------------",
+        f"Employee: {ps.get('employee_name', 'Employee')} (ID: {ps.get('employee_id', '')})",
+        f"Department: {ps.get('department', 'Operations')}  |  Role: {ps.get('job_title', 'Staff')}",
+        f"Tax ID: {ps.get('tax_id', 'Pending')}  |  Bank: {ps.get('bank_name', 'Direct Deposit')}",
+        "--------------------------------------------------------------------------------",
+        "EARNINGS BREAKDOWN:",
+        f"  Salary Model: {str(ps.get('salary_type', 'hourly')).upper()}",
+        f"  Regular Hours: {float(ps.get('regular_hours', 160.0)):.1f} hrs",
+        f"  Overtime Hours: {float(ps.get('overtime_hours', 0.0)):.1f} hrs",
+        f"  Gross Wages: ${float(ps.get('gross_pay', 0.0)):.2f}",
+        "--------------------------------------------------------------------------------",
+        "STATUTORY WITHHOLDINGS & DEDUCTIONS:",
+        f"  Income Tax Withholding (12%): -${float(ps.get('tax_withholding', 0.0)):.2f}",
+        f"  Social Contributions (5%):    -${float(ps.get('social_contributions', 0.0)):.2f}",
+        f"  Benefits & Healthcare (3%):   -${float(ps.get('benefits_deductions', 0.0)):.2f}",
+        "--------------------------------------------------------------------------------",
+        f"NET TAKE-HOME PAY: ${float(ps.get('net_pay', 0.0)):.2f}",
+        "Disbursal Notice: Funds cleared and posted to General Ledger (Accounts 5200, 2150, 1000)",
+    ]
+    stream = "BT /F2 16 Tf 40 740 Td (" + escape_pdf(title) + ") Tj ET\n"
+    y = 710
+    for line in lines:
+        font = "/F2 10" if any(k in line for k in ("NET", "EARNINGS", "STATUTORY", "AO SPHERE")) else "/F1 9"
+        stream += f"BT {font} Tf 40 {y} Td ({escape_pdf(line)}) Tj ET\n"
+        y -= 18
+    stream_bytes = stream.encode('latin1', errors='replace')
+
+    buf = bytearray(b"%PDF-1.4\n")
+    offsets = {}
+
+    offsets[1] = len(buf)
+    buf.extend(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
+
+    offsets[2] = len(buf)
+    buf.extend(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n")
+
+    offsets[3] = len(buf)
+    buf.extend(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>\nendobj\n")
+
+    offsets[4] = len(buf)
+    buf.extend(b"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n")
+
+    offsets[5] = len(buf)
+    buf.extend(b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>\nendobj\n")
+
+    offsets[6] = len(buf)
+    buf.extend(f"6 0 obj\n<< /Length {len(stream_bytes)} >>\nstream\n".encode('latin1'))
+    buf.extend(stream_bytes)
+    buf.extend(b"\nendstream\nendobj\n")
+
+    xref_offset = len(buf)
+    buf.extend(b"xref\n0 7\n0000000000 65535 f \n")
+    for i in range(1, 7):
+        buf.extend(f"{offsets[i]:010d} 00000 n \n".encode('latin1'))
+    buf.extend(f"trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode('latin1'))
+    return bytes(buf)
+
+def generate_report_pdf(title, subtitle, metrics, headers, rows):
+    stream = f"BT /F2 16 Tf 40 750 Td ({escape_pdf(title.upper())}) Tj ET\n"
+    stream += f"BT /F1 9 Tf 40 735 Td ({escape_pdf(subtitle)}) Tj ET\n"
+    stream += f"BT /F1 8 Tf 430 750 Td (Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}) Tj ET\n"
+    y = 705
+    if metrics:
+        b_width = min(170, int(532 / max(1, len(metrics))))
+        for i, m in enumerate(metrics):
+            bx = 40 + (i * b_width)
+            stream += f"BT /F1 7.5 Tf {bx+4} {y-12} Td ({escape_pdf(m.get('label', ''))}) Tj ET\n"
+            stream += f"BT /F2 10 Tf {bx+4} {y-26} Td ({escape_pdf(str(m.get('value', '')))}) Tj ET\n"
+        y -= 40
+
+    col_count = max(1, len(headers))
+    col_width = int(532 / col_count)
+    for i, h in enumerate(headers):
+        hx = 45 + (i * col_width)
+        stream += f"BT /F2 8.5 Tf {hx} {y-12} Td ({escape_pdf(h)}) Tj ET\n"
+    y -= 18
+
+    for r_idx, row in enumerate(rows[:25]):
+        for c_idx, val in enumerate(row[:col_count]):
+            cx = 45 + (c_idx * col_width)
+            font = "/F2 8" if c_idx == 0 or any(k in headers[c_idx].lower() for k in ("total", "net", "amount")) else "/F1 8"
+            stream += f"BT {font} Tf {cx} {y-10} Td ({escape_pdf(str(val))}) Tj ET\n"
+        y -= 16
+        if y < 65:
+            break
+
+    stream += f"BT /F1 8 Tf 40 35 Td (AO Sphere Executive Intelligence & Reporting Engine) Tj ET\n"
+    stream_bytes = stream.encode('latin1', errors='replace')
+
+    buf = bytearray(b"%PDF-1.4\n")
+    offsets = {}
+    offsets[1] = len(buf)
+    buf.extend(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
+    offsets[2] = len(buf)
+    buf.extend(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n")
+    offsets[3] = len(buf)
+    buf.extend(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>\nendobj\n")
+    offsets[4] = len(buf)
+    buf.extend(b"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n")
+    offsets[5] = len(buf)
+    buf.extend(b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>\nendobj\n")
+    offsets[6] = len(buf)
+    buf.extend(f"6 0 obj\n<< /Length {len(stream_bytes)} >>\nstream\n".encode('latin1'))
+    buf.extend(stream_bytes)
+    buf.extend(b"\nendstream\nendobj\n")
+    xref_offset = len(buf)
+    buf.extend(b"xref\n0 7\n0000000000 65535 f \n")
+    for i in range(1, 7):
+        buf.extend(f"{offsets[i]:010d} 00000 n \n".encode('latin1'))
+    buf.extend(f"trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode('latin1'))
+    return bytes(buf)
+
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import threading
@@ -270,6 +404,365 @@ def ensure_schema(conn):
     except Exception:
         pass
 
+    # Phase 6: HRMS, Shift Scheduling & Automated Payroll
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS timeclock_events (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        employee_id TEXT NOT NULL,
+        shift_id TEXT,
+        event_type TEXT NOT NULL,
+        timestamp TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        ip_address TEXT NOT NULL DEFAULT '',
+        location_notes TEXT NOT NULL DEFAULT '',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS payroll_runs (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        period TEXT NOT NULL,
+        total_gross_cents INTEGER NOT NULL DEFAULT 0,
+        total_tax_cents INTEGER NOT NULL DEFAULT 0,
+        total_deductions_cents INTEGER NOT NULL DEFAULT 0,
+        total_net_cents INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'draft',
+        payment_date TEXT NOT NULL DEFAULT '',
+        journal_entry_id TEXT,
+        payslips_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(org_id, period)
+    );
+    CREATE TABLE IF NOT EXISTS payslips (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        payroll_run_id TEXT,
+        employee_id TEXT NOT NULL,
+        period TEXT NOT NULL,
+        salary_type TEXT NOT NULL DEFAULT 'hourly',
+        hourly_rate REAL NOT NULL DEFAULT 0.0,
+        monthly_salary REAL NOT NULL DEFAULT 0.0,
+        regular_hours REAL NOT NULL DEFAULT 0.0,
+        overtime_hours REAL NOT NULL DEFAULT 0.0,
+        gross_pay REAL NOT NULL DEFAULT 0.0,
+        tax_withholding REAL NOT NULL DEFAULT 0.0,
+        social_contributions REAL NOT NULL DEFAULT 0.0,
+        benefits_deductions REAL NOT NULL DEFAULT 0.0,
+        net_pay REAL NOT NULL DEFAULT 0.0,
+        status TEXT NOT NULL DEFAULT 'generated',
+        payment_date TEXT NOT NULL DEFAULT '',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(org_id, payroll_run_id, employee_id)
+    );
+    CREATE TABLE IF NOT EXISTS leave_policies (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        code TEXT NOT NULL,
+        annual_days INTEGER NOT NULL DEFAULT 15,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(org_id, code)
+    );
+    CREATE TABLE IF NOT EXISTS leave_requests (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        employee_id TEXT NOT NULL,
+        leave_type TEXT NOT NULL,
+        start_date TEXT NOT NULL,
+        end_date TEXT NOT NULL,
+        days_count INTEGER NOT NULL DEFAULT 1,
+        reason TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending',
+        reviewed_by TEXT NOT NULL DEFAULT '',
+        review_notes TEXT NOT NULL DEFAULT '',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS hr_documents (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        employee_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        document_type TEXT NOT NULL,
+        file_name TEXT NOT NULL,
+        file_content TEXT NOT NULL,
+        file_size INTEGER NOT NULL DEFAULT 0,
+        uploaded_by TEXT NOT NULL DEFAULT 'HR Operations',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS saved_reports (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        report_type TEXT NOT NULL,
+        parameters_json TEXT NOT NULL DEFAULT '{}',
+        created_by TEXT NOT NULL DEFAULT 'system',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS data_exports (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        export_type TEXT NOT NULL,
+        file_format TEXT NOT NULL,
+        record_count INTEGER NOT NULL DEFAULT 0,
+        file_size_bytes INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT NOT NULL DEFAULT 'system',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Phase 8: Autonomous MCP Agent Platform & Webhooks
+    CREATE TABLE IF NOT EXISTS webhook_subscriptions (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        url TEXT NOT NULL,
+        secret TEXT NOT NULL,
+        event_types TEXT NOT NULL DEFAULT '["*"]',
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS webhook_deliveries (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        subscription_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        status_code INTEGER DEFAULT 0,
+        response_body TEXT DEFAULT '',
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        max_retries INTEGER NOT NULL DEFAULT 3,
+        next_retry_at TEXT,
+        delivered_at TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS agent_configs (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        api_key_hash TEXT NOT NULL UNIQUE,
+        tool_quota_per_minute INTEGER NOT NULL DEFAULT 60,
+        daily_budget_cents INTEGER NOT NULL DEFAULT 5000,
+        current_day_usage_cents INTEGER NOT NULL DEFAULT 0,
+        concurrent_limit INTEGER NOT NULL DEFAULT 5,
+        active_slots INTEGER NOT NULL DEFAULT 0,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        last_used_at TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS agent_executions (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT 'read_only',
+        arguments_json TEXT NOT NULL DEFAULT '{}',
+        result_json TEXT NOT NULL DEFAULT '{}',
+        is_error INTEGER NOT NULL DEFAULT 0,
+        error_message TEXT DEFAULT '',
+        duration_ms INTEGER NOT NULL DEFAULT 0,
+        cost_cents INTEGER NOT NULL DEFAULT 0,
+        mutations_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS agent_escalations (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        execution_id TEXT,
+        title TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        input_context_json TEXT NOT NULL DEFAULT '{}',
+        recommended_action TEXT DEFAULT '',
+        reviewer_id TEXT DEFAULT '',
+        reviewer_notes TEXT DEFAULT '',
+        resolved_at TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS agent_context_memory (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT 'company_profile',
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        description TEXT DEFAULT '',
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(org_id, key)
+    );
+
+    INSERT OR IGNORE INTO agent_configs (id, org_id, name, api_key_hash, tool_quota_per_minute, daily_budget_cents, concurrent_limit) VALUES
+    ('cfg_claude_desktop_org_default', 'org_default', 'Claude Desktop Assistant', 'hash_claude_desktop_default', 60, 10000, 5),
+    ('cfg_auto_procure_org_default', 'org_default', 'Autonomous Procurement Daemon', 'hash_auto_procure_default', 30, 5000, 3);
+
+    INSERT OR IGNORE INTO agent_context_memory (id, org_id, category, key, value, description) VALUES
+    ('ctx_comp_name_org_default', 'org_default', 'company_profile', 'company_legal_name', 'AO Sphere Global Inc.', 'Official registered entity name'),
+    ('ctx_currency_org_default', 'org_default', 'tax_currency', 'active_currency', 'USD', 'Default operating currency'),
+    ('ctx_tax_rate_org_default', 'org_default', 'tax_currency', 'standard_sales_tax_rate', '0.0825', 'Standard sales tax percentage (8.25%)'),
+    ('ctx_po_limit_org_default', 'org_default', 'financial_policies', 'po_auto_approval_threshold_cents', '50000', 'Purchase orders above $500.00 require human manager signoff'),
+    ('ctx_lead_time_org_default', 'org_default', 'supplier_lead_times', 'standard_reorder_lead_days', '7', 'Average supplier lead time for inventory reorders');
+
+
+    INSERT OR IGNORE INTO leave_policies (id, org_id, name, code, annual_days) VALUES
+    ('lp_vac_org_default', 'org_default', 'Paid Vacation Time', 'vacation', 15),
+    ('lp_sick_org_default', 'org_default', 'Sick & Medical Leave', 'sick', 10),
+    ('lp_par_org_default', 'org_default', 'Parental & Family Leave', 'parental', 30),
+    ('lp_unp_org_default', 'org_default', 'Unpaid Leave of Absence', 'unpaid', 0);
+
+    INSERT OR IGNORE INTO accounts (id, org_id, code, name, type, normal_balance, is_active) VALUES
+    ('acc_5200_org_default', 'org_default', '5200', 'Salaries & Wages Expense', 'expense', 'debit', 1),
+    ('acc_2150_org_default', 'org_default', '2150', 'Payroll Withholding Taxes & Deductions', 'liability', 'credit', 1),
+    ('acc_2200_org_default', 'org_default', '2200', 'Payroll Clearing & Accrued Wages', 'liability', 'credit', 1);
+    """)
+
+    for col_name, col_type in [
+        ("job_title", "TEXT DEFAULT ''"),
+        ("reporting_manager_id", "TEXT DEFAULT ''"),
+        ("employment_type", "TEXT DEFAULT 'full_time'"),
+        ("salary_type", "TEXT DEFAULT 'hourly'"),
+        ("monthly_salary", "REAL DEFAULT 0.0"),
+        ("tax_id", "TEXT DEFAULT ''"),
+        ("bank_name", "TEXT DEFAULT ''"),
+        ("bank_account_number", "TEXT DEFAULT ''"),
+        ("bank_routing_number", "TEXT DEFAULT ''"),
+        ("emergency_contact_name", "TEXT DEFAULT ''"),
+        ("emergency_contact_phone", "TEXT DEFAULT ''"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE employees ADD COLUMN {col_name} {col_type};")
+        except Exception:
+            pass
+
+    # Phase 9: Enterprise Multi-Tenancy, Auth & Compliance
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS user_organizations (
+        user_id TEXT NOT NULL REFERENCES users(id),
+        org_id TEXT NOT NULL REFERENCES organizations(id),
+        role TEXT NOT NULL DEFAULT 'member',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(user_id, org_id)
+    );
+
+    INSERT OR IGNORE INTO organizations (id, name, slug)
+    VALUES ('org_emea', 'AO Sphere EMEA Operations', 'emea');
+
+    INSERT OR IGNORE INTO user_organizations (user_id, org_id, role)
+    SELECT id, org_id, role FROM users;
+
+    INSERT OR IGNORE INTO user_organizations (user_id, org_id, role)
+    VALUES ('usr_admin_default', 'org_emea', 'admin');
+
+    CREATE TABLE IF NOT EXISTS user_invitations (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL REFERENCES organizations(id),
+        email TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'member',
+        token_hash TEXT NOT NULL UNIQUE,
+        invited_by TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending',
+        expires_at DATETIME NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS password_resets (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        token_hash TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL DEFAULT 'pending',
+        expires_at DATETIME NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS sso_configs (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL REFERENCES organizations(id),
+        provider TEXT NOT NULL,
+        client_id TEXT NOT NULL DEFAULT '',
+        client_secret TEXT NOT NULL DEFAULT '',
+        issuer_url TEXT NOT NULL DEFAULT '',
+        domain_mapping TEXT NOT NULL DEFAULT '',
+        is_enabled BOOLEAN NOT NULL DEFAULT 1,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(org_id, provider)
+    );
+
+    CREATE TABLE IF NOT EXISTS custom_roles (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL REFERENCES organizations(id),
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        permissions_json TEXT NOT NULL DEFAULT '[]',
+        is_system BOOLEAN NOT NULL DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(org_id, name)
+    );
+
+    INSERT OR IGNORE INTO custom_roles (id, org_id, name, description, permissions_json, is_system)
+    SELECT 'role_admin_' || id, id, 'Administrator', 'Full system access and tenant administration', '["read","manage_inventory","manage_orders","approve_orders","manage_finance","manage_payroll","manage_hr","manage_users","admin"]', 1 FROM organizations;
+
+    INSERT OR IGNORE INTO custom_roles (id, org_id, name, description, permissions_json, is_system)
+    SELECT 'role_finance_' || id, id, 'Finance Director', 'Invoicing, general ledger, payroll and budget approval', '["read","manage_orders","approve_orders","manage_finance","manage_payroll"]', 1 FROM organizations;
+
+    INSERT OR IGNORE INTO custom_roles (id, org_id, name, description, permissions_json, is_system)
+    SELECT 'role_hr_' || id, id, 'HR Specialist', 'Employee lifecycle, shifts, timesheets and leave management', '["read","manage_payroll","manage_hr","manage_users"]', 1 FROM organizations;
+
+    INSERT OR IGNORE INTO custom_roles (id, org_id, name, description, permissions_json, is_system)
+    SELECT 'role_inventory_' || id, id, 'Inventory Specialist', 'SKU catalog, multi-warehouse stock adjustments, and GRN 3-way matching', '["read","manage_inventory","manage_orders"]', 1 FROM organizations;
+
+    INSERT OR IGNORE INTO custom_roles (id, org_id, name, description, permissions_json, is_system)
+    SELECT 'role_auditor_' || id, id, 'Compliance Auditor', 'Read-only access to audit trail, financial ledger, and SOC2 reviews', '["read"]', 1 FROM organizations;
+
+    CREATE TABLE IF NOT EXISTS audit_chain_vault (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL REFERENCES organizations(id),
+        sequence_number INTEGER NOT NULL,
+        actor_type TEXT NOT NULL DEFAULT 'user',
+        actor_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        resource_type TEXT NOT NULL,
+        resource_id TEXT NOT NULL,
+        payload_hash TEXT NOT NULL,
+        prev_block_hash TEXT NOT NULL,
+        block_hash TEXT NOT NULL,
+        timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS privacy_requests (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL REFERENCES organizations(id),
+        user_id TEXT NOT NULL REFERENCES users(id),
+        request_type TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        result_json TEXT NOT NULL DEFAULT '{}',
+        requested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        completed_at DATETIME
+    );
+
+    CREATE TABLE IF NOT EXISTS soc2_access_reviews (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL REFERENCES organizations(id),
+        quarter TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        reviewed_by TEXT DEFAULT '',
+        notes TEXT DEFAULT '',
+        snapshot_json TEXT NOT NULL DEFAULT '{}',
+        reviewed_at DATETIME,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+
+    for col_name, col_type in [
+        ("totp_secret", "TEXT DEFAULT ''"),
+        ("totp_enabled", "BOOLEAN NOT NULL DEFAULT 0"),
+        ("recovery_codes_json", "TEXT DEFAULT '[]'"),
+        ("last_active_at", "DATETIME"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE users ADD COLUMN {col_name} {col_type};")
+        except Exception:
+            pass
+
     conn.commit()
     _schema_initialized = True
 
@@ -300,6 +793,182 @@ def log_audit(conn, actor_type, actor_id, action, entity_type, entity_id, reason
         "INSERT INTO audit_logs (id, actor_type, actor_id, action, entity_type, entity_id, reasoning, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (audit_id, actor_type, actor_id, action, entity_type, entity_id, reasoning, meta, now)
     )
+
+
+# ----------------- PHASE 8 HELPERS: WEBHOOKS, SANITIZER, INTROSPECTION -----------------
+import hmac
+import hashlib
+
+def compute_hmac_signature(secret, timestamp, payload):
+    msg = f"{timestamp}.{payload}".encode("utf-8")
+    return hmac.new(secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+
+def dispatch_webhook_event(conn, org_id, event_type, payload):
+    subs = conn.execute("SELECT * FROM webhook_subscriptions WHERE org_id = ? AND is_active = 1", (org_id,)).fetchall()
+    deliveries = []
+    event_id = f"evt_{int(time.time()*1000)}"
+    payload_str = json.dumps(payload)
+    now_ts = int(time.time())
+    
+    for sub in subs:
+        ev_types = sub["event_types"]
+        if ev_types != '["*"]' and "*" not in ev_types and event_type not in ev_types:
+            continue
+        deliv_id = f"wdel_{int(time.time()*1000)}_{sub['id'][:4]}"
+        sig = compute_hmac_signature(sub["secret"], now_ts, payload_str)
+        
+        status = "delivered"
+        status_code = 200
+        resp_body = ""
+        try:
+            req = urllib.request.Request(
+                sub["url"],
+                data=payload_str.encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "AOSphere-Webhook-Dispatcher/1.0",
+                    "X-Aosphere-Timestamp": str(now_ts),
+                    "X-Aosphere-Signature": f"sha256={sig}",
+                    "X-Aosphere-Event": event_type,
+                    "X-Aosphere-Delivery": deliv_id
+                },
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=5) as r:
+                status_code = r.status
+                resp_body = r.read().decode("utf-8", errors="ignore")[:500]
+        except urllib.error.HTTPError as he:
+            status_code = he.code
+            resp_body = he.read().decode("utf-8", errors="ignore")[:500]
+            status = "failed"
+        except Exception as e:
+            status = "failed"
+            status_code = 0
+            resp_body = str(e)[:500]
+            
+        conn.execute("""
+            INSERT INTO webhook_deliveries (id, org_id, subscription_id, event_id, event_type, payload_json, status, status_code, response_body, retry_count, max_retries, delivered_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 3, ?, ?)
+        """, (deliv_id, org_id, sub["id"], event_id, event_type, payload_str, status, status_code, resp_body, utcnow_str(), utcnow_str()))
+        deliveries.append({"id": deliv_id, "subscription_id": sub["id"], "status": status, "status_code": status_code})
+    conn.commit()
+    return deliveries
+
+INJECTION_PATTERNS = [
+    ("instruction_reset", re.compile(r"\b(ignore\s+(all\s+)?(previous|prior|above)\s+instructions?)\b", re.I), 0.9),
+    ("system_override", re.compile(r"\b(system\s+override|override\s+system\s+prompt)\b", re.I), 0.95),
+    ("role_play_jailbreak", re.compile(r"\b(you\s+are\s+now\s+in\s+developer\s+mode|dan\s+mode|jailbreak|unfiltered\s+mode)\b", re.I), 0.85),
+    ("special_token_smuggling", re.compile(r"<\s*\|\s*(system|im_start|im_end|assistant)\s*\|?\s*>", re.I), 0.99),
+    ("markdown_role_hijack", re.compile(r"```(system|instruction|prompt)\b", re.I), 0.8),
+    ("bracketed_instruction", re.compile(r"\[\s*(system|inst|instruction)\s*\]", re.I), 0.75),
+]
+
+def sanitize_input(text):
+    trimmed = (text or "").strip()
+    flagged = []
+    max_weight = 0.0
+    sanitized = trimmed
+    for name, pat, weight in INJECTION_PATTERNS:
+        if pat.search(sanitized):
+            flagged.append(name)
+            if weight > max_weight:
+                max_weight = weight
+            sanitized = pat.sub(f"[FILTERED_INJECTION: {name}]", sanitized)
+    is_safe = len(flagged) == 0 and max_weight < 0.7
+    return {
+        "is_safe": is_safe,
+        "risk_score": max_weight,
+        "flagged_patterns": flagged,
+        "sanitized_text": sanitized
+    }
+
+DYNAMIC_MCP_TOOLS = [
+    {"name": "erp_check_stock", "category": "read_only", "description": "Inspect stock levels, reserved quantities, and threshold alerts for SKUs.", "required_permission": "read"},
+    {"name": "erp_adjust_stock", "category": "high_impact_mutation", "description": "Adjust SKU inventory quantity.", "required_permission": "manage_inventory"},
+    {"name": "crm_get_deals", "category": "read_only", "description": "Retrieve deals pipeline and stages.", "required_permission": "read"},
+    {"name": "crm_create_deal", "category": "reversible_mutation", "description": "Create a new sales opportunity deal.", "required_permission": "manage_orders"},
+    {"name": "fin_get_summary", "category": "read_only", "description": "Retrieve corporate P&L summary.", "required_permission": "read"},
+    {"name": "fin_create_invoice", "category": "reversible_mutation", "description": "Generate a new client billing invoice.", "required_permission": "manage_finance"},
+    {"name": "hr_get_shifts", "category": "read_only", "description": "Fetch employee shift roster.", "required_permission": "read"},
+    {"name": "hr_update_shift", "category": "reversible_mutation", "description": "Update worker shift status.", "required_permission": "manage_hr"},
+    {"name": "gov_get_pending_approvals", "category": "read_only", "description": "Fetch human approval backlog.", "required_permission": "read"},
+    {"name": "agent_escalate_to_human", "category": "reversible_mutation", "description": "Escalate ambiguous inputs or violations to human operator queue.", "required_permission": "read"},
+    {"name": "agent_get_context", "category": "read_only", "description": "Retrieve company profile, currency, tax rates, and lead times.", "required_permission": "read"},
+    {"name": "agent_sanitize_input", "category": "read_only", "description": "Scan untrusted external strings for prompt injection attacks.", "required_permission": "read"},
+    {"name": "webhook_test_event", "category": "reversible_mutation", "description": "Dispatch a signed test event to registered webhooks.", "required_permission": "admin"}
+]
+
+# ----------------- PHASE 9 HELPERS: TOTP, COMPLIANCE & AUDIT CHAIN -----------------
+
+def generate_totp_secret():
+    raw = os.urandom(20)
+    return base64.b32encode(raw).decode("utf-8").replace("=", "")
+
+def compute_totp_code(secret, t=None):
+    if t is None:
+        t = time.time()
+    clean_secret = secret.strip().upper()
+    padding = (8 - len(clean_secret) % 8) % 8
+    key = base64.b32decode(clean_secret + ("=" * padding))
+    counter = int(t // 30)
+    counter_bytes = struct.pack(">Q", counter)
+    h = hmac.new(key, counter_bytes, hashlib.sha1).digest()
+    offset = h[-1] & 0x0F
+    code_int = struct.unpack(">I", h[offset:offset+4])[0] & 0x7FFFFFFF
+    return f"{code_int % 1000000:06d}"
+
+def verify_totp_code(secret, code):
+    code = str(code).strip()
+    now = time.time()
+    for step in [now, now - 30, now + 30]:
+        try:
+            if compute_totp_code(secret, step) == code:
+                return True
+        except Exception:
+            pass
+    return False
+
+def generate_recovery_codes(count=8):
+    charset = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    codes = []
+    for _ in range(count):
+        part1 = "".join(random.choice(charset) for _ in range(4))
+        part2 = "".join(random.choice(charset) for _ in range(4))
+        codes.append(f"{part1}-{part2}")
+    return codes
+
+def validate_password_complexity(pwd):
+    if len(pwd) < 10:
+        return "Password must be at least 10 characters long"
+    if not any(c.isupper() for c in pwd):
+        return "Password must contain at least one uppercase letter (A-Z)"
+    if not any(c.islower() for c in pwd):
+        return "Password must contain at least one lowercase letter (a-z)"
+    if not any(c.isdigit() for c in pwd):
+        return "Password must contain at least one digit (0-9)"
+    if not any(c in "!@#$%^&*()_+-=[]{}|;:,.<>?" for c in pwd):
+        return "Password must contain at least one special character (!@#$%^&*)"
+    return None
+
+GENESIS_BLOCK_HASH = "0000000000000000000000000000000000000000000000000000000000000000"
+
+def compute_audit_block_hash(seq_num, prev_hash, action, actor_id, payload_hash, ts_str):
+    raw = f"{seq_num}:{prev_hash}:{action}:{actor_id}:{payload_hash}:{ts_str}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+def verify_audit_vault_chain(conn, org_id):
+    rows = conn.execute("SELECT sequence_number, prev_block_hash, block_hash, action, actor_id, payload_hash, timestamp FROM audit_chain_vault WHERE org_id = ? ORDER BY sequence_number ASC", (org_id,)).fetchall()
+    if not rows:
+        return True, 0, None
+    for idx, r in enumerate(rows):
+        expected_prev = GENESIS_BLOCK_HASH if idx == 0 else rows[idx-1]["block_hash"]
+        if r["prev_block_hash"] != expected_prev:
+            return False, idx, f"Broken chain link at seq {r['sequence_number']}"
+        expected_hash = compute_audit_block_hash(r["sequence_number"], r["prev_block_hash"], r["action"], r["actor_id"], r["payload_hash"], r["timestamp"])
+        if r["block_hash"] != expected_hash:
+            return False, idx, f"Tamper detected at seq {r['sequence_number']}"
+    return True, len(rows), None
+
 
 class AOSphereHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -785,6 +1454,268 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                         "is_paid": inv["status"] == "paid"
                     })
 
+                elif path == "/api/shifts/conflicts":
+                    rows = conn.execute("""
+                        SELECT s.id, s.employee_id, COALESCE(e.name, 'Unknown') as emp_name,
+                               s.shift_date, s.start_time, s.end_time, s.station
+                        FROM shifts s
+                        LEFT JOIN employees e ON s.employee_id = e.id
+                        WHERE s.status != 'cancelled'
+                        ORDER BY s.employee_id, s.shift_date, s.start_time
+                    """).fetchall()
+                    conn.close()
+                    conflicts = []
+                    emp_shifts = {}
+                    for r in rows:
+                        d = dict(r)
+                        emp_shifts.setdefault(d["employee_id"], []).append(d)
+
+                    for emp_id, shifts in emp_shifts.items():
+                        emp_name = shifts[0]["emp_name"]
+                        weekly_hours = {}
+                        for i, curr in enumerate(shifts):
+                            try:
+                                sdt = datetime.strptime(f"{curr['shift_date']} {curr['start_time']}", "%Y-%m-%d %H:%M")
+                                edt = datetime.strptime(f"{curr['shift_date']} {curr['end_time']}", "%Y-%m-%d %H:%M")
+                                dur = max(0, (edt - sdt).total_seconds() / 3600.0)
+                                w_key = f"{sdt.isocalendar()[0]}-W{sdt.isocalendar()[1]:02d}"
+                                weekly_hours[w_key] = weekly_hours.get(w_key, 0.0) + dur
+                            except Exception:
+                                pass
+
+                            for j in range(i + 1, len(shifts)):
+                                nxt = shifts[j]
+                                if curr["shift_date"] == nxt["shift_date"]:
+                                    if curr["start_time"] < nxt["end_time"] and curr["end_time"] > nxt["start_time"]:
+                                        conflicts.append({
+                                            "shift_id": nxt["id"],
+                                            "employee_id": emp_id,
+                                            "employee_name": emp_name,
+                                            "conflict_type": "double_booking",
+                                            "message": f"Double-booking: Shift ({nxt['start_time']}-{nxt['end_time']}) overlaps with ({curr['start_time']}-{curr['end_time']}) on {curr['shift_date']}",
+                                            "severity": "error"
+                                        })
+                                try:
+                                    s1_end = datetime.strptime(f"{curr['shift_date']} {curr['end_time']}", "%Y-%m-%d %H:%M")
+                                    s2_start = datetime.strptime(f"{nxt['shift_date']} {nxt['start_time']}", "%Y-%m-%d %H:%M")
+                                    if s2_start > s1_end:
+                                        gap_hrs = (s2_start - s1_end).total_seconds() / 3600.0
+                                        if gap_hrs < 8.0:
+                                            conflicts.append({
+                                                "shift_id": nxt["id"],
+                                                "employee_id": emp_id,
+                                                "employee_name": emp_name,
+                                                "conflict_type": "rest_period_violation",
+                                                "message": f"Rest period violation: Only {gap_hrs:.1f}h rest between {curr['shift_date']} {curr['end_time']} and {nxt['shift_date']} {nxt['start_time']} (< 8h required)",
+                                                "severity": "error"
+                                            })
+                                except Exception:
+                                    pass
+
+                        for wk, hrs in weekly_hours.items():
+                            if hrs > 40.0:
+                                conflicts.append({
+                                    "shift_id": "",
+                                    "employee_id": emp_id,
+                                    "employee_name": emp_name,
+                                    "conflict_type": "weekly_overtime",
+                                    "message": f"Weekly overtime warning: Scheduled for {hrs:.1f} hours in {wk} (> 40h workweek)",
+                                    "severity": "warning"
+                                })
+                    return self.send_json(conflicts)
+
+                elif path == "/api/timeclock/status":
+                    emp_id = query.get("employee_id", [""])[0]
+                    if not emp_id:
+                        first_emp = conn.execute("SELECT id FROM employees ORDER BY name LIMIT 1").fetchone()
+                        if first_emp:
+                            emp_id = first_emp["id"]
+                    today = utc_today_str()
+                    events = conn.execute("SELECT * FROM timeclock_events WHERE employee_id = ? AND date(timestamp) = ? ORDER BY timestamp ASC", (emp_id, today)).fetchall()
+                    conn.close()
+                    current_state = "clocked_out"
+                    ev_list = []
+                    for ev in events:
+                        d = dict(ev)
+                        ev_list.append(d)
+                        if d["event_type"] in ("clock_in", "break_end"):
+                            current_state = "clocked_in"
+                        elif d["event_type"] == "break_start":
+                            current_state = "on_break"
+                        elif d["event_type"] == "clock_out":
+                            current_state = "clocked_out"
+                    return self.send_json({
+                        "employee_id": emp_id,
+                        "date": today,
+                        "current_state": current_state,
+                        "current_status": current_state,
+                        "last_event": ev_list[-1] if ev_list else None,
+                        "events_count": len(ev_list),
+                        "events": ev_list,
+                        "punches_today": ev_list
+                    })
+
+                elif path == "/api/payroll/preview":
+                    period = query.get("period", [datetime.now(timezone.utc).strftime("%Y-%m")])[0]
+                    emps = conn.execute("SELECT * FROM employees WHERE status = 'active' ORDER BY name").fetchall()
+                    payslips = []
+                    tot_gross_c = 0
+                    tot_tax_c = 0
+                    tot_ded_c = 0
+                    tot_net_c = 0
+                    for e in emps:
+                        sal_type = e["salary_type"] if "salary_type" in e.keys() else "hourly"
+                        rate = float(e["hourly_rate"] or 25.0)
+                        mo_sal = float(e["monthly_salary"] or 0.0)
+                        if sal_type == "monthly" and mo_sal > 0:
+                            gross = mo_sal
+                            reg_hrs = 160.0
+                            ot_hrs = 0.0
+                        else:
+                            reg_hrs = 160.0
+                            ot_hrs = 0.0
+                            gross = reg_hrs * rate
+
+                        tax = round(gross * 0.12, 2)
+                        soc = round(gross * 0.05, 2)
+                        ben = round(gross * 0.03, 2)
+                        net = round(gross - (tax + soc + ben), 2)
+
+                        g_c = int(round(gross * 100))
+                        t_c = int(round(tax * 100))
+                        d_c = int(round((soc + ben) * 100))
+                        n_c = g_c - (t_c + d_c)
+
+                        tot_gross_c += g_c
+                        tot_tax_c += t_c
+                        tot_ded_c += d_c
+                        tot_net_c += n_c
+
+                        payslips.append({
+                            "id": f"ps_{e['id']}_{period}",
+                            "employee_id": e["id"],
+                            "employee_name": e["name"],
+                            "period": period,
+                            "salary_type": sal_type,
+                            "hourly_rate": rate,
+                            "monthly_salary": mo_sal,
+                            "regular_hours": reg_hrs,
+                            "overtime_hours": ot_hrs,
+                            "gross_pay": gross,
+                            "tax_withholding": tax,
+                            "social_contributions": soc,
+                            "benefits_deductions": ben,
+                            "net_pay": net,
+                            "status": "generated"
+                        })
+                    conn.close()
+                    run = {
+                        "id": f"prun_{period}",
+                        "period": period,
+                        "total_gross_cents": tot_gross_c,
+                        "total_tax_cents": tot_tax_c,
+                        "total_deductions_cents": tot_ded_c,
+                        "total_net_cents": tot_net_c,
+                        "total_gross_dollars": tot_gross_c / 100.0,
+                        "total_tax_dollars": tot_tax_c / 100.0,
+                        "total_net_dollars": tot_net_c / 100.0,
+                        "status": "draft",
+                        "payment_date": utc_today_str(),
+                        "payslips_count": len(payslips)
+                    }
+                    return self.send_json({
+                        "period": period,
+                        "total_gross_cents": tot_gross_c,
+                        "total_tax_cents": tot_tax_c,
+                        "total_deductions_cents": tot_ded_c,
+                        "total_net_cents": tot_net_c,
+                        "total_gross_dollars": tot_gross_c / 100.0,
+                        "total_tax_dollars": tot_tax_c / 100.0,
+                        "total_net_dollars": tot_net_c / 100.0,
+                        "run": run,
+                        "payslips": payslips
+                    })
+
+                elif path == "/api/payroll/history":
+                    runs = conn.execute("SELECT * FROM payroll_runs ORDER BY period DESC").fetchall()
+                    conn.close()
+                    res = []
+                    for r in runs:
+                        d = dict(r)
+                        d["total_gross_dollars"] = d["total_gross_cents"] / 100.0
+                        d["total_tax_dollars"] = d["total_tax_cents"] / 100.0
+                        d["total_net_dollars"] = d["total_net_cents"] / 100.0
+                        res.append(d)
+                    return self.send_json(res)
+
+                elif path == "/api/payroll/payslips":
+                    run_id = query.get("payroll_run_id", [""])[0]
+                    emp_id = query.get("employee_id", [""])[0]
+                    q = "SELECT p.*, COALESCE(e.name, 'Employee') as employee_name FROM payslips p LEFT JOIN employees e ON p.employee_id = e.id WHERE 1=1"
+                    params = []
+                    if run_id:
+                        q += " AND p.payroll_run_id = ?"
+                        params.append(run_id)
+                    if emp_id:
+                        q += " AND p.employee_id = ?"
+                        params.append(emp_id)
+                    q += " ORDER BY p.created_at DESC"
+                    slips = conn.execute(q, params).fetchall()
+                    conn.close()
+                    return self.send_json([dict(s) for s in slips])
+
+                elif path == "/api/payroll/payslip/pdf":
+                    ps_id = query.get("payslip_id", [""])[0] or query.get("id", [""])[0]
+                    ps = conn.execute("SELECT p.*, COALESCE(e.name, 'Employee') as employee_name, COALESCE(e.job_title, e.role) as job_title, COALESCE(e.department, 'Operations') as department, COALESCE(e.tax_id, '') as tax_id, COALESCE(e.bank_name, 'Direct Deposit') as bank_name, COALESCE(e.bank_account_number, '') as bank_account_number FROM payslips p LEFT JOIN employees e ON p.employee_id = e.id WHERE p.id = ?", (ps_id,)).fetchone()
+                    conn.close()
+                    if not ps:
+                        return self.send_json({"error": "Payslip not found"}, 404)
+                    pdf_bytes = generate_payslip_pdf(dict(ps))
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/pdf")
+                    self.send_header("Content-Disposition", f"attachment; filename=\"payslip_{ps['period']}_{ps['employee_id']}.pdf\"")
+                    self.send_header("Content-Length", str(len(pdf_bytes)))
+                    self.end_headers()
+                    self.wfile.write(pdf_bytes)
+                    return
+
+                elif path == "/api/leaves/policies":
+                    rows = conn.execute("SELECT * FROM leave_policies ORDER BY annual_days DESC").fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path == "/api/leaves/requests":
+                    emp_id = query.get("employee_id", [""])[0]
+                    status = query.get("status", [""])[0]
+                    q = "SELECT lr.*, COALESCE(e.name, 'Employee') as employee_name FROM leave_requests lr LEFT JOIN employees e ON lr.employee_id = e.id WHERE 1=1"
+                    params = []
+                    if emp_id:
+                        q += " AND lr.employee_id = ?"
+                        params.append(emp_id)
+                    if status:
+                        q += " AND lr.status = ?"
+                        params.append(status)
+                    q += " ORDER BY lr.created_at DESC"
+                    rows = conn.execute(q, params).fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path == "/api/hr/documents":
+                    emp_id = query.get("employee_id", [""])[0]
+                    doc_type = query.get("document_type", [""])[0]
+                    q = "SELECT d.*, COALESCE(e.name, 'Employee') as employee_name FROM hr_documents d LEFT JOIN employees e ON d.employee_id = e.id WHERE 1=1"
+                    params = []
+                    if emp_id:
+                        q += " AND d.employee_id = ?"
+                        params.append(emp_id)
+                    if doc_type:
+                        q += " AND d.document_type = ?"
+                        params.append(doc_type)
+                    q += " ORDER BY d.created_at DESC"
+                    rows = conn.execute(q, params).fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
                 elif path == "/api/invoices/pdf" or path == "/api/purchase-orders/pdf" or path == "/api/credit-notes/pdf":
                     doc_id = query.get("id", [""])[0]
                     conn.close()
@@ -798,10 +1729,663 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                     self.wfile.write(body)
                     return
 
+                elif path == "/api/reports/pnl":
+                    start_date = query.get("start_date", [""])[0] or (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
+                    end_date = query.get("end_date", [""])[0] or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    q = """
+                    SELECT a.code, a.name, a.type,
+                        COALESCE(SUM(CASE WHEN jl.entry_type = 'debit' THEN jl.amount_cents ELSE 0 END), 0) AS total_debits,
+                        COALESCE(SUM(CASE WHEN jl.entry_type = 'credit' THEN jl.amount_cents ELSE 0 END), 0) AS total_credits
+                    FROM accounts a
+                    JOIN journal_lines jl ON a.id = jl.account_id AND jl.org_id = a.org_id
+                    JOIN journal_entries je ON jl.entry_id = je.id AND je.status = 'posted'
+                    WHERE a.org_id = 'org_default'
+                        AND substr(je.posted_at, 1, 10) >= ?
+                        AND substr(je.posted_at, 1, 10) <= ?
+                        AND a.type IN ('revenue', 'expense')
+                    GROUP BY a.code, a.name, a.type
+                    ORDER BY a.code ASC
+                    """
+                    rows = conn.execute(q, (start_date, end_date)).fetchall()
+                    conn.close()
+                    rev_items = []
+                    cogs_items = []
+                    opex_items = []
+                    rev_cents = 0
+                    cogs_cents = 0
+                    opex_cents = 0
+                    for r in rows:
+                        code, name, atype, deb, cred = r["code"], r["name"], r["type"], r["total_debits"], r["total_credits"]
+                        if atype == "revenue":
+                            amt = max(0, cred - deb)
+                            rev_cents += amt
+                            rev_items.append({"account_code": code, "account_name": name, "amount_cents": amt, "amount": round(amt / 100.0, 2)})
+                        elif atype == "expense":
+                            amt = max(0, deb - cred)
+                            if code == "5000":
+                                cogs_cents += amt
+                                cogs_items.append({"account_code": code, "account_name": name, "amount_cents": amt, "amount": round(amt / 100.0, 2)})
+                            else:
+                                opex_cents += amt
+                                opex_items.append({"account_code": code, "account_name": name, "amount_cents": amt, "amount": round(amt / 100.0, 2)})
+                    gross_profit_cents = rev_cents - cogs_cents
+                    net_profit_cents = gross_profit_cents - opex_cents
+                    margin_pct = round((gross_profit_cents / rev_cents) * 100.0, 2) if rev_cents > 0 else 0.0
+                    return self.send_json({
+                        "org_id": "org_default",
+                        "start_date": start_date,
+                        "end_date": end_date,
+                        "revenue_cents": rev_cents,
+                        "revenue": round(rev_cents / 100.0, 2),
+                        "cogs_cents": cogs_cents,
+                        "cogs": round(cogs_cents / 100.0, 2),
+                        "gross_profit_cents": gross_profit_cents,
+                        "gross_profit": round(gross_profit_cents / 100.0, 2),
+                        "gross_margin_pct": margin_pct,
+                        "opex_cents": opex_cents,
+                        "opex": round(opex_cents / 100.0, 2),
+                        "net_profit_cents": net_profit_cents,
+                        "net_profit": round(net_profit_cents / 100.0, 2),
+                        "revenue_items": rev_items,
+                        "cogs_items": cogs_items,
+                        "opex_items": opex_items
+                    })
+
+                elif path == "/api/reports/balance-sheet":
+                    as_of = query.get("as_of", [""])[0] or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    q = """
+                    SELECT a.code, a.name, a.type, a.normal_balance,
+                        COALESCE(SUM(CASE WHEN jl.entry_type = 'debit' THEN jl.amount_cents ELSE 0 END), 0) AS total_debits,
+                        COALESCE(SUM(CASE WHEN jl.entry_type = 'credit' THEN jl.amount_cents ELSE 0 END), 0) AS total_credits
+                    FROM accounts a
+                    LEFT JOIN journal_lines jl ON a.id = jl.account_id AND jl.org_id = a.org_id
+                    LEFT JOIN journal_entries je ON jl.entry_id = je.id AND je.status = 'posted' AND substr(je.posted_at, 1, 10) <= ?
+                    WHERE a.org_id = 'org_default' AND a.is_active = 1
+                    GROUP BY a.code, a.name, a.type, a.normal_balance
+                    ORDER BY a.code ASC
+                    """
+                    rows = conn.execute(q, (as_of,)).fetchall()
+                    conn.close()
+                    assets = []
+                    liabilities = []
+                    equity = []
+                    tot_assets_cents = 0
+                    tot_liab_cents = 0
+                    tot_eq_cents = 0
+                    tot_rev_cents = 0
+                    tot_exp_cents = 0
+                    for r in rows:
+                        code, name, atype, nb, deb, cred = r["code"], r["name"], r["type"], r["normal_balance"], r["total_debits"], r["total_credits"]
+                        net = (deb - cred) if nb == "debit" else (cred - deb)
+                        if atype == "asset":
+                            tot_assets_cents += net
+                            assets.append({"code": code, "name": name, "amount_cents": net, "amount": round(net / 100.0, 2)})
+                        elif atype == "liability":
+                            tot_liab_cents += net
+                            liabilities.append({"code": code, "name": name, "amount_cents": net, "amount": round(net / 100.0, 2)})
+                        elif atype == "equity":
+                            tot_eq_cents += net
+                            equity.append({"code": code, "name": name, "amount_cents": net, "amount": round(net / 100.0, 2)})
+                        elif atype == "revenue":
+                            tot_rev_cents += (cred - deb)
+                        elif atype == "expense":
+                            tot_exp_cents += (deb - cred)
+                    cur_net_income = tot_rev_cents - tot_exp_cents
+                    tot_eq_cents += cur_net_income
+                    equity.append({"code": "3100", "name": "Current Period Net Earnings", "amount_cents": cur_net_income, "amount": round(cur_net_income / 100.0, 2)})
+                    return self.send_json({
+                        "org_id": "org_default",
+                        "as_of": as_of,
+                        "current_assets": assets,
+                        "total_assets_cents": tot_assets_cents,
+                        "total_assets": round(tot_assets_cents / 100.0, 2),
+                        "current_liabilities": liabilities,
+                        "total_liabilities_cents": tot_liab_cents,
+                        "total_liabilities": round(tot_liab_cents / 100.0, 2),
+                        "equity_items": equity,
+                        "total_equity_cents": tot_eq_cents,
+                        "total_equity": round(tot_eq_cents / 100.0, 2),
+                        "is_balanced": (tot_assets_cents == (tot_liab_cents + tot_eq_cents))
+                    })
+
+                elif path == "/api/reports/cash-flow":
+                    start_date = query.get("start_date", [""])[0] or (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
+                    end_date = query.get("end_date", [""])[0] or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    q_pnl = """
+                    SELECT
+                        COALESCE(SUM(CASE WHEN a.type = 'revenue' THEN (jl.amount_cents * (CASE WHEN jl.entry_type='credit' THEN 1 ELSE -1 END)) ELSE 0 END), 0) -
+                        COALESCE(SUM(CASE WHEN a.type = 'expense' THEN (jl.amount_cents * (CASE WHEN jl.entry_type='debit' THEN 1 ELSE -1 END)) ELSE 0 END), 0) AS net_profit
+                    FROM accounts a
+                    JOIN journal_lines jl ON a.id = jl.account_id
+                    JOIN journal_entries je ON jl.entry_id = je.id AND je.status = 'posted'
+                    WHERE a.org_id = 'org_default' AND substr(je.posted_at, 1, 10) >= ? AND substr(je.posted_at, 1, 10) <= ?
+                    """
+                    net_profit = conn.execute(q_pnl, (start_date, end_date)).fetchone()["net_profit"] or 0
+                    q_cash = """
+                    SELECT
+                        COALESCE(SUM(CASE WHEN jl.entry_type = 'debit' THEN jl.amount_cents ELSE 0 END), 0) as inflows,
+                        COALESCE(SUM(CASE WHEN jl.entry_type = 'credit' THEN jl.amount_cents ELSE 0 END), 0) as outflows
+                    FROM journal_lines jl
+                    JOIN accounts a ON jl.account_id = a.id
+                    JOIN journal_entries je ON jl.entry_id = je.id AND je.status = 'posted'
+                    WHERE a.org_id = 'org_default' AND a.code = '1000'
+                        AND substr(je.posted_at, 1, 10) >= ? AND substr(je.posted_at, 1, 10) <= ?
+                    """
+                    cash_flow = conn.execute(q_cash, (start_date, end_date)).fetchone()
+                    cash_in = cash_flow["inflows"] or 0
+                    cash_out = cash_flow["outflows"] or 0
+                    q_beg = """
+                    SELECT COALESCE(SUM(CASE WHEN jl.entry_type = 'debit' THEN jl.amount_cents ELSE -jl.amount_cents END), 0) as beg_cash
+                    FROM journal_lines jl
+                    JOIN accounts a ON jl.account_id = a.id
+                    JOIN journal_entries je ON jl.entry_id = je.id AND je.status = 'posted'
+                    WHERE a.org_id = 'org_default' AND a.code = '1000' AND substr(je.posted_at, 1, 10) < ?
+                    """
+                    beg_cash = conn.execute(q_beg, (start_date,)).fetchone()["beg_cash"] or 0
+                    conn.close()
+                    net_change = cash_in - cash_out
+                    return self.send_json({
+                        "org_id": "org_default",
+                        "start_date": start_date,
+                        "end_date": end_date,
+                        "operating_activities": [{"category": "operating", "description": "Net Operational Income / (Loss)", "amount_cents": net_profit, "amount": round(net_profit / 100.0, 2)}],
+                        "operating_net_cents": net_profit,
+                        "operating_net": round(net_profit / 100.0, 2),
+                        "investing_activities": [],
+                        "investing_net_cents": 0,
+                        "investing_net": 0.0,
+                        "financing_activities": [],
+                        "financing_net_cents": 0,
+                        "financing_net": 0.0,
+                        "net_cash_change_cents": net_change,
+                        "net_cash_change": round(net_change / 100.0, 2),
+                        "beginning_cash_cents": beg_cash,
+                        "beginning_cash": round(beg_cash / 100.0, 2),
+                        "ending_cash_cents": beg_cash + net_change,
+                        "ending_cash": round((beg_cash + net_change) / 100.0, 2)
+                    })
+
+                elif path == "/api/reports/aging-ar":
+                    as_of_str = query.get("as_of", [""])[0] or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    try:
+                        as_of_dt = datetime.strptime(as_of_str, "%Y-%m-%d")
+                    except Exception:
+                        as_of_dt = datetime.now(timezone.utc)
+                    invs = conn.execute("""
+                        SELECT i.id, i.invoice_number, i.customer_id, COALESCE(c.name, 'Customer') as customer_name,
+                            i.issue_date, i.due_date, i.total_amount
+                        FROM invoices i
+                        LEFT JOIN customers c ON i.customer_id = c.id
+                        WHERE i.org_id = 'org_default' AND i.status != 'paid' AND i.total_amount > 0
+                        ORDER BY i.due_date ASC
+                    """).fetchall()
+                    conn.close()
+                    items = []
+                    b_cur = b_1_30 = b_31_60 = b_61_90 = b_90_plus = tot_cents = 0
+                    for inv in invs:
+                        try:
+                            due_dt = datetime.strptime(inv["due_date"], "%Y-%m-%d")
+                        except Exception:
+                            due_dt = as_of_dt
+                        days = (as_of_dt - due_dt).days
+                        cents = int(round(inv["total_amount"] * 100.0))
+                        tot_cents += cents
+                        if days <= 0:
+                            bracket = "current"
+                            b_cur += cents
+                        elif days <= 30:
+                            bracket = "1_30"
+                            b_1_30 += cents
+                        elif days <= 60:
+                            bracket = "31_60"
+                            b_31_60 += cents
+                        elif days <= 90:
+                            bracket = "61_90"
+                            b_61_90 += cents
+                        else:
+                            bracket = "90_plus"
+                            b_90_plus += cents
+                        items.append({
+                            "id": inv["id"], "number": inv["invoice_number"], "entity_id": inv["customer_id"],
+                            "entity_name": inv["customer_name"], "issue_date": inv["issue_date"], "due_date": inv["due_date"],
+                            "amount_cents": cents, "amount": inv["total_amount"], "days_overdue": days, "bracket": bracket
+                        })
+                    return self.send_json({
+                        "org_id": "org_default", "report_type": "receivables", "as_of": as_of_str,
+                        "current_cents": b_cur, "days_1_30_cents": b_1_30, "days_31_60_cents": b_31_60,
+                        "days_61_90_cents": b_61_90, "days_90_plus_cents": b_90_plus, "total_cents": tot_cents,
+                        "current": round(b_cur / 100.0, 2), "days_1_30": round(b_1_30 / 100.0, 2),
+                        "days_31_60": round(b_31_60 / 100.0, 2), "days_61_90": round(b_61_90 / 100.0, 2),
+                        "days_90_plus": round(b_90_plus / 100.0, 2), "total": round(tot_cents / 100.0, 2),
+                        "items": items
+                    })
+
+                elif path == "/api/reports/aging-ap":
+                    as_of_str = query.get("as_of", [""])[0] or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    try:
+                        as_of_dt = datetime.strptime(as_of_str, "%Y-%m-%d")
+                    except Exception:
+                        as_of_dt = datetime.now(timezone.utc)
+                    pos = conn.execute("""
+                        SELECT po.id, po.po_number, po.supplier_id, COALESCE(s.name, 'Supplier') as supplier_name,
+                            substr(po.created_at, 1, 10) as issue_date, po.total_amount
+                        FROM purchase_orders po
+                        LEFT JOIN suppliers s ON po.supplier_id = s.id
+                        WHERE po.org_id = 'org_default' AND po.status IN ('ordered', 'pending_approval') AND po.total_amount > 0
+                        ORDER BY po.created_at ASC
+                    """).fetchall()
+                    conn.close()
+                    items = []
+                    b_cur = b_1_30 = b_31_60 = b_61_90 = b_90_plus = tot_cents = 0
+                    for po in pos:
+                        try:
+                            iss_dt = datetime.strptime(po["issue_date"], "%Y-%m-%d")
+                        except Exception:
+                            iss_dt = as_of_dt
+                        due_dt = iss_dt + timedelta(days=30)
+                        days = (as_of_dt - due_dt).days
+                        cents = int(round(po["total_amount"] * 100.0))
+                        tot_cents += cents
+                        if days <= 0:
+                            bracket = "current"
+                            b_cur += cents
+                        elif days <= 30:
+                            bracket = "1_30"
+                            b_1_30 += cents
+                        elif days <= 60:
+                            bracket = "31_60"
+                            b_31_60 += cents
+                        elif days <= 90:
+                            bracket = "61_90"
+                            b_61_90 += cents
+                        else:
+                            bracket = "90_plus"
+                            b_90_plus += cents
+                        items.append({
+                            "id": po["id"], "number": po["po_number"], "entity_id": po["supplier_id"],
+                            "entity_name": po["supplier_name"], "issue_date": po["issue_date"], "due_date": due_dt.strftime("%Y-%m-%d"),
+                            "amount_cents": cents, "amount": po["total_amount"], "days_overdue": days, "bracket": bracket
+                        })
+                    return self.send_json({
+                        "org_id": "org_default", "report_type": "payables", "as_of": as_of_str,
+                        "current_cents": b_cur, "days_1_30_cents": b_1_30, "days_31_60_cents": b_31_60,
+                        "days_61_90_cents": b_61_90, "days_90_plus_cents": b_90_plus, "total_cents": tot_cents,
+                        "current": round(b_cur / 100.0, 2), "days_1_30": round(b_1_30 / 100.0, 2),
+                        "days_31_60": round(b_31_60 / 100.0, 2), "days_61_90": round(b_61_90 / 100.0, 2),
+                        "days_90_plus": round(b_90_plus / 100.0, 2), "total": round(tot_cents / 100.0, 2),
+                        "items": items
+                    })
+
+                elif path == "/api/reports/inventory-valuation":
+                    skus = conn.execute("SELECT id, code, name, category, stock_quantity, reserved_quantity, unit_cost, selling_price FROM skus WHERE org_id = 'org_default' ORDER BY name ASC").fetchall()
+                    whs = conn.execute("""
+                        SELECT w.id, w.name, COUNT(DISTINCT ws.sku_code) as total_items, COALESCE(SUM(ws.available_qty), 0) as total_units,
+                            COALESCE(SUM(ws.available_qty * s.unit_cost), 0.0) as cost_valuation
+                        FROM warehouses w
+                        LEFT JOIN warehouse_stocks ws ON w.id = ws.warehouse_id
+                        LEFT JOIN skus s ON ws.sku_code = s.code
+                        WHERE w.org_id = 'org_default'
+                        GROUP BY w.id, w.name
+                        ORDER BY w.name ASC
+                    """).fetchall()
+                    conn.close()
+                    sku_list = []
+                    tot_units = 0
+                    tot_cost_val = 0.0
+                    tot_ret_val = 0.0
+                    for s in skus:
+                        c_val = round(s["stock_quantity"] * s["unit_cost"], 2)
+                        r_val = round(s["stock_quantity"] * s["selling_price"], 2)
+                        tot_units += s["stock_quantity"]
+                        tot_cost_val += c_val
+                        tot_ret_val += r_val
+                        sku_list.append({
+                            "sku_id": s["id"], "sku_code": s["code"], "sku_name": s["name"], "category": s["category"],
+                            "stock_quantity": s["stock_quantity"], "reserved_quantity": s["reserved_quantity"],
+                            "unit_cost": s["unit_cost"], "selling_price": s["selling_price"],
+                            "cost_valuation": c_val, "retail_valuation": r_val, "potential_profit": round(r_val - c_val, 2)
+                        })
+                    return self.send_json({
+                        "org_id": "org_default", "as_of": utc_today_str(), "total_skus": len(sku_list),
+                        "total_units_on_hand": tot_units, "total_cost_valuation": round(tot_cost_val, 2),
+                        "total_retail_valuation": round(tot_ret_val, 2), "skus": sku_list,
+                        "warehouses": [{"warehouse_id": w["id"], "warehouse_name": w["name"], "total_items": w["total_items"], "total_units": w["total_units"], "cost_valuation": round(w["cost_valuation"] or 0.0, 2)} for w in whs]
+                    })
+
+                elif path == "/api/reports/inventory-turnover":
+                    val_res = conn.execute("SELECT COALESCE(SUM(stock_quantity * unit_cost), 0.0) as val FROM skus WHERE org_id = 'org_default'").fetchone()
+                    avg_val = val_res["val"] or 0.0
+                    cogs_res = conn.execute("""
+                        SELECT COALESCE(SUM(jl.amount_cents), 0) as cogs
+                        FROM journal_lines jl
+                        JOIN accounts a ON jl.account_id = a.id
+                        JOIN journal_entries je ON jl.entry_id = je.id AND je.status = 'posted'
+                        WHERE a.org_id = 'org_default' AND a.code = '5000' AND jl.entry_type = 'debit'
+                            AND substr(je.posted_at, 1, 10) >= date('now', '-365 days')
+                    """).fetchone()
+                    cogs_trailing = round((cogs_res["cogs"] or 0) / 100.0, 2)
+                    turnover = round(cogs_trailing / avg_val, 2) if avg_val > 0 and cogs_trailing > 0 else 0.0
+                    dsi = round(365.0 / turnover, 1) if turnover > 0 else 0.0
+                    dead_skus = conn.execute("""
+                        SELECT id, code, name, category, stock_quantity, unit_cost, substr(updated_at, 1, 10) as last_activity
+                        FROM skus
+                        WHERE org_id = 'org_default' AND stock_quantity > 0 AND substr(updated_at, 1, 10) <= date('now', '-90 days')
+                        ORDER BY (stock_quantity * unit_cost) DESC
+                    """).fetchall()
+                    conn.close()
+                    dead_list = []
+                    dead_val = 0.0
+                    now_dt = datetime.now(timezone.utc)
+                    for ds in dead_skus:
+                        tied = round(ds["stock_quantity"] * ds["unit_cost"], 2)
+                        dead_val += tied
+                        try:
+                            last_dt = datetime.strptime(ds["last_activity"], "%Y-%m-%d")
+                            days_inact = (now_dt - last_dt).days
+                        except Exception:
+                            days_inact = 90
+                        dead_list.append({
+                            "sku_id": ds["id"], "sku_code": ds["code"], "sku_name": ds["name"], "category": ds["category"],
+                            "stock_quantity": ds["stock_quantity"], "unit_cost": ds["unit_cost"], "tied_up_capital": tied,
+                            "days_inactive": days_inact, "last_activity": ds["last_activity"]
+                        })
+                    return self.send_json({
+                        "org_id": "org_default", "as_of": utc_today_str(), "trailing_period_days": 365,
+                        "cogs_trailing": cogs_trailing, "avg_inventory_value": round(avg_val, 2),
+                        "turnover_ratio": turnover, "days_sales_of_inventory": dsi,
+                        "dead_stock_count": len(dead_list), "dead_stock_value": round(dead_val, 2),
+                        "dead_stock": dead_list
+                    })
+
+                elif path == "/api/reports/sales-velocity":
+                    stages_res = conn.execute("""
+                        SELECT stage, COUNT(*) as cnt, COALESCE(SUM(value), 0.0) as tot_val, AVG(value) as avg_val, AVG(probability) as avg_prob
+                        FROM deals WHERE org_id = 'org_default' GROUP BY stage
+                    """).fetchall()
+                    leads_res = conn.execute("""
+                        SELECT COUNT(*) as tot, SUM(CASE WHEN status = 'converted' THEN 1 ELSE 0 END) as conv
+                        FROM inbound_leads WHERE org_id = 'org_default'
+                    """).fetchone()
+                    cycle_res = conn.execute("""
+                        SELECT AVG(julianday('now') - julianday(created_at)) as cycle_days
+                        FROM deals WHERE org_id = 'org_default' AND stage IN ('won', 'lost')
+                    """).fetchone()
+                    conn.close()
+                    tot_deals = won_deals = lost_deals = open_deals = 0
+                    won_val = pipe_val = weighted_val = 0.0
+                    stages_list = []
+                    for s in stages_res:
+                        cnt = s["cnt"]
+                        val = s["tot_val"]
+                        prob = int(s["avg_prob"] or 0)
+                        stages_list.append({
+                            "stage": s["stage"], "deal_count": cnt, "total_value": round(val, 2),
+                            "avg_value": round(s["avg_val"] or 0.0, 2), "probability": prob
+                        })
+                        tot_deals += cnt
+                        if s["stage"] == "won":
+                            won_deals += cnt
+                            won_val += val
+                        elif s["stage"] == "lost":
+                            lost_deals += cnt
+                        else:
+                            open_deals += cnt
+                            pipe_val += val
+                            weighted_val += (val * prob / 100.0)
+                    closed = won_deals + lost_deals
+                    win_loss = round((won_deals / closed) * 100.0, 2) if closed > 0 else 0.0
+                    avg_deal = round(won_val / won_deals, 2) if won_deals > 0 else 0.0
+                    avg_cycle = round(cycle_res["cycle_days"] or 14.0, 1) if cycle_res else 14.0
+                    tot_leads = leads_res["tot"] or 0
+                    conv_leads = leads_res["conv"] or 0
+                    conv_rate = round((conv_leads / tot_leads) * 100.0, 2) if tot_leads > 0 else 0.0
+                    return self.send_json({
+                        "org_id": "org_default", "total_deals": tot_deals, "won_deals": won_deals,
+                        "lost_deals": lost_deals, "open_deals": open_deals, "win_loss_ratio": win_loss,
+                        "total_won_value": round(won_val, 2), "average_deal_size": avg_deal,
+                        "avg_sales_cycle_days": avg_cycle, "pipeline_value": round(pipe_val, 2),
+                        "weighted_pipeline_value": round(weighted_val, 2), "total_leads": tot_leads,
+                        "converted_leads": conv_leads, "lead_conversion_rate": conv_rate,
+                        "stages": stages_list
+                    })
+
+                elif path == "/api/reports/executive-kpis":
+                    cash_res = conn.execute("""
+                        SELECT COALESCE(SUM(CASE WHEN jl.entry_type = 'debit' THEN jl.amount_cents ELSE -jl.amount_cents END), 0) as cash
+                        FROM journal_lines jl
+                        JOIN accounts a ON jl.account_id = a.id
+                        JOIN journal_entries je ON jl.entry_id = je.id AND je.status = 'posted'
+                        WHERE a.org_id = 'org_default' AND a.code = '1000'
+                    """).fetchone()
+                    cash_bal = round((cash_res["cash"] or 0) / 100.0, 2)
+                    ytd_start = f"{datetime.now(timezone.utc).year}-01-01"
+                    pnl_ytd = conn.execute("""
+                        SELECT
+                            COALESCE(SUM(CASE WHEN a.type = 'revenue' THEN (jl.amount_cents * (CASE WHEN jl.entry_type='credit' THEN 1 ELSE -1 END)) ELSE 0 END), 0) AS rev,
+                            COALESCE(SUM(CASE WHEN a.code = '5000' THEN (jl.amount_cents * (CASE WHEN jl.entry_type='debit' THEN 1 ELSE -1 END)) ELSE 0 END), 0) AS cogs,
+                            COALESCE(SUM(CASE WHEN a.type = 'expense' AND a.code != '5000' THEN (jl.amount_cents * (CASE WHEN jl.entry_type='debit' THEN 1 ELSE -1 END)) ELSE 0 END), 0) AS opex
+                        FROM accounts a
+                        JOIN journal_lines jl ON a.id = jl.account_id
+                        JOIN journal_entries je ON jl.entry_id = je.id AND je.status = 'posted'
+                        WHERE a.org_id = 'org_default' AND substr(je.posted_at, 1, 10) >= ?
+                    """, (ytd_start,)).fetchone()
+                    ytd_rev = round((pnl_ytd["rev"] or 0) / 100.0, 2)
+                    ytd_cogs = round((pnl_ytd["cogs"] or 0) / 100.0, 2)
+                    ytd_opex = round((pnl_ytd["opex"] or 0) / 100.0, 2)
+                    ytd_net = round(ytd_rev - ytd_cogs - ytd_opex, 2)
+                    margin_pct = round(((ytd_rev - ytd_cogs) / ytd_rev) * 100.0, 2) if ytd_rev > 0 else 0.0
+                    mrr_res = conn.execute("""
+                        SELECT COALESCE(SUM(CASE WHEN recurring_frequency = 'monthly' THEN total_amount
+                            WHEN recurring_frequency = 'quarterly' THEN total_amount / 3.0
+                            WHEN recurring_frequency = 'annual' THEN total_amount / 12.0 ELSE 0.0 END), 0.0) as mrr
+                        FROM invoices WHERE org_id = 'org_default' AND recurring_frequency IS NOT NULL AND recurring_frequency != '' AND recurring_frequency != 'none'
+                    """).fetchone()
+                    mrr = round(mrr_res["mrr"] or 0.0, 2)
+                    burn_res = conn.execute("""
+                        SELECT COALESCE(SUM(jl.amount_cents), 0) as burn
+                        FROM journal_lines jl
+                        JOIN accounts a ON jl.account_id = a.id
+                        JOIN journal_entries je ON jl.entry_id = je.id AND je.status = 'posted'
+                        WHERE a.org_id = 'org_default' AND a.type = 'expense' AND a.code != '5000'
+                            AND substr(je.posted_at, 1, 10) >= date('now', '-90 days')
+                    """).fetchone()
+                    monthly_burn = round(((burn_res["burn"] or 0) / 100.0) / 3.0, 2)
+                    runway = round(cash_bal / monthly_burn, 1) if monthly_burn > 0 and cash_bal > 0 else (99.0 if cash_bal > 0 else 0.0)
+                    commit_res = conn.execute("SELECT COALESCE(SUM(total_amount), 0.0) as c FROM purchase_orders WHERE org_id = 'org_default' AND status IN ('ordered', 'pending_approval')").fetchone()
+                    commits = round(commit_res["c"] or 0.0, 2)
+                    po_appr = conn.execute("SELECT COUNT(*) as cnt FROM purchase_orders WHERE org_id = 'org_default' AND status = 'pending_approval'").fetchone()["cnt"] or 0
+                    leave_appr = conn.execute("SELECT COUNT(*) as cnt FROM leave_requests WHERE org_id = 'org_default' AND status = 'pending'").fetchone()["cnt"] or 0
+                    inv_res = conn.execute("SELECT COALESCE(SUM(stock_quantity * unit_cost), 0.0) as val FROM skus WHERE org_id = 'org_default'").fetchone()
+                    inv_val = round(inv_res["val"] or 0.0, 2)
+                    ar_res = conn.execute("""
+                        SELECT
+                            COALESCE(SUM(CASE WHEN date('now') <= due_date THEN total_amount ELSE 0.0 END), 0.0) as cur,
+                            COALESCE(SUM(CASE WHEN date('now') > due_date THEN total_amount ELSE 0.0 END), 0.0) as ovd
+                        FROM invoices WHERE org_id = 'org_default' AND status != 'paid' AND total_amount > 0
+                    """).fetchone()
+                    conn.close()
+                    return self.send_json({
+                        "org_id": "org_default", "generated_at": utcnow_str(),
+                        "mrr": mrr, "gross_margin_pct": margin_pct, "operating_cash": cash_bal,
+                        "monthly_burn_rate": monthly_burn, "cash_runway_months": runway,
+                        "open_purchase_commitments": commits, "pending_approvals_count": po_appr + leave_appr,
+                        "total_revenue_ytd": ytd_rev, "net_profit_ytd": ytd_net,
+                        "total_inventory_valuation": inv_val,
+                        "accounts_receivable_current": round(ar_res["cur"] or 0.0, 2),
+                        "accounts_receivable_overdue": round(ar_res["ovd"] or 0.0, 2)
+                    })
+
+                elif path == "/api/reports/export":
+                    exp_type = (query.get("type", [""])[0] or query.get("export_type", [""])[0] or query.get("entity", ["pnl"])[0]).lower()
+                    fmt = (query.get("format", [""])[0] or query.get("file_format", ["csv"])[0]).lower()
+                    now_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                    base_fn = f"{exp_type}_export_{now_str}"
+
+                    headers = []
+                    rows = []
+
+                    if exp_type == "pnl":
+                        headers = ["Category", "Account Code", "Account Name", "Amount ($)"]
+                        q = """
+                        SELECT a.code, a.name, a.type,
+                            COALESCE(SUM(CASE WHEN jl.entry_type = 'debit' THEN jl.amount_cents ELSE 0 END), 0) AS total_debits,
+                            COALESCE(SUM(CASE WHEN jl.entry_type = 'credit' THEN jl.amount_cents ELSE 0 END), 0) AS total_credits
+                        FROM accounts a
+                        JOIN journal_lines jl ON a.id = jl.account_id
+                        JOIN journal_entries je ON jl.entry_id = je.id AND je.status = 'posted'
+                        WHERE a.org_id = 'org_default' AND a.type IN ('revenue', 'expense')
+                        GROUP BY a.code, a.name, a.type ORDER BY a.code ASC
+                        """
+                        db_rows = conn.execute(q).fetchall()
+                        for r in db_rows:
+                            amt = round(abs(r["total_credits"] - r["total_debits"]) / 100.0, 2)
+                            cat = "Revenue" if r["type"] == "revenue" else ("COGS" if r["code"] == "5000" else "Operating Expense")
+                            rows.append([cat, r["code"], r["name"], f"{amt:.2f}"])
+                    elif exp_type == "inventory":
+                        headers = ["SKU Code", "SKU Name", "Category", "On Hand", "Unit Cost ($)", "Selling Price ($)", "Total Valuation ($)"]
+                        skus = conn.execute("SELECT code, name, category, stock_quantity, unit_cost, selling_price FROM skus WHERE org_id = 'org_default'").fetchall()
+                        for s in skus:
+                            tot = round(s["stock_quantity"] * s["unit_cost"], 2)
+                            rows.append([s["code"], s["name"], s["category"], str(s["stock_quantity"]), f"{s['unit_cost']:.2f}", f"{s['selling_price']:.2f}", f"{tot:.2f}"])
+                    else:
+                        headers = ["Invoice Number", "Customer ID", "Status", "Issue Date", "Due Date", "Total ($)"]
+                        invs = conn.execute("SELECT invoice_number, customer_id, status, issue_date, due_date, total_amount FROM invoices WHERE org_id = 'org_default' ORDER BY created_at DESC").fetchall()
+                        for inv in invs:
+                            rows.append([inv["invoice_number"], inv["customer_id"], inv["status"], inv["issue_date"], inv["due_date"], f"{inv['total_amount']:.2f}"])
+
+                    conn.close()
+
+                    if fmt == "json":
+                        body = json.dumps(rows, indent=2).encode("utf-8")
+                        ct = "application/json"
+                        fn = base_fn + ".json"
+                    elif fmt == "pdf":
+                        body = generate_report_pdf(exp_type.replace("_", " "), "Official Executive Statement", [{"label": "Export", "value": exp_type.upper()}, {"label": "Records", "value": str(len(rows))}], headers, rows)
+                        ct = "application/pdf"
+                        fn = base_fn + ".pdf"
+                    else:
+                        out = io.StringIO()
+                        writer = csv.writer(out)
+                        writer.writerow(headers)
+                        for r in rows:
+                            writer.writerow(r)
+                        body = out.getvalue().encode("utf-8")
+                        ct = "text/csv"
+                        fn = base_fn + ".csv"
+
+                    self.send_response(200)
+                    self.send_header("Content-Type", ct)
+                    self.send_header("Content-Disposition", f'attachment; filename="{fn}"')
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+
+                
+                # Phase 8 GET Routes
+                elif path == "/api/webhooks/subscriptions":
+                    rows = conn.execute("SELECT * FROM webhook_subscriptions WHERE org_id = 'org_default' ORDER BY created_at DESC").fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path == "/api/webhooks/deliveries":
+                    rows = conn.execute("SELECT * FROM webhook_deliveries WHERE org_id = 'org_default' ORDER BY created_at DESC LIMIT 100").fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path == "/api/agent/configs":
+                    rows = conn.execute("SELECT * FROM agent_configs WHERE org_id = 'org_default' ORDER BY name ASC").fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path == "/api/agent/executions":
+                    rows = conn.execute("SELECT * FROM agent_executions WHERE org_id = 'org_default' ORDER BY created_at DESC LIMIT 100").fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path == "/api/agent/executions/detail":
+                    exec_id = query.get("id", [""])[0]
+                    row = conn.execute("SELECT * FROM agent_executions WHERE id = ?", (exec_id,)).fetchone()
+                    conn.close()
+                    if not row:
+                        return self.send_json({"error": "Execution not found"}, 404)
+                    return self.send_json(dict(row))
+
+                elif path == "/api/agent/escalations":
+                    status = query.get("status", [""])[0]
+                    if status and status != "all":
+                        rows = conn.execute("SELECT * FROM agent_escalations WHERE org_id = 'org_default' AND status = ? ORDER BY created_at DESC", (status,)).fetchall()
+                    else:
+                        rows = conn.execute("SELECT * FROM agent_escalations WHERE org_id = 'org_default' ORDER BY created_at DESC").fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path == "/api/agent/context":
+                    category = query.get("category", [""])[0]
+                    if category and category != "all":
+                        rows = conn.execute("SELECT * FROM agent_context_memory WHERE org_id = 'org_default' AND category = ? ORDER BY key ASC", (category,)).fetchall()
+                    else:
+                        rows = conn.execute("SELECT * FROM agent_context_memory WHERE org_id = 'org_default' ORDER BY category ASC, key ASC").fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path in ("/api/mcp/introspect", "/api/mcp/tools"):
+                    conn.close()
+                    return self.send_json({
+                        "tools_count": len(DYNAMIC_MCP_TOOLS),
+                        "tools": DYNAMIC_MCP_TOOLS
+                    })
+
+                # Phase 9: Enterprise Multi-Tenancy & Compliance GET Routes
+                elif path == "/api/orgs":
+                    rows = conn.execute("SELECT uo.user_id, uo.org_id, o.name as org_name, o.slug as org_slug, uo.role, uo.created_at FROM user_organizations uo JOIN organizations o ON uo.org_id = o.id ORDER BY o.name ASC").fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path == "/api/auth/invitations":
+                    rows = conn.execute("SELECT * FROM user_invitations WHERE status = 'pending' ORDER BY created_at DESC").fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path == "/api/auth/sso/configs":
+                    rows = conn.execute("SELECT id, org_id, provider, client_id, issuer_url, domain_mapping, is_enabled, created_at FROM sso_configs ORDER BY provider ASC").fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path == "/api/auth/roles":
+                    rows = conn.execute("SELECT * FROM custom_roles ORDER BY is_system DESC, name ASC").fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path == "/api/compliance/audit-vault":
+                    limit = int(query.get("limit", [50])[0])
+                    rows = conn.execute("SELECT * FROM audit_chain_vault WHERE org_id = 'org_default' ORDER BY sequence_number DESC LIMIT ?", (limit,)).fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path == "/api/compliance/audit-vault/verify":
+                    is_valid, count, err = verify_audit_vault_chain(conn, "org_default")
+                    conn.close()
+                    res = {"is_valid": is_valid, "blocks_verified": count, "org_id": "org_default", "timestamp": utcnow_str()}
+                    if err:
+                        res["verification_error"] = err
+                    return self.send_json(res)
+
+                elif path == "/api/compliance/gdpr/requests":
+                    rows = conn.execute("SELECT * FROM privacy_requests ORDER BY requested_at DESC").fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
+                elif path == "/api/compliance/soc2/access-review":
+                    rows = conn.execute("SELECT * FROM soc2_access_reviews ORDER BY created_at DESC").fetchall()
+                    conn.close()
+                    return self.send_json([dict(r) for r in rows])
+
                 conn.close()
                 return self.send_json({"error": "Endpoint not found"}, 404)
             except Exception as e:
                 return self.send_json({"error": str(e)}, 500)
+
 
         # 3. Static Files
         clean_path = path.lstrip("/")
@@ -847,9 +2431,16 @@ class AOSphereHandler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
+    def do_DELETE(self):
+        return self.do_POST()
+
+    def do_PUT(self):
+        return self.do_POST()
+
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        query = parse_qs(parsed.query)
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
         try:
@@ -872,27 +2463,32 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                     }
                 })
             elif method == "tools/list":
-                tools = [
-                    {"name": "erp_get_skus", "description": "Fetch inventory SKU records and safety stock levels."},
-                    {"name": "erp_adjust_stock", "description": "Adjust stock quantity for an SKU."},
-                    {"name": "crm_get_deals", "description": "Retrieve deals pipeline and stages."},
-                    {"name": "crm_create_deal", "description": "Create a new sales opportunity deal."},
-                    {"name": "fin_get_summary", "description": "Retrieve corporate P&L summary."},
-                    {"name": "fin_create_invoice", "description": "Generate a new client billing invoice."},
-                    {"name": "hr_get_shifts", "description": "Fetch employee shift roster."},
-                    {"name": "hr_update_shift", "description": "Update worker shift status."},
-                    {"name": "gov_get_pending_approvals", "description": "Fetch human approval backlog."}
-                ]
-                return self.send_json({"jsonrpc": "2.0", "id": rpc_id, "result": {"tools": tools}})
+                return self.send_json({"jsonrpc": "2.0", "id": rpc_id, "result": {"tools": DYNAMIC_MCP_TOOLS}})
             elif method == "tools/call":
+                t_start = time.time()
                 params = req.get("params", {})
                 name = params.get("name", "")
+                args = params.get("arguments", {})
+                agent_id = req.get("agent_id") or self.headers.get("X-Agent-ID", "agent_default")
                 conn = get_db()
+
+                # Check budget / rate limit
+                cfg = conn.execute("SELECT * FROM agent_configs WHERE api_key_hash = ? OR id = ?", (agent_id, agent_id)).fetchone()
+                if cfg and cfg["daily_budget_cents"] > 0 and cfg["current_day_usage_cents"] >= cfg["daily_budget_cents"]:
+                    conn.close()
+                    return self.send_json({
+                        "jsonrpc": "2.0",
+                        "id": rpc_id,
+                        "error": {"code": -32029, "message": f"rate limit exceeded: daily budget cap reached ({cfg['current_day_usage_cents']} / {cfg['daily_budget_cents']} cents) [-32029]"}
+                    })
+
+                text_result = f"Executed tool {name} successfully."
+                is_err = False
+
                 if name == "fin_get_summary":
                     rev_row = conn.execute("SELECT COALESCE(SUM(total_amount), 0) as rev, COUNT(*) as cnt FROM invoices WHERE status = 'paid'").fetchone()
                     unpaid_row = conn.execute("SELECT COALESCE(SUM(total_amount), 0) as unp, COUNT(*) as cnt FROM invoices WHERE status != 'paid'").fetchone()
                     exp_row = conn.execute("SELECT COALESCE(SUM(amount), 0) as exp FROM expenses").fetchone()
-                    conn.close()
                     res = {
                         "total_revenue": float(rev_row["rev"] or 0.0),
                         "total_expense": float(exp_row["exp"] or 0.0),
@@ -901,16 +2497,69 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                         "paid_count": int(rev_row["cnt"] or 0),
                         "pending_count": int(unpaid_row["cnt"] or 0)
                     }
-                    return self.send_json({
-                        "jsonrpc": "2.0",
-                        "id": rpc_id,
-                        "result": {"content": [{"type": "text", "text": json.dumps(res, indent=2)}]}
-                    })
+                    text_result = json.dumps(res, indent=2)
+
+                elif name == "agent_escalate_to_human":
+                    esc_id = f"esc_{int(time.time()*1000)}"
+                    title = args.get("title", "Agent Escalation")
+                    reason = args.get("reason", "ambiguous_input")
+                    input_ctx = args.get("input_context", "{}")
+                    rec_act = args.get("recommended_action", "")
+                    now = utcnow_str()
+                    conn.execute("""
+                        INSERT INTO agent_escalations (id, org_id, agent_id, title, reason, status, input_context_json, recommended_action, created_at)
+                        VALUES (?, 'org_default', ?, ?, ?, 'pending', ?, ?, ?)
+                    """, (esc_id, agent_id, title, reason, input_ctx, rec_act, now))
+                    conn.execute("""
+                        INSERT INTO approvals (id, action_type, title, description, payload_json, status, requested_by_type, requested_by_id, created_at)
+                        VALUES (?, 'agent_escalation', ?, ?, ?, 'pending', 'agent', ?, ?)
+                    """, (f"appr_{esc_id}", title, f"Agent escalated: {reason}. Action: {rec_act}", input_ctx, agent_id, now))
+                    conn.commit()
+                    text_result = f"Successfully escalated to human review queue. Escalation ID: {esc_id}. Status: pending."
+
+                elif name == "agent_get_context":
+                    category = args.get("category", "")
+                    if category:
+                        rows = conn.execute("SELECT * FROM agent_context_memory WHERE org_id = 'org_default' AND category = ?", (category,)).fetchall()
+                    else:
+                        rows = conn.execute("SELECT * FROM agent_context_memory WHERE org_id = 'org_default'").fetchall()
+                    ctx_dict = {}
+                    for r in rows:
+                        c = r["category"]
+                        if c not in ctx_dict:
+                            ctx_dict[c] = {}
+                        ctx_dict[c][r["key"]] = r["value"]
+                    text_result = json.dumps(ctx_dict, indent=2)
+
+                elif name == "agent_sanitize_input":
+                    raw_text = args.get("text", "")
+                    res = sanitize_input(raw_text)
+                    text_result = json.dumps(res, indent=2)
+
+                elif name == "webhook_test_event":
+                    ev_type = args.get("event_type", "po.created")
+                    payload = args.get("payload") or {"test": True, "timestamp": utcnow_str()}
+                    delivs = dispatch_webhook_event(conn, "org_default", ev_type, payload)
+                    text_result = f"Dispatched event {ev_type} to {len(delivs)} webhook subscribers."
+
+                duration_ms = int((time.time() - t_start) * 1000)
+                # Durable execution record
+                exec_id = f"exec_{int(time.time()*1000)}"
+                conn.execute("""
+                    INSERT INTO agent_executions (id, org_id, agent_id, tool_name, category, arguments_json, result_json, is_error, error_message, duration_ms, cost_cents, mutations_json, created_at)
+                    VALUES (?, 'org_default', ?, ?, 'read_only', ?, ?, ?, ?, ?, 1, '[]', ?)
+                """, (exec_id, agent_id, name, json.dumps(args), text_result[:1000], 1 if is_err else 0, text_result if is_err else "", duration_ms, utcnow_str()))
+
+                if cfg:
+                    conn.execute("UPDATE agent_configs SET current_day_usage_cents = current_day_usage_cents + 1, last_used_at = ? WHERE id = ?", (utcnow_str(), cfg["id"]))
+
+                conn.commit()
                 conn.close()
+
                 return self.send_json({
                     "jsonrpc": "2.0",
                     "id": rpc_id,
-                    "result": {"content": [{"type": "text", "text": f"Executed tool {name} successfully."}]}
+                    "result": {"content": [{"type": "text", "text": text_result}], "isError": is_err}
                 })
             else:
                 return self.send_json({
@@ -1157,24 +2806,69 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 return self.send_json(dict(row), 201)
 
             elif path == "/api/employees":
-                name = req.get("name")
-                email = req.get("email")
+                emp_id = req.get("id")
+                name = req.get("name", "")
+                email = req.get("email", "")
+                phone = req.get("phone", "")
                 role = req.get("role", "Staff")
                 dept = req.get("department", "Operations")
                 rate = float(req.get("hourly_rate", 25.0))
-                emp_id = f"emp_{int(time.time()*1000)}"
-                now = utcnow_str()
+                job_title = req.get("job_title") or role
+                reporting_mgr = req.get("reporting_manager_id", "")
+                emp_type = req.get("employment_type", "full_time")
+                sal_type = req.get("salary_type", "hourly")
+                mo_sal = float(req.get("monthly_salary", 0.0))
+                tax_id = req.get("tax_id", "")
+                bank_name = req.get("bank_name", "")
+                bank_acct = req.get("bank_account_number", "")
+                bank_rout = req.get("bank_routing_number", "")
+                em_name = req.get("emergency_contact_name", "")
+                em_phone = req.get("emergency_contact_phone", "")
 
-                conn.execute(
-                    "INSERT INTO employees (id, org_id, name, email, role, department, hourly_rate, status, created_at) VALUES (?, 'org_default', ?, ?, ?, ?, ?, 'active', ?)",
-                    (emp_id, name, email, role, dept, rate, now)
-                )
-                log_audit(conn, "human", "web_user", "CREATE_EMPLOYEE", "employees", emp_id, f"Onboarded employee {name} ({role})")
-                conn.commit()
-                row = conn.execute("SELECT * FROM employees WHERE id = ?", (emp_id,)).fetchone()
-                conn.close()
-                broadcast("employee_created", {"employee_id": emp_id, "name": name})
-                return self.send_json(dict(row), 201)
+                if emp_id:
+                    conn.execute("""
+                        UPDATE employees SET
+                            name = COALESCE(?, name),
+                            email = COALESCE(?, email),
+                            phone = COALESCE(?, phone),
+                            role = COALESCE(?, role),
+                            department = COALESCE(?, department),
+                            hourly_rate = ?,
+                            job_title = ?,
+                            reporting_manager_id = ?,
+                            employment_type = ?,
+                            salary_type = ?,
+                            monthly_salary = ?,
+                            tax_id = ?,
+                            bank_name = ?,
+                            bank_account_number = ?,
+                            bank_routing_number = ?,
+                            emergency_contact_name = ?,
+                            emergency_contact_phone = ?
+                        WHERE id = ?
+                    """, (name, email, phone, role, dept, rate, job_title, reporting_mgr, emp_type, sal_type, mo_sal, tax_id, bank_name, bank_acct, bank_rout, em_name, em_phone, emp_id))
+                    conn.commit()
+                    row = conn.execute("SELECT * FROM employees WHERE id = ?", (emp_id,)).fetchone()
+                    conn.close()
+                    broadcast("employee_updated", {"employee_id": emp_id, "name": name})
+                    return self.send_json(dict(row) if row else {"id": emp_id, "status": "ok"})
+                else:
+                    emp_id = f"emp_{int(time.time()*1000)}"
+                    now = utcnow_str()
+                    conn.execute("""
+                        INSERT INTO employees (
+                            id, org_id, name, email, phone, role, department, hourly_rate, status, hired_at,
+                            job_title, reporting_manager_id, employment_type, salary_type, monthly_salary,
+                            tax_id, bank_name, bank_account_number, bank_routing_number,
+                            emergency_contact_name, emergency_contact_phone, created_at
+                        ) VALUES (?, 'org_default', ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (emp_id, name, email, phone, role, dept, rate, utc_today_str(), job_title, reporting_mgr, emp_type, sal_type, mo_sal, tax_id, bank_name, bank_acct, bank_rout, em_name, em_phone, now))
+                    log_audit(conn, "human", "web_user", "CREATE_EMPLOYEE", "employees", emp_id, f"Onboarded employee {name} ({role})")
+                    conn.commit()
+                    row = conn.execute("SELECT * FROM employees WHERE id = ?", (emp_id,)).fetchone()
+                    conn.close()
+                    broadcast("employee_created", {"employee_id": emp_id, "name": name})
+                    return self.send_json(dict(row), 201)
 
             elif path == "/api/shifts":
                 emp_id = req.get("employee_id")
@@ -1608,15 +3302,678 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 broadcast("invoice_paid", {"invoice_id": inv_id, "token": ptoken})
                 return self.send_json({"status": "paid"})
 
+            elif path == "/api/timeclock/event":
+                emp_id = req.get("employee_id")
+                evt_type = req.get("event_type")
+                shift_id = req.get("shift_id") or None
+                notes = req.get("location_notes") or req.get("notes") or ""
+                if not emp_id or not evt_type:
+                    conn.close()
+                    return self.send_json({"error": "employee_id and event_type required"}, 400)
+                ev_id = f"pnc_{int(time.time()*1000)}"
+                now = utcnow_str()
+                conn.execute("""
+                    INSERT INTO timeclock_events (id, org_id, employee_id, shift_id, event_type, timestamp, location_notes, created_at)
+                    VALUES (?, 'org_default', ?, ?, ?, ?, ?, ?)
+                """, (ev_id, emp_id, shift_id, evt_type, now, notes, now))
+                conn.commit()
+                row = conn.execute("SELECT * FROM timeclock_events WHERE id = ?", (ev_id,)).fetchone()
+                conn.close()
+                broadcast("timeclock_punch", {"employee_id": emp_id, "event_type": evt_type})
+                return self.send_json(dict(row), 201)
+
+            elif path == "/api/payroll/run":
+                period = req.get("period") or datetime.now(timezone.utc).strftime("%Y-%m")
+                pay_date = req.get("payment_date") or utc_today_str()
+                emps = conn.execute("SELECT * FROM employees WHERE status = 'active' ORDER BY name").fetchall()
+                if not emps:
+                    conn.close()
+                    return self.send_json({"error": "No active employees found"}, 400)
+
+                run_id = f"prun_{int(time.time()*1000)}"
+                payslips = []
+                tot_gross_c = 0
+                tot_tax_c = 0
+                tot_ded_c = 0
+                tot_net_c = 0
+                now = utcnow_str()
+
+                for e in emps:
+                    sal_type = e["salary_type"] if "salary_type" in e.keys() else "hourly"
+                    rate = float(e["hourly_rate"] or 25.0)
+                    mo_sal = float(e["monthly_salary"] or 0.0)
+                    if sal_type == "monthly" and mo_sal > 0:
+                        gross = mo_sal
+                        reg_hrs = 160.0
+                        ot_hrs = 0.0
+                    else:
+                        reg_hrs = 160.0
+                        ot_hrs = 0.0
+                        gross = reg_hrs * rate
+
+                    tax = round(gross * 0.12, 2)
+                    soc = round(gross * 0.05, 2)
+                    ben = round(gross * 0.03, 2)
+                    net = round(gross - (tax + soc + ben), 2)
+
+                    g_c = int(round(gross * 100))
+                    t_c = int(round(tax * 100))
+                    d_c = int(round((soc + ben) * 100))
+                    n_c = g_c - (t_c + d_c)
+
+                    tot_gross_c += g_c
+                    tot_tax_c += t_c
+                    tot_ded_c += d_c
+                    tot_net_c += n_c
+
+                    ps_id = f"ps_{e['id']}_{period}"
+                    payslips.append({
+                        "id": ps_id, "payroll_run_id": run_id, "employee_id": e["id"], "employee_name": e["name"],
+                        "period": period, "salary_type": sal_type, "hourly_rate": rate, "monthly_salary": mo_sal,
+                        "regular_hours": reg_hrs, "overtime_hours": ot_hrs,
+                        "gross_pay": gross, "tax_withholding": tax, "social_contributions": soc,
+                        "benefits_deductions": ben, "net_pay": net, "status": "paid", "payment_date": pay_date
+                    })
+
+                je_id = f"je_pr_{int(time.time()*1000)}"
+                je_num = f"JE-PAYROLL-{period}"
+                tax_ded_c = tot_tax_c + tot_ded_c
+                conn.execute("""
+                    INSERT INTO journal_entries (id, org_id, entry_number, source_type, source_id, memo, status, posted_at, created_by, created_at)
+                    VALUES (?, 'org_default', ?, 'payroll', ?, ?, 'posted', ?, 'payroll_engine', ?)
+                """, (je_id, je_num, run_id, f"Monthly Payroll Disbursal {period}", now, now))
+
+                acc_5200 = conn.execute("SELECT id FROM accounts WHERE code = '5200'").fetchone()
+                acc_2150 = conn.execute("SELECT id FROM accounts WHERE code = '2150'").fetchone()
+                acc_1000 = conn.execute("SELECT id FROM accounts WHERE code = '1000'").fetchone()
+
+                if acc_5200:
+                    conn.execute("INSERT INTO journal_lines (id, org_id, entry_id, account_id, entry_type, amount_cents, description, created_at) VALUES (?, 'org_default', ?, ?, 'debit', ?, ?, ?)",
+                        (f"jl_{int(time.time()*1000)}_1", je_id, acc_5200["id"], tot_gross_c, f"Salaries Expense {period}", now))
+                if acc_2150:
+                    conn.execute("INSERT INTO journal_lines (id, org_id, entry_id, account_id, entry_type, amount_cents, description, created_at) VALUES (?, 'org_default', ?, ?, 'credit', ?, ?, ?)",
+                        (f"jl_{int(time.time()*1000)}_2", je_id, acc_2150["id"], tax_ded_c, f"Tax & Benefit Withholding {period}", now))
+                if acc_1000:
+                    conn.execute("INSERT INTO journal_lines (id, org_id, entry_id, account_id, entry_type, amount_cents, description, created_at) VALUES (?, 'org_default', ?, ?, 'credit', ?, ?, ?)",
+                        (f"jl_{int(time.time()*1000)}_3", je_id, acc_1000["id"], tot_net_c, f"Net Direct Deposit Wages {period}", now))
+
+                conn.execute("""
+                    INSERT INTO payroll_runs (
+                        id, org_id, period, total_gross_cents, total_tax_cents, total_deductions_cents,
+                        total_net_cents, status, payment_date, journal_entry_id, payslips_count, created_at
+                    ) VALUES (?, 'org_default', ?, ?, ?, ?, ?, 'paid', ?, ?, ?, ?)
+                    ON CONFLICT(org_id, period) DO UPDATE SET
+                        total_gross_cents = excluded.total_gross_cents,
+                        total_tax_cents = excluded.total_tax_cents,
+                        total_deductions_cents = excluded.total_deductions_cents,
+                        total_net_cents = excluded.total_net_cents,
+                        status = 'paid', payment_date = excluded.payment_date,
+                        journal_entry_id = excluded.journal_entry_id,
+                        payslips_count = excluded.payslips_count
+                """, (run_id, period, tot_gross_c, tot_tax_c, tot_ded_c, tot_net_c, pay_date, je_id, len(payslips), now))
+
+                for ps in payslips:
+                    conn.execute("""
+                        INSERT INTO payslips (
+                            id, org_id, payroll_run_id, employee_id, period, salary_type,
+                            hourly_rate, monthly_salary, regular_hours, overtime_hours,
+                            gross_pay, tax_withholding, social_contributions, benefits_deductions,
+                            net_pay, status, payment_date, created_at
+                        ) VALUES (?, 'org_default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'paid', ?, ?)
+                        ON CONFLICT(org_id, payroll_run_id, employee_id) DO UPDATE SET
+                            gross_pay = excluded.gross_pay,
+                            tax_withholding = excluded.tax_withholding,
+                            social_contributions = excluded.social_contributions,
+                            benefits_deductions = excluded.benefits_deductions,
+                            net_pay = excluded.net_pay,
+                            status = 'paid', payment_date = excluded.payment_date
+                    """, (ps["id"], run_id, ps["employee_id"], period, ps["salary_type"], ps["hourly_rate"], ps["monthly_salary"], ps["regular_hours"], ps["overtime_hours"], ps["gross_pay"], ps["tax_withholding"], ps["social_contributions"], ps["benefits_deductions"], ps["net_pay"], pay_date, now))
+
+                conn.commit()
+                run_row = conn.execute("SELECT * FROM payroll_runs WHERE period = ?", (period,)).fetchone()
+                conn.close()
+                broadcast("payroll_executed", {"period": period, "total_net": tot_net_c / 100.0})
+                run_dict = dict(run_row) if run_row else {"id": run_id, "period": period}
+                return self.send_json({
+                    "id": run_id,
+                    "period": period,
+                    "journal_entry_id": je_id,
+                    "total_gross_cents": tot_gross_c,
+                    "total_tax_cents": tot_tax_c,
+                    "total_deductions_cents": tot_ded_c,
+                    "total_net_cents": tot_net_c,
+                    "run": run_dict,
+                    "payslips": payslips
+                }, 201)
+
+            elif path == "/api/leaves/requests":
+                emp_id = req.get("employee_id")
+                l_type = req.get("leave_type", "vacation")
+                s_date = req.get("start_date")
+                e_date = req.get("end_date")
+                days = int(req.get("days_count", 1))
+                reason = req.get("reason", "")
+                if not emp_id or not s_date or not e_date:
+                    conn.close()
+                    return self.send_json({"error": "employee_id, start_date, and end_date required"}, 400)
+                lr_id = f"lvr_{int(time.time()*1000)}"
+                now = utcnow_str()
+                conn.execute("""
+                    INSERT INTO leave_requests (id, org_id, employee_id, leave_type, start_date, end_date, days_count, reason, status, created_at)
+                    VALUES (?, 'org_default', ?, ?, ?, ?, ?, ?, 'pending', ?)
+                """, (lr_id, emp_id, l_type, s_date, e_date, days, reason, now))
+                conn.commit()
+                row = conn.execute("SELECT lr.*, COALESCE(e.name, 'Employee') as employee_name FROM leave_requests lr LEFT JOIN employees e ON lr.employee_id = e.id WHERE lr.id = ?", (lr_id,)).fetchone()
+                conn.close()
+                broadcast("leave_requested", {"id": lr_id, "employee_id": emp_id})
+                return self.send_json(dict(row), 201)
+
+            elif path == "/api/leaves/review":
+                req_id = req.get("request_id")
+                status = req.get("status")
+                notes = req.get("review_notes", "")
+                if not req_id or status not in ("approved", "rejected"):
+                    conn.close()
+                    return self.send_json({"error": "valid request_id and status ('approved' or 'rejected') required"}, 400)
+                conn.execute("UPDATE leave_requests SET status = ?, reviewed_by = 'HR Manager', review_notes = ? WHERE id = ?", (status, notes, req_id))
+                conn.commit()
+                conn.close()
+                broadcast("leave_reviewed", {"request_id": req_id, "status": status})
+                return self.send_json({"status": "ok", "request_id": req_id})
+
+            elif path == "/api/hr/documents":
+                emp_id = req.get("employee_id")
+                title = req.get("title")
+                doc_type = req.get("document_type", "contract")
+                fname = req.get("file_name", "document.pdf")
+                content = req.get("file_content", "")
+                fsize = int(req.get("file_size") or len(content))
+                if not emp_id or not title:
+                    conn.close()
+                    return self.send_json({"error": "employee_id and title required"}, 400)
+                doc_id = f"doc_{int(time.time()*1000)}"
+                now = utcnow_str()
+                conn.execute("""
+                    INSERT INTO hr_documents (id, org_id, employee_id, title, document_type, file_name, file_content, file_size, uploaded_by, created_at)
+                    VALUES (?, 'org_default', ?, ?, ?, ?, ?, ?, 'HR Operations', ?)
+                """, (doc_id, emp_id, title, doc_type, fname, content, fsize, now))
+                conn.commit()
+                row = conn.execute("SELECT d.*, COALESCE(e.name, 'Employee') as employee_name FROM hr_documents d LEFT JOIN employees e ON d.employee_id = e.id WHERE d.id = ?", (doc_id,)).fetchone()
+                conn.close()
+                broadcast("hr_document_uploaded", {"id": doc_id, "employee_id": emp_id})
+                return self.send_json(dict(row), 201)
+
+            
+            # Phase 8 POST Routes
+            elif path == "/api/webhooks/subscriptions":
+                if self.command == "DELETE":
+                    parsed = urlparse(self.path)
+                    q = parse_qs(parsed.query)
+                    sub_id = q.get("id", [""])[0] or req.get("id", "")
+                    conn.execute("DELETE FROM webhook_subscriptions WHERE id = ?", (sub_id,))
+                    conn.commit()
+                    conn.close()
+                    return self.send_json({"status": "deleted", "id": sub_id})
+                else:
+                    sub_id = f"wsub_{int(time.time()*1000)}"
+                    name = req.get("name", "Webhook Subscription")
+                    url = req.get("url", "")
+                    secret = req.get("secret") or f"whsec_{uuid.uuid4().hex[:16]}"
+                    ev_types = req.get("event_types", '["*"]')
+                    if isinstance(ev_types, list):
+                        ev_types = json.dumps(ev_types)
+                    now = utcnow_str()
+                    conn.execute("""
+                        INSERT INTO webhook_subscriptions (id, org_id, name, url, secret, event_types, is_active, created_at, updated_at)
+                        VALUES (?, 'org_default', ?, ?, ?, ?, 1, ?, ?)
+                    """, (sub_id, name, url, secret, ev_types, now, now))
+                    conn.commit()
+                    row = conn.execute("SELECT * FROM webhook_subscriptions WHERE id = ?", (sub_id,)).fetchone()
+                    conn.close()
+                    return self.send_json(dict(row), 201)
+
+            elif path == "/api/webhooks/deliveries/redeliver":
+                deliv_id = req.get("id") or parse_qs(urlparse(self.path).query).get("id", [""])[0]
+                row = conn.execute("SELECT * FROM webhook_deliveries WHERE id = ?", (deliv_id,)).fetchone()
+                if not row:
+                    conn.close()
+                    return self.send_json({"error": "Delivery record not found"}, 404)
+                sub = conn.execute("SELECT * FROM webhook_subscriptions WHERE id = ?", (row["subscription_id"],)).fetchone()
+                conn.close()
+                if not sub:
+                    return self.send_json({"error": "Subscription not found"}, 404)
+                conn = get_db()
+                delivs = dispatch_webhook_event(conn, "org_default", row["event_type"], json.loads(row["payload_json"]))
+                conn.close()
+                return self.send_json(delivs[0] if delivs else {"status": "redelivered"})
+
+            elif path == "/api/webhooks/test-dispatch":
+                ev_type = req.get("event_type", "po.created")
+                payload = req.get("payload") or {
+                    "sample_po_number": f"PO-TEST-{uuid.uuid4().hex[:6].upper()}",
+                    "amount": 1250.00,
+                    "currency": "USD",
+                    "supplier": "Acme Industrial Supply",
+                    "timestamp": utcnow_str()
+                }
+                delivs = dispatch_webhook_event(conn, "org_default", ev_type, payload)
+                conn.close()
+                return self.send_json({
+                    "status": "dispatched",
+                    "event_type": ev_type,
+                    "deliveries_count": len(delivs),
+                    "deliveries": delivs
+                })
+
+            elif path == "/api/agent/configs":
+                cfg_id = req.get("id") or f"cfg_{int(time.time()*1000)}"
+                name = req.get("name", "Custom Agent")
+                hash_val = req.get("api_key_hash") or f"hash_{int(time.time()*1000)}"
+                quota = int(req.get("tool_quota_per_minute", 60))
+                budget = int(req.get("daily_budget_cents", 5000))
+                concurrent = int(req.get("concurrent_limit", 5))
+                now = utcnow_str()
+                conn.execute("""
+                    INSERT INTO agent_configs (id, org_id, name, api_key_hash, tool_quota_per_minute, daily_budget_cents, current_day_usage_cents, concurrent_limit, active_slots, is_active, created_at)
+                    VALUES (?, 'org_default', ?, ?, ?, ?, 0, ?, 0, 1, ?)
+                    ON CONFLICT(api_key_hash) DO UPDATE SET
+                        name = excluded.name,
+                        tool_quota_per_minute = excluded.tool_quota_per_minute,
+                        daily_budget_cents = excluded.daily_budget_cents,
+                        concurrent_limit = excluded.concurrent_limit,
+                        is_active = excluded.is_active
+                """, (cfg_id, name, hash_val, quota, budget, concurrent, now))
+                conn.commit()
+                row = conn.execute("SELECT * FROM agent_configs WHERE api_key_hash = ?", (hash_val,)).fetchone()
+                conn.close()
+                return self.send_json(dict(row))
+
+            elif path == "/api/agent/escalations":
+                esc_id = f"esc_{int(time.time()*1000)}"
+                agent_id = req.get("agent_id", "agent_default")
+                title = req.get("title", "Agent Escalation")
+                reason = req.get("reason", "ambiguous_input")
+                ctx_json = req.get("input_context_json", "{}")
+                if isinstance(ctx_json, dict):
+                    ctx_json = json.dumps(ctx_json)
+                rec_act = req.get("recommended_action", "")
+                now = utcnow_str()
+                conn.execute("""
+                    INSERT INTO agent_escalations (id, org_id, agent_id, title, reason, status, input_context_json, recommended_action, created_at)
+                    VALUES (?, 'org_default', ?, ?, ?, 'pending', ?, ?, ?)
+                """, (esc_id, agent_id, title, reason, ctx_json, rec_act, now))
+                # Also create human approval backlog item
+                conn.execute("""
+                    INSERT INTO approvals (id, action_type, title, description, payload_json, status, requested_by_type, requested_by_id, created_at)
+                    VALUES (?, 'agent_escalation', ?, ?, ?, 'pending', 'agent', ?, ?)
+                """, (f"appr_{esc_id}", title, f"Agent escalated: {reason}. Action: {rec_act}", ctx_json, agent_id, now))
+                conn.commit()
+                row = conn.execute("SELECT * FROM agent_escalations WHERE id = ?", (esc_id,)).fetchone()
+                conn.close()
+                return self.send_json(dict(row), 201)
+
+            elif path == "/api/agent/escalations/resolve":
+                esc_id = req.get("id")
+                status = req.get("status", "resolved")
+                notes = req.get("notes", "")
+                now = utcnow_str()
+                conn.execute("UPDATE agent_escalations SET status = ?, reviewer_notes = ?, resolved_at = ? WHERE id = ?", (status, notes, now, esc_id))
+                conn.execute("UPDATE approvals SET status = ?, decided_by = 'human_supervisor', decided_at = ? WHERE id = ?", (status, now, f"appr_{esc_id}"))
+                conn.commit()
+                conn.close()
+                return self.send_json({"status": status, "escalation_id": esc_id, "resolved_at": now})
+
+            elif path == "/api/agent/context":
+                cat = req.get("category", "company_profile")
+                k = req.get("key")
+                v = req.get("value")
+                desc = req.get("description", "")
+                now = utcnow_str()
+                ctx_id = f"ctx_{int(time.time()*1000)}"
+                conn.execute("""
+                    INSERT INTO agent_context_memory (id, org_id, category, key, value, description, updated_at)
+                    VALUES (?, 'org_default', ?, ?, ?, ?, ?)
+                    ON CONFLICT(org_id, key) DO UPDATE SET
+                        category = excluded.category,
+                        value = excluded.value,
+                        description = excluded.description,
+                        updated_at = excluded.updated_at
+                """, (ctx_id, cat, k, v, desc, now))
+                conn.commit()
+                row = conn.execute("SELECT * FROM agent_context_memory WHERE org_id = 'org_default' AND key = ?", (k,)).fetchone()
+                conn.close()
+                return self.send_json(dict(row))
+
+            elif path == "/api/agent/sanitize":
+                conn.close()
+                res = sanitize_input(req.get("text", ""))
+                return self.send_json(res)
+
+            # Phase 9: Enterprise Multi-Tenancy & Compliance POST Routes
+            elif path == "/api/orgs":
+                name = req.get("name")
+                slug = req.get("slug")
+                if not name or not slug:
+                    conn.close()
+                    return self.send_json({"error": "name and slug required"}, 400)
+                org_id = f"org_{slug.lower()}"
+                now = utcnow_str()
+                conn.execute("INSERT OR IGNORE INTO organizations (id, name, slug, created_at) VALUES (?, ?, ?, ?)", (org_id, name, slug, now))
+                conn.execute("INSERT OR IGNORE INTO user_organizations (user_id, org_id, role, created_at) VALUES ('usr_admin_default', ?, 'admin', ?)", (org_id, now))
+                conn.commit()
+                row = conn.execute("SELECT * FROM organizations WHERE id = ?", (org_id,)).fetchone()
+                conn.close()
+                return self.send_json(dict(row), 201)
+
+            elif path == "/api/auth/switch-org":
+                target_org = req.get("org_id")
+                if not target_org:
+                    conn.close()
+                    return self.send_json({"error": "org_id required"}, 400)
+                conn.close()
+                return self.send_json({"status": "switched", "active_org_id": target_org, "message": f"Active organization switched to {target_org}"})
+
+            elif path == "/api/auth/2fa/setup":
+                sec = generate_totp_secret()
+                uri = f"otpauth://totp/AOSphere:admin@aosphere.local?secret={sec}&issuer=AOSphere&algorithm=SHA1&digits=6&period=30"
+                rcs = generate_recovery_codes(8)
+                conn.close()
+                return self.send_json({"secret": sec, "otpauth_uri": uri, "recovery_codes": rcs})
+
+            elif path == "/api/auth/2fa/verify":
+                sec = req.get("secret", "")
+                code = req.get("code", "")
+                rcs = req.get("recovery_codes", [])
+                if not verify_totp_code(sec, code):
+                    conn.close()
+                    return self.send_json({"error": "invalid_code", "message": "Invalid TOTP verification code"}, 401)
+                now = utcnow_str()
+                conn.execute("UPDATE users SET totp_secret = ?, totp_enabled = 1, recovery_codes_json = ?, updated_at = ? WHERE id = 'usr_admin_default'", (sec, json.dumps(rcs), now))
+                conn.commit()
+                conn.close()
+                return self.send_json({"status": "enabled", "message": "Two-factor authentication successfully enabled", "recovery_codes": rcs})
+
+            elif path == "/api/auth/2fa/disable":
+                now = utcnow_str()
+                conn.execute("UPDATE users SET totp_secret = '', totp_enabled = 0, recovery_codes_json = '[]', updated_at = ? WHERE id = 'usr_admin_default'", (now,))
+                conn.commit()
+                conn.close()
+                return self.send_json({"status": "disabled", "message": "Two-factor authentication successfully disabled"})
+
+            elif path == "/api/auth/2fa/challenge":
+                uid = req.get("user_id")
+                code = req.get("code", "")
+                is_rec = req.get("is_recovery", False)
+                u = conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+                if not u and (uid == "usr_admin_default" or uid == "usr_admin"):
+                    u = conn.execute("SELECT * FROM users WHERE email = 'admin@aosphere.local'").fetchone()
+                if not u:
+                    conn.close()
+                    return self.send_json({"error": "user_not_found"}, 401)
+                verified = False
+                if is_rec:
+                    codes = json.loads(u["recovery_codes_json"] or "[]")
+                    if code.strip().upper() in [c.upper() for c in codes]:
+                        verified = True
+                else:
+                    verified = verify_totp_code(u["totp_secret"] or "", code)
+                if not verified:
+                    conn.close()
+                    return self.send_json({"error": "invalid_2fa_code"}, 401)
+                conn.close()
+                return self.send_json({"status": "ok", "token": f"sess_{uuid.uuid4().hex[:16]}", "user": {"id": u["id"], "email": u["email"], "role": u["role"]}})
+
+            elif path == "/api/auth/invitations":
+                email = req.get("email", "").strip().lower()
+                role = req.get("role", "employee")
+                if not email:
+                    conn.close()
+                    return self.send_json({"error": "email required"}, 400)
+                inv_id = f"inv_{uuid.uuid4().hex[:12]}"
+                raw_tok = uuid.uuid4().hex
+                tok_hash = hashlib.sha256(raw_tok.encode()).hexdigest()
+                now = utcnow_str()
+                exp = (datetime.now(timezone.utc) + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                conn.execute("INSERT INTO user_invitations (id, org_id, email, role, token_hash, invited_by, status, expires_at, created_at) VALUES (?, 'org_default', ?, ?, ?, 'usr_admin_default', 'pending', ?, ?)", (inv_id, email, role, tok_hash, exp, now))
+                conn.commit()
+                conn.close()
+                return self.send_json({"invitation_id": inv_id, "email": email, "role": role, "invite_token": raw_tok, "invite_url": f"/portal.html?invite={raw_tok}", "expires_at": exp}, 201)
+
+            elif path == "/api/auth/invitations/accept":
+                tok = req.get("token")
+                name = req.get("name", "New User")
+                pwd = req.get("password", "")
+                err = validate_password_complexity(pwd)
+                if err:
+                    conn.close()
+                    return self.send_json({"error": "password_policy_violation", "message": err}, 400)
+                tok_hash = hashlib.sha256(tok.encode()).hexdigest()
+                inv = conn.execute("SELECT * FROM user_invitations WHERE token_hash = ? AND status = 'pending'", (tok_hash,)).fetchone()
+                if not inv:
+                    conn.close()
+                    return self.send_json({"error": "invalid_or_expired_token"}, 400)
+                uid = f"usr_{uuid.uuid4().hex[:8]}"
+                now = utcnow_str()
+                pwd_hash = f"mockhash_{hashlib.sha256(pwd.encode()).hexdigest()[:24]}"
+                conn.execute("INSERT INTO users (id, org_id, email, password_hash, name, role, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)", (uid, inv["org_id"], inv["email"], pwd_hash, name, inv["role"], now, now))
+                conn.execute("INSERT OR IGNORE INTO user_organizations (user_id, org_id, role, created_at) VALUES (?, ?, ?, ?)", (uid, inv["org_id"], inv["role"], now))
+                conn.execute("UPDATE user_invitations SET status = 'accepted' WHERE id = ?", (inv["id"],))
+                conn.commit()
+                conn.close()
+                return self.send_json({"status": "accepted", "user": {"id": uid, "email": inv["email"], "name": name, "role": inv["role"]}})
+
+            elif path == "/api/auth/password-reset/request":
+                email = req.get("email", "").strip().lower()
+                u = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+                if not u:
+                    conn.close()
+                    return self.send_json({"status": "requested", "message": "If an account exists, a reset link has been dispatched."})
+                rst_id = f"reset_{uuid.uuid4().hex[:12]}"
+                raw_tok = uuid.uuid4().hex
+                tok_hash = hashlib.sha256(raw_tok.encode()).hexdigest()
+                now = utcnow_str()
+                exp = (datetime.now(timezone.utc) + timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                conn.execute("INSERT INTO password_resets (id, user_id, token_hash, status, expires_at, created_at) VALUES (?, ?, ?, 'pending', ?, ?)", (rst_id, u["id"], tok_hash, exp, now))
+                conn.commit()
+                conn.close()
+                return self.send_json({"status": "requested", "reset_token": raw_tok, "reset_url": f"/portal.html?reset={raw_tok}", "expires_in": "15 minutes"})
+
+            elif path == "/api/auth/password-reset/confirm":
+                tok = req.get("token")
+                new_pwd = req.get("new_password", "")
+                err = validate_password_complexity(new_pwd)
+                if err:
+                    conn.close()
+                    return self.send_json({"error": "password_policy_violation", "message": err}, 400)
+                tok_hash = hashlib.sha256(tok.encode()).hexdigest()
+                rst = conn.execute("SELECT * FROM password_resets WHERE token_hash = ? AND status = 'pending'", (tok_hash,)).fetchone()
+                if not rst:
+                    conn.close()
+                    return self.send_json({"error": "invalid_or_expired_token"}, 400)
+                now = utcnow_str()
+                pwd_hash = f"mockhash_{hashlib.sha256(new_pwd.encode()).hexdigest()[:24]}"
+                conn.execute("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?", (pwd_hash, now, rst["user_id"]))
+                conn.execute("UPDATE password_resets SET status = 'used' WHERE id = ?", (rst["id"],))
+                conn.commit()
+                conn.close()
+                return self.send_json({"status": "password_updated", "message": "Password successfully updated."})
+
+            elif path == "/api/auth/sso/configs":
+                prov = req.get("provider") or req.get("provider_name") or "google"
+                cid = req.get("client_id", "")
+                csec = req.get("client_secret", "")
+                iss = req.get("issuer_url", "")
+                dom = req.get("domain_mapping", "")
+                en = 1 if req.get("is_enabled", True) else 0
+                sso_id = f"sso_{uuid.uuid4().hex[:12]}"
+                now = utcnow_str()
+                conn.execute("""
+                    INSERT INTO sso_configs (id, org_id, provider, client_id, client_secret, issuer_url, domain_mapping, is_enabled, created_at)
+                    VALUES (?, 'org_default', ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(org_id, provider) DO UPDATE SET client_id = excluded.client_id, client_secret = excluded.client_secret, issuer_url = excluded.issuer_url, domain_mapping = excluded.domain_mapping, is_enabled = excluded.is_enabled
+                """, (sso_id, prov, cid, csec, iss, dom, en, now))
+                conn.commit()
+                row = conn.execute("SELECT * FROM sso_configs WHERE org_id = 'org_default' AND provider = ?", (prov,)).fetchone()
+                conn.close()
+                return self.send_json(dict(row))
+
+            elif path == "/api/auth/sso/callback":
+                claims = req.get("id_token_claims", {})
+                email = claims.get("email", "").strip().lower()
+                name = claims.get("name", "SSO User")
+                if not email:
+                    conn.close()
+                    return self.send_json({"error": "email missing from claims"}, 400)
+                u = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+                now = utcnow_str()
+                if not u:
+                    uid = f"usr_{uuid.uuid4().hex[:8]}"
+                    conn.execute("INSERT INTO users (id, org_id, email, password_hash, name, role, is_active, created_at, updated_at) VALUES (?, 'org_default', ?, 'sso_auth_only', ?, 'employee', 1, ?, ?)", (uid, email, name, now, now))
+                    conn.execute("INSERT OR IGNORE INTO user_organizations (user_id, org_id, role, created_at) VALUES (?, 'org_default', 'employee', ?)", (uid, now))
+                    conn.commit()
+                    u = conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+                if not u and (uid == "usr_admin_default" or uid == "usr_admin"):
+                    u = conn.execute("SELECT * FROM users WHERE email = 'admin@aosphere.local'").fetchone()
+                conn.close()
+                return self.send_json({"status": "authenticated", "token": f"sess_{uuid.uuid4().hex[:16]}", "user": {"id": u["id"], "email": u["email"], "name": u["name"], "role": u["role"]}})
+
+            elif path == "/api/auth/roles":
+                if self.command == "DELETE":
+                    role_id = query.get("id", [""])[0] or req.get("id", "")
+                    conn.execute("DELETE FROM custom_roles WHERE id = ? AND is_system = 0", (role_id,))
+                    conn.commit()
+                    conn.close()
+                    return self.send_json({"status": "deleted", "id": role_id})
+                elif self.command == "PUT":
+                    role_id = req.get("id")
+                    rdesc = req.get("description", "")
+                    rperms = req.get("permissions_json") or json.dumps(req.get("permissions", ["read"]))
+                    conn.execute("UPDATE custom_roles SET description = ?, permissions_json = ? WHERE id = ? AND is_system = 0", (rdesc, rperms if isinstance(rperms, str) else json.dumps(rperms), role_id))
+                    conn.commit()
+                    row = conn.execute("SELECT * FROM custom_roles WHERE id = ?", (role_id,)).fetchone()
+                    conn.close()
+                    return self.send_json(dict(row))
+                else:
+                    rname = req.get("name")
+                    rdesc = req.get("description", "")
+                    rperms = req.get("permissions_json") or json.dumps(req.get("permissions", ["read"]))
+                    if not rname:
+                        conn.close()
+                        return self.send_json({"error": "name required"}, 400)
+                    role_id = f"role_{uuid.uuid4().hex[:8]}"
+                    now = utcnow_str()
+                    conn.execute("INSERT INTO custom_roles (id, org_id, name, description, permissions_json, is_system, created_at) VALUES (?, 'org_default', ?, ?, ?, 0, ?)", (role_id, rname, rdesc, rperms if isinstance(rperms, str) else json.dumps(rperms), now))
+                    conn.commit()
+                    row = conn.execute("SELECT * FROM custom_roles WHERE id = ?", (role_id,)).fetchone()
+                    conn.close()
+                    return self.send_json(dict(row), 201)
+
+            elif path in ("/api/compliance/audit-vault", "/api/compliance/audit-vault/record"):
+                act = req.get("action") or req.get("event_type") or "security.audit"
+                actor_id = req.get("actor_id", "usr_admin_default")
+                actor_type = req.get("actor_type", "user")
+                rtype = req.get("resource_type", "general")
+                rid = req.get("resource_id", "res_001")
+                phash = req.get("payload_hash") or GENESIS_BLOCK_HASH
+                last_block = conn.execute("SELECT sequence_number, block_hash FROM audit_chain_vault WHERE org_id = 'org_default' ORDER BY sequence_number DESC LIMIT 1").fetchone()
+                seq = 1 if not last_block else last_block["sequence_number"] + 1
+                prev_hash = GENESIS_BLOCK_HASH if not last_block else last_block["block_hash"]
+                ts_str = utcnow_str()
+                bhash = compute_audit_block_hash(seq, prev_hash, act, actor_id, phash, ts_str)
+                b_id = f"acv_{uuid.uuid4().hex[:12]}"
+                conn.execute("""
+                    INSERT INTO audit_chain_vault (id, org_id, sequence_number, actor_type, actor_id, action, resource_type, resource_id, payload_hash, prev_block_hash, block_hash, timestamp)
+                    VALUES (?, 'org_default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (b_id, seq, actor_type, actor_id, act, rtype, rid, phash, prev_hash, bhash, ts_str))
+                conn.commit()
+                row = conn.execute("SELECT * FROM audit_chain_vault WHERE id = ?", (b_id,)).fetchone()
+                conn.close()
+                return self.send_json(dict(row), 201)
+
+            elif path == "/api/compliance/audit-vault/verify":
+                is_valid, count, err = verify_audit_vault_chain(conn, "org_default")
+                conn.close()
+                res = {"is_valid": is_valid, "blocks_verified": count, "org_id": "org_default", "timestamp": utcnow_str()}
+                if err:
+                    res["verification_error"] = err
+                return self.send_json(res)
+
+            elif path == "/api/compliance/gdpr/export":
+                uid = req.get("user_id", "usr_admin_default")
+                u = conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+                if not u and (uid == "usr_admin_default" or uid == "usr_admin"):
+                    u = conn.execute("SELECT * FROM users WHERE email = 'admin@aosphere.local'").fetchone()
+                if not u:
+                    conn.close()
+                    return self.send_json({"error": "user not found"}, 404)
+                auds = conn.execute("SELECT action, entity_type, entity_id, reasoning, created_at FROM audit_logs WHERE actor_id = ? ORDER BY created_at DESC LIMIT 50", (uid,)).fetchall()
+                export_data = {
+                    "export_timestamp": utcnow_str(),
+                    "organization_id": "org_default",
+                    "profile": {"id": u["id"], "email": u["email"], "name": u["name"], "role": u["role"], "is_active": bool(u["is_active"]), "totp_enabled": bool(u["totp_enabled"])},
+                    "audit_actions": [dict(a) for a in auds]
+                }
+                pr_id = f"priv_{uuid.uuid4().hex[:12]}"
+                now = utcnow_str()
+                conn.execute("INSERT INTO privacy_requests (id, org_id, user_id, request_type, status, result_json, requested_at, completed_at) VALUES (?, 'org_default', ?, 'export_data', 'completed', ?, ?, ?)", (pr_id, uid, json.dumps(export_data), now, now))
+                conn.commit()
+                conn.close()
+                return self.send_json({"status": "completed", "export_data": export_data})
+
+            elif path == "/api/compliance/gdpr/forget-me":
+                uid = req.get("user_id", "usr_admin_default")
+                now = utcnow_str()
+                anon_name = f"Anonymized User {uid[:8]}"
+                anon_email = f"anonymized_{uid[:8]}@redacted.local"
+                conn.execute("UPDATE users SET name = ?, email = ?, password_hash = 'redacted', is_active = 0, totp_secret = '', totp_enabled = 0, recovery_codes_json = '[]', updated_at = ? WHERE id = ?", (anon_name, anon_email, now, uid))
+                conn.execute("DELETE FROM sessions WHERE user_id = ?", (uid,))
+                pr_id = f"priv_{uuid.uuid4().hex[:12]}"
+                conn.execute("INSERT INTO privacy_requests (id, org_id, user_id, request_type, status, result_json, requested_at, completed_at) VALUES (?, 'org_default', ?, 'forget_me', 'completed', '{\"anonymized\": true}', ?, ?)", (pr_id, uid, now, now))
+                conn.commit()
+                conn.close()
+                return self.send_json({"status": "anonymized", "message": "User PII scrubbed in compliance with GDPR Article 17."})
+
+            elif path == "/api/compliance/soc2/access-review/generate":
+                q = req.get("quarter", "2026-Q1")
+                now = utcnow_str()
+                users = conn.execute("SELECT id, email, name, role, is_active, totp_enabled FROM users WHERE org_id = 'org_default'").fetchall()
+                keys = conn.execute("SELECT id, name, role, allowed_tools, is_active FROM api_keys WHERE org_id = 'org_default'").fetchall()
+                snap = {
+                    "generated_at": now,
+                    "quarter": q,
+                    "users_count": len(users),
+                    "keys_count": len(keys),
+                    "users": [dict(u) for u in users],
+                    "api_keys": [dict(k) for k in keys]
+                }
+                rev_id = f"soc2_rev_{q.lower()}_{uuid.uuid4().hex[:6]}"
+                conn.execute("INSERT INTO soc2_access_reviews (id, org_id, quarter, status, reviewed_by, notes, snapshot_json, created_at) VALUES (?, 'org_default', ?, 'pending', 'usr_admin_default', 'Quarterly access review snapshot', ?, ?)", (rev_id, q, json.dumps(snap), now))
+                conn.commit()
+                row = conn.execute("SELECT * FROM soc2_access_reviews WHERE id = ?", (rev_id,)).fetchone()
+                conn.close()
+                return self.send_json(dict(row), 201)
+
+            elif path == "/api/compliance/soc2/access-review/signoff":
+                rev_id = req.get("id")
+                notes = req.get("notes", "Approved by Compliance Administrator")
+                now = utcnow_str()
+                conn.execute("UPDATE soc2_access_reviews SET status = 'approved', notes = ?, reviewed_by = 'usr_admin_default', reviewed_at = ? WHERE id = ?", (notes, now, rev_id))
+                conn.commit()
+                row = conn.execute("SELECT * FROM soc2_access_reviews WHERE id = ?", (rev_id,)).fetchone()
+                conn.close()
+                return self.send_json(dict(row))
+
             conn.close()
             return self.send_json({"error": "Unknown endpoint"}, 404)
         except Exception as e:
             conn.close()
-            return self.send_json({"error": str(e)}, 500)
+            import traceback
+            traceback.print_exc()
+            return self.send_json({"error": str(e), "traceback": traceback.format_exc()}, 500)
 
 def main():
     parser = argparse.ArgumentParser(description="AOSphere Platform Server")
-    parser.add_argument("-port", type=int, default=8080, help="HTTP Server Port")
+    parser.add_argument("-port", "--port", type=int, default=8080, help="HTTP Server Port")
     args = parser.parse_args()
 
     server = ThreadingHTTPServer(("0.0.0.0", args.port), AOSphereHandler)

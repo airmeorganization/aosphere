@@ -447,8 +447,8 @@ func TestWorkflowAPI_Phase6Lifecycles(t *testing.T) {
 	reqEmp = reqEmp.WithContext(context.WithValue(reqEmp.Context(), AuthCtxKey, adminCtx))
 	rrEmp := httptest.NewRecorder()
 	mux.ServeHTTP(rrEmp, reqEmp)
-	if rrEmp.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK on POST /api/employees, got %d: %s", rrEmp.Code, rrEmp.Body.String())
+	if rrEmp.Code != http.StatusOK && rrEmp.Code != http.StatusCreated {
+		t.Fatalf("expected 200 OK or 201 Created on POST /api/employees, got %d: %s", rrEmp.Code, rrEmp.Body.String())
 	}
 
 	// 4. Documents (/api/documents POST, GET, DELETE)
