@@ -678,6 +678,9 @@ const app = {
       case 'compliance':
         main.innerHTML = this.renderCompliance();
         break;
+      case 'backups':
+        main.innerHTML = this.renderBackups();
+        break;
       default:
         main.innerHTML = `<div class="p-8">Select a module from the sidebar</div>`;
     }
@@ -8829,6 +8832,380 @@ const app = {
       }
     } catch (e) {
       this.showToast('Error signing off SOC2 review: ' + e.message);
+    }
+  },
+
+  // ---------------- Module 13: Backups & Disaster Recovery ----------------
+  async ensureBackupData() {
+    if (!this.data.backups) {
+      try {
+        const res = await fetch('/api/backup/list');
+        if (res.ok) this.data.backups = await res.json();
+      } catch (e) {
+        this.data.backups = [];
+      }
+    }
+    if (!this.data.backupConfig) {
+      try {
+        const res = await fetch('/api/backup/config');
+        if (res.ok) this.data.backupConfig = await res.json();
+      } catch (e) {
+        this.data.backupConfig = { endpoint: '', bucket: '', region: 'us-east-1', access_key: '', secret_key: '' };
+      }
+    }
+  },
+
+  renderBackups() {
+    this.ensureBackupData().then(() => {
+      const el = document.getElementById('backup-table-body');
+      if (el) el.innerHTML = this.renderBackupRows();
+      const stats = document.getElementById('backup-stats-container');
+      if (stats) stats.innerHTML = this.renderBackupStats();
+    });
+
+    return `
+      <div class="content-header">
+        <div>
+          <h1 class="page-title">Disaster Recovery & Encrypted Cloud Backups</h1>
+          <p class="page-subtitle">Zero-downtime point-in-time snapshots, AES-256-GCM encryption, and S3 / Cloudflare R2 replication</p>
+        </div>
+        <div class="header-actions">
+          <button class="btn-press btn btn-secondary" onclick="app.data.backups = null; app.ensureBackupData().then(() => app.render())">
+            <i data-lucide="refresh-cw" class="w-4 h-4"></i> Refresh
+          </button>
+          <button class="btn-press btn btn-secondary" onclick="app.toggleBackupConfig()">
+            <i data-lucide="cloud" class="w-4 h-4"></i> Cloud S3 / R2 Config
+          </button>
+          <button class="btn-press btn btn-primary" onclick="app.openCreateBackupModal()">
+            <i data-lucide="shield" class="w-4 h-4"></i> Take Instant Snapshot
+          </button>
+        </div>
+      </div>
+
+      <div id="backup-stats-container" class="dashboard-grid mb-6">
+        ${this.renderBackupStats()}
+      </div>
+
+      <!-- Cloud S3/R2 Config Card (Collapsible) -->
+      <div id="backup-config-panel" class="card mb-6" style="display: none;">
+        <div class="card-header">
+          <div class="card-title"><i data-lucide="cloud" class="w-5 h-5 text-indigo-500"></i> Cloud Storage Replication (AWS S3 / Cloudflare R2 / MinIO)</div>
+        </div>
+        <div class="card-body">
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px;">
+            <div>
+              <label class="form-label">S3 Endpoint URL (leave empty for AWS S3)</label>
+              <input type="text" id="s3-endpoint" class="form-input" placeholder="https://<account>.r2.cloudflarestorage.com" value="${(this.data.backupConfig?.endpoint || '')}">
+            </div>
+            <div>
+              <label class="form-label">Bucket Name</label>
+              <input type="text" id="s3-bucket" class="form-input" placeholder="aosphere-backups" value="${(this.data.backupConfig?.bucket || '')}">
+            </div>
+            <div>
+              <label class="form-label">Region</label>
+              <input type="text" id="s3-region" class="form-input" placeholder="auto or us-east-1" value="${(this.data.backupConfig?.region || 'us-east-1')}">
+            </div>
+            <div>
+              <label class="form-label">Access Key ID</label>
+              <input type="text" id="s3-access-key" class="form-input" placeholder="AKIA..." value="${(this.data.backupConfig?.access_key || '')}">
+            </div>
+            <div>
+              <label class="form-label">Secret Access Key</label>
+              <input type="password" id="s3-secret-key" class="form-input" placeholder="********" value="${(this.data.backupConfig?.secret_key || '')}">
+            </div>
+          </div>
+          <div style="margin-top: 16px; display: flex; justify-content: flex-end;">
+            <button class="btn-press btn btn-primary" onclick="app.saveBackupConfig()">
+              <i data-lucide="save" class="w-4 h-4"></i> Save S3 Credentials
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Backups Snapshots Table -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title"><i data-lucide="database" class="w-5 h-5 text-emerald-500"></i> Verified Snapshot Archives</div>
+          <div class="card-subtitle">WAL checkpoints consolidated with PRAGMA integrity_check verification</div>
+        </div>
+        <div class="card-body p-0">
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Snapshot File</th>
+                  <th>Created At</th>
+                  <th>Archive Size</th>
+                  <th>AES-256-GCM</th>
+                  <th>SHA-256 Verification</th>
+                  <th>Integrity</th>
+                  <th style="text-align: right;">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="backup-table-body">
+                ${this.renderBackupRows()}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    `;
+  },
+
+  renderBackupStats() {
+    const list = this.data.backups || [];
+    const totalSize = list.reduce((acc, b) => acc + (b.size_bytes || 0), 0);
+    const encCount = list.filter(b => b.is_encrypted).length;
+    const latest = list.length > 0 ? new Date(list[0].created_at).toLocaleString() : 'No snapshots yet';
+
+    const fmtBytes = (bytes) => {
+      if (bytes === 0) return '0 B';
+      const k = 1024;
+      const sizes = ['B', 'KB', 'MB', 'GB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    };
+
+    return `
+      <div class="stat-card">
+        <div class="stat-icon bg-emerald-50 text-emerald-600"><i data-lucide="database" class="w-5 h-5"></i></div>
+        <div class="stat-content">
+          <div class="stat-label">Verified Snapshots</div>
+          <div class="stat-value">${list.length}</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon bg-indigo-50 text-indigo-600"><i data-lucide="lock" class="w-5 h-5"></i></div>
+        <div class="stat-content">
+          <div class="stat-label">AES-256 Encrypted</div>
+          <div class="stat-value">${encCount} / ${list.length}</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon bg-blue-50 text-blue-600"><i data-lucide="hard-drive" class="w-5 h-5"></i></div>
+        <div class="stat-content">
+          <div class="stat-label">Total Backup Storage</div>
+          <div class="stat-value">${fmtBytes(totalSize)}</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon bg-amber-50 text-amber-600"><i data-lucide="clock" class="w-5 h-5"></i></div>
+        <div class="stat-content">
+          <div class="stat-label">Latest Snapshot</div>
+          <div class="stat-value text-xs font-mono" style="word-break: break-all;">${latest}</div>
+        </div>
+      </div>
+    `;
+  },
+
+  renderBackupRows() {
+    const list = this.data.backups || [];
+    if (list.length === 0) {
+      return `<tr><td colspan="7" class="text-center p-8 text-slate-500">No backup snapshots found. Click <strong>Take Instant Snapshot</strong> to create your first point-in-time archive.</td></tr>`;
+    }
+
+    const fmtBytes = (bytes) => {
+      if (!bytes) return '0 B';
+      const k = 1024;
+      const sizes = ['B', 'KB', 'MB', 'GB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    };
+
+    return list.map(b => {
+      const dt = new Date(b.created_at).toLocaleString();
+      const shortHash = b.checksum_sha256 ? b.checksum_sha256.substring(0, 12) + '...' : 'Verified';
+      const encBadge = b.is_encrypted 
+        ? `<span class="badge badge-success"><i data-lucide="lock" class="w-3 h-3 inline"></i> AES-GCM</span>`
+        : `<span class="badge badge-secondary">Plain SQLite</span>`;
+
+      return `
+        <tr>
+          <td><strong class="font-mono text-xs">${b.filename}</strong></td>
+          <td><span class="text-xs text-slate-500">${dt}</span></td>
+          <td><span class="font-mono text-xs">${fmtBytes(b.size_bytes)}</span></td>
+          <td>${encBadge}</td>
+          <td><span class="font-mono text-xs text-slate-500" title="${b.checksum_sha256}">${shortHash}</span></td>
+          <td><span class="badge badge-success"><i data-lucide="check" class="w-3 h-3 inline"></i> PRAGMA OK</span></td>
+          <td style="text-align: right;">
+            <button class="btn btn-secondary btn-sm" onclick="app.syncBackupCloud('${b.filename}')" title="Upload to Cloud S3">
+              <i data-lucide="cloud-upload" class="w-3 h-3"></i> Sync S3
+            </button>
+            <button class="btn btn-danger btn-sm" onclick="app.openRestoreBackupModal('${b.filename}', ${b.is_encrypted})" style="margin-left: 6px;">
+              <i data-lucide="rotate-ccw" class="w-3 h-3"></i> Restore
+            </button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+  },
+
+  toggleBackupConfig() {
+    const p = document.getElementById('backup-config-panel');
+    if (p) {
+      p.style.display = p.style.display === 'none' ? 'block' : 'none';
+    }
+  },
+
+  async saveBackupConfig() {
+    const cfg = {
+      endpoint: document.getElementById('s3-endpoint')?.value || '',
+      bucket: document.getElementById('s3-bucket')?.value || '',
+      region: document.getElementById('s3-region')?.value || 'us-east-1',
+      access_key: document.getElementById('s3-access-key')?.value || '',
+      secret_key: document.getElementById('s3-secret-key')?.value || '',
+    };
+    try {
+      const res = await fetch('/api/backup/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cfg)
+      });
+      if (res.ok) {
+        this.data.backupConfig = await res.json();
+        this.showToast('Cloud S3 configuration saved successfully');
+      } else {
+        const err = await res.text();
+        this.showToast('Error saving S3 config: ' + err);
+      }
+    } catch (e) {
+      this.showToast('Failed to save S3 config: ' + e.message);
+    }
+  },
+
+  openCreateBackupModal() {
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    if (!modal || !content) return;
+    content.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+        <h3 class="text-lg font-bold text-slate-800">Create Atomic Point-in-Time Snapshot</h3>
+        <button class="icon-btn" onclick="app.closeModal()"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:14px;">
+        <p class="text-xs text-slate-500">
+          This operation issues a WAL checkpoint (<code>PRAGMA wal_checkpoint(TRUNCATE)</code>) and creates an atomic snapshot using <code>VACUUM INTO</code> with automatic integrity checking.
+        </p>
+        <div>
+          <label class="form-label">Snapshot Prefix</label>
+          <input type="text" id="backup-prefix" class="form-input" value="aosphere_prod">
+        </div>
+        <div>
+          <label class="form-label">Encryption Passphrase (AES-256-GCM) — Leave blank for unencrypted</label>
+          <input type="password" id="backup-passphrase" class="form-input" placeholder="Optional encryption passphrase">
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="backup-upload-cloud" style="width: 16px; height: 16px;">
+          <label for="backup-upload-cloud" style="font-size: 13px; font-weight: 500; cursor: pointer;">
+            Replicate to configured S3 / Cloudflare R2 immediately
+          </label>
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:8px;">
+          <button class="btn btn-secondary" onclick="app.closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="app.submitCreateBackup()">Take Snapshot</button>
+        </div>
+      </div>
+    `;
+    modal.classList.add('active');
+    if (window.lucide) lucide.createIcons();
+  },
+
+  async submitCreateBackup() {
+    const prefix = document.getElementById('backup-prefix')?.value || 'aosphere_backup';
+    const passphrase = document.getElementById('backup-passphrase')?.value || '';
+    const upload_cloud = document.getElementById('backup-upload-cloud')?.checked || false;
+
+    this.showToast('Initiating WAL checkpoint and atomic snapshot...');
+    try {
+      const res = await fetch('/api/backup/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prefix, passphrase, upload_cloud })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        this.closeModal();
+        this.showToast(`Snapshot created: ${data.filename} (${data.size_bytes} bytes)`);
+        this.data.backups = null;
+        await this.ensureBackupData();
+        this.render();
+      } else {
+        const err = await res.text();
+        this.showToast('Backup creation failed: ' + err);
+      }
+    } catch (e) {
+      this.showToast('Network error creating backup: ' + e.message);
+    }
+  },
+
+  openRestoreBackupModal(filename, isEncrypted) {
+    const modal = document.getElementById('action-modal');
+    const content = document.getElementById('modal-content');
+    if (!modal || !content) return;
+    content.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+        <h3 class="text-lg font-bold text-red-600">Disaster Recovery: Restore Snapshot</h3>
+        <button class="icon-btn" onclick="app.closeModal()"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:14px;">
+        <div style="background: #fef2f2; border: 1px solid #fecaca; padding: 12px; border-radius: 6px; font-size: 13px; color: #991b1b;">
+          <strong>Warning:</strong> Restoring this backup will overwrite the current live database file with snapshot <code>${filename}</code>. A checkpoint will be run before restoring.
+        </div>
+        ${isEncrypted ? `
+        <div>
+          <label class="form-label">AES-256 Passphrase Required</label>
+          <input type="password" id="restore-passphrase" class="form-input" placeholder="Enter encryption passphrase">
+        </div>
+        ` : ''}
+        <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:8px;">
+          <button class="btn btn-secondary" onclick="app.closeModal()">Cancel</button>
+          <button class="btn btn-danger" onclick="app.submitRestoreBackup('${filename}')">Confirm & Restore</button>
+        </div>
+      </div>
+    `;
+    modal.classList.add('active');
+    if (window.lucide) lucide.createIcons();
+  },
+
+  async submitRestoreBackup(filename) {
+    const passphrase = document.getElementById('restore-passphrase')?.value || '';
+    this.showToast(`Restoring ${filename}...`);
+    try {
+      const res = await fetch('/api/backup/restore', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename, passphrase })
+      });
+      if (res.ok) {
+        this.closeModal();
+        this.showToast(`Snapshot ${filename} successfully restored!`);
+        setTimeout(() => window.location.reload(), 1500);
+      } else {
+        const err = await res.text();
+        this.showToast('Restore failed: ' + err);
+      }
+    } catch (e) {
+      this.showToast('Restore request failed: ' + e.message);
+    }
+  },
+
+  async syncBackupCloud(filename) {
+    this.showToast(`Uploading ${filename} to Cloud S3 / R2...`);
+    try {
+      const res = await fetch('/api/backup/cloud-sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        this.showToast(`Successfully uploaded to S3: ${data.cloud_key}`);
+      } else {
+        const err = await res.text();
+        this.showToast('Cloud sync error: ' + err);
+      }
+    } catch (e) {
+      this.showToast('Network error syncing to cloud: ' + e.message);
     }
   },
 

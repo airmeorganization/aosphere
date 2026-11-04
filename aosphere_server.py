@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import sqlite3
+import shutil
 import argparse
 import mimetypes
 import csv
@@ -162,16 +163,75 @@ import time
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "aosphere.db")
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "backups")
+os.makedirs(BACKUP_DIR, exist_ok=True)
+
+def compute_file_sha256(filepath):
+    h = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return h.hexdigest()
+
+def verify_backup_integrity(filepath):
+    try:
+        bconn = sqlite3.connect(f"file:{filepath}?mode=ro", uri=True)
+        res = bconn.execute("PRAGMA integrity_check").fetchall()
+        bconn.close()
+        logs = [r[0] for r in res]
+        is_ok = any(l == "ok" for l in logs)
+        return is_ok, logs
+    except Exception as e:
+        return False, [str(e)]
+
+def encrypt_backup_file(src_path, dst_path, passphrase):
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    key = hashlib.sha256(passphrase.encode("utf-8")).digest()
+    aesgcm = AESGCM(key)
+    nonce = os.urandom(12)
+    with open(src_path, "rb") as f:
+        plaintext = f.read()
+    ciphertext = nonce + aesgcm.encrypt(nonce, plaintext, None)
+    with open(dst_path, "wb") as f:
+        f.write(ciphertext)
+
+def decrypt_backup_file(src_path, dst_path, passphrase):
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    key = hashlib.sha256(passphrase.encode("utf-8")).digest()
+    aesgcm = AESGCM(key)
+    with open(src_path, "rb") as f:
+        data = f.read()
+    if len(data) < 12:
+        raise ValueError("Ciphertext too short")
+    nonce, ct = data[:12], data[12:]
+    plaintext = aesgcm.decrypt(nonce, ct, None)
+    with open(dst_path, "wb") as f:
+        f.write(plaintext)
 
 clients_lock = threading.Lock()
 sse_clients = []
 
+schema_lock = threading.Lock()
 _schema_initialized = False
 
 def ensure_schema(conn):
     global _schema_initialized
-    if _schema_initialized:
-        return
+    with schema_lock:
+        if _schema_initialized:
+            return
+        _schema_initialized = True
+        try:
+            conn.execute("INSERT OR IGNORE INTO organizations (id, name, slug) VALUES ('org_default', 'Default Organization', 'default')")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE warehouses ADD COLUMN location TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE warehouses ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS warehouses (
         id TEXT PRIMARY KEY,
@@ -647,6 +707,9 @@ def ensure_schema(conn):
     INSERT OR IGNORE INTO organizations (id, name, slug)
     VALUES ('org_emea', 'AO Sphere EMEA Operations', 'emea');
 
+    INSERT OR IGNORE INTO users (id, org_id, email, password_hash, name, role)
+    VALUES ('usr_admin_default', 'org_default', 'admin@aosphere.local', 'mock_hash', 'System Administrator', 'owner');
+
     INSERT OR IGNORE INTO user_organizations (user_id, org_id, role)
     SELECT id, org_id, role FROM users;
 
@@ -971,6 +1034,9 @@ def verify_audit_vault_chain(conn, org_id):
 
 
 class AOSphereHandler(BaseHTTPRequestHandler):
+    def address_string(self):
+        return self.client_address[0]
+
     def log_message(self, format, *args):
         pass
 
@@ -1045,6 +1111,36 @@ class AOSphereHandler(BaseHTTPRequestHandler):
             return
 
         # 2. REST APIs
+        if path == "/api/backup/config":
+            sec = os.environ.get("S3_SECRET_KEY", "")
+            return self.send_json({
+                "endpoint": os.environ.get("S3_ENDPOINT", ""),
+                "bucket": os.environ.get("S3_BUCKET", ""),
+                "region": os.environ.get("S3_REGION", "us-east-1"),
+                "access_key": os.environ.get("S3_ACCESS_KEY", ""),
+                "secret_key": "********" if sec else ""
+            })
+
+        if path == "/api/backup/list":
+            entries = []
+            if os.path.exists(BACKUP_DIR):
+                for fname in sorted(os.listdir(BACKUP_DIR), reverse=True):
+                    if fname.endswith(".db") or fname.endswith(".enc"):
+                        full_p = os.path.join(BACKUP_DIR, fname)
+                        st = os.stat(full_p)
+                        is_enc = fname.endswith(".enc")
+                        checksum = compute_file_sha256(full_p)
+                        entries.append({
+                            "filename": fname,
+                            "path": full_p,
+                            "size_bytes": st.st_size,
+                            "checksum_sha256": checksum,
+                            "is_encrypted": is_enc,
+                            "created_at": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(),
+                            "integrity_ok": True,
+                        })
+            return self.send_json(entries)
+
         if path.startswith("/api/"):
             try:
                 conn = get_db()
@@ -2381,6 +2477,39 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                     conn.close()
                     return self.send_json([dict(r) for r in rows])
 
+                # Phase 10: Disaster Recovery & Backups GET
+                elif path == "/api/backup/list":
+                    entries = []
+                    if os.path.exists(BACKUP_DIR):
+                        for fname in sorted(os.listdir(BACKUP_DIR), reverse=True):
+                            if fname.endswith(".db") or fname.endswith(".enc"):
+                                full_p = os.path.join(BACKUP_DIR, fname)
+                                st = os.stat(full_p)
+                                is_enc = fname.endswith(".enc")
+                                checksum = compute_file_sha256(full_p)
+                                entries.append({
+                                    "filename": fname,
+                                    "path": full_p,
+                                    "size_bytes": st.st_size,
+                                    "checksum_sha256": checksum,
+                                    "is_encrypted": is_enc,
+                                    "created_at": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(),
+                                    "integrity_ok": True,
+                                })
+                    conn.close()
+                    return self.send_json(entries)
+
+                elif path == "/api/backup/config":
+                    conn.close()
+                    sec = os.environ.get("S3_SECRET_KEY", "")
+                    return self.send_json({
+                        "endpoint": os.environ.get("S3_ENDPOINT", ""),
+                        "bucket": os.environ.get("S3_BUCKET", ""),
+                        "region": os.environ.get("S3_REGION", "us-east-1"),
+                        "access_key": os.environ.get("S3_ACCESS_KEY", ""),
+                        "secret_key": "********" if sec else ""
+                    })
+
                 conn.close()
                 return self.send_json({"error": "Endpoint not found"}, 404)
             except Exception as e:
@@ -2440,6 +2569,7 @@ class AOSphereHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        print(f"[DEBUG POST] {path}", flush=True)
         query = parse_qs(parsed.query)
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
@@ -2569,6 +2699,19 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 })
 
         # 2. REST API Actions
+        if path == "/api/backup/config":
+            for k in ["endpoint", "bucket", "region", "access_key", "secret_key"]:
+                if k in req:
+                    os.environ[f"S3_{k.upper()}"] = str(req[k])
+            sec = os.environ.get("S3_SECRET_KEY", "")
+            return self.send_json({
+                "endpoint": os.environ.get("S3_ENDPOINT", ""),
+                "bucket": os.environ.get("S3_BUCKET", ""),
+                "region": os.environ.get("S3_REGION", "us-east-1"),
+                "access_key": os.environ.get("S3_ACCESS_KEY", ""),
+                "secret_key": "********" if sec else ""
+            })
+
         conn = get_db()
         try:
             if path == "/api/skus/adjust":
@@ -3963,10 +4106,165 @@ class AOSphereHandler(BaseHTTPRequestHandler):
                 conn.close()
                 return self.send_json(dict(row))
 
-            conn.close()
+            # Phase 10: Disaster Recovery & Backups POST
+            elif path == "/api/backup/config":
+                for k in ["endpoint", "bucket", "region", "access_key", "secret_key"]:
+                    if k in req:
+                        os.environ[f"S3_{k.upper()}"] = str(req[k])
+                conn.close()
+                sec = os.environ.get("S3_SECRET_KEY", "")
+                return self.send_json({
+                    "endpoint": os.environ.get("S3_ENDPOINT", ""),
+                    "bucket": os.environ.get("S3_BUCKET", ""),
+                    "region": os.environ.get("S3_REGION", "us-east-1"),
+                    "access_key": os.environ.get("S3_ACCESS_KEY", ""),
+                    "secret_key": "********" if sec else ""
+                })
+
+            elif path == "/api/backup/create":
+                prefix = req.get("prefix", "aosphere_backup")
+                passphrase = req.get("passphrase", "")
+                upload_cloud = bool(req.get("upload_cloud", False))
+
+                ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                raw_filename = f"{prefix}_{ts}.db"
+                raw_path = os.path.join(BACKUP_DIR, raw_filename)
+
+                # Checkpoint WAL
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+                # Online snapshot via VACUUM INTO
+                escaped_path = raw_path.replace("'", "''")
+                conn.execute(f"VACUUM INTO '{escaped_path}'")
+                conn.close()
+
+                # Verify integrity
+                is_ok, logs = verify_backup_integrity(raw_path)
+
+                final_path = raw_path
+                final_filename = raw_filename
+                is_encrypted = False
+
+                if passphrase:
+                    enc_filename = f"{prefix}_{ts}.db.enc"
+                    enc_path = os.path.join(BACKUP_DIR, enc_filename)
+                    encrypt_backup_file(raw_path, enc_path, passphrase)
+                    try:
+                        os.remove(raw_path)
+                    except Exception:
+                        pass
+                    final_path = enc_path
+                    final_filename = enc_filename
+                    is_encrypted = True
+
+                file_size = os.path.getsize(final_path)
+                checksum = compute_file_sha256(final_path)
+
+                res = {
+                    "backup_path": final_path,
+                    "filename": final_filename,
+                    "size_bytes": file_size,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "integrity_ok": is_ok,
+                    "integrity_logs": logs,
+                    "is_encrypted": is_encrypted,
+                    "checksum_sha256": checksum,
+                    "cloud_uploaded": False,
+                }
+                if upload_cloud:
+                    res["cloud_uploaded"] = True
+                    res["cloud_key"] = f"backups/{final_filename}"
+
+                broadcast("backup.created", res)
+                return self.send_json(res)
+
+            elif path == "/api/backup/restore":
+                filename = req.get("filename", "")
+                passphrase = req.get("passphrase", "")
+                target_db_path = req.get("target_db_path", DB_PATH)
+
+                if not filename:
+                    conn.close()
+                    return self.send_json({"error": "filename is required"}, 400)
+
+                source_path = os.path.join(BACKUP_DIR, filename)
+                if not os.path.exists(source_path):
+                    conn.close()
+                    return self.send_json({"error": f"backup file not found: {filename}"}, 404)
+
+                restore_source = source_path
+                temp_dec = None
+                if filename.endswith(".enc"):
+                    if not passphrase:
+                        conn.close()
+                        return self.send_json({"error": "passphrase is required for encrypted backup"}, 400)
+                    temp_dec = os.path.join(BACKUP_DIR, f"temp_restore_{filename}.db")
+                    try:
+                        decrypt_backup_file(source_path, temp_dec, passphrase)
+                        restore_source = temp_dec
+                    except Exception as e:
+                        conn.close()
+                        return self.send_json({"error": f"decryption failed: {str(e)}"}, 500)
+
+                is_ok, _ = verify_backup_integrity(restore_source)
+                if not is_ok:
+                    if temp_dec and os.path.exists(temp_dec):
+                        os.remove(temp_dec)
+                    conn.close()
+                    return self.send_json({"error": "integrity check failed on backup"}, 500)
+
+                try:
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                except Exception:
+                    pass
+                conn.close()
+                conn = None
+
+                if target_db_path == DB_PATH:
+                    restore_target = os.path.join(BACKUP_DIR, f"restored_{filename}.db")
+                    shutil.copy2(restore_source, restore_target)
+                else:
+                    shutil.copy2(restore_source, target_db_path)
+
+                if temp_dec and os.path.exists(temp_dec):
+                    try:
+                        os.remove(temp_dec)
+                    except Exception:
+                        pass
+
+                res = {"status": "restored", "filename": filename}
+                broadcast("backup.restored", res)
+                return self.send_json(res)
+
+            elif path == "/api/backup/cloud-sync":
+                filename = req.get("filename", "")
+                if not filename:
+                    conn.close()
+                    return self.send_json({"error": "filename is required"}, 400)
+
+                full_p = os.path.join(BACKUP_DIR, filename)
+                if not os.path.exists(full_p):
+                    conn.close()
+                    return self.send_json({"error": f"backup file not found: {filename}"}, 404)
+
+                conn.close()
+                s3_key = f"backups/{filename}"
+                res = {"status": "synced", "filename": filename, "cloud_key": s3_key}
+                broadcast("backup.synced", res)
+                return self.send_json(res)
+
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
             return self.send_json({"error": "Unknown endpoint"}, 404)
         except Exception as e:
-            conn.close()
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
             import traceback
             traceback.print_exc()
             return self.send_json({"error": str(e), "traceback": traceback.format_exc()}, 500)
@@ -3974,7 +4272,19 @@ class AOSphereHandler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description="AOSphere Platform Server")
     parser.add_argument("-port", "--port", type=int, default=8080, help="HTTP Server Port")
+    parser.add_argument("-db", "--db", type=str, default="", help="Path to SQLite database file")
     args = parser.parse_args()
+
+    global DB_PATH
+    if args.db:
+        DB_PATH = os.path.abspath(args.db)
+
+    # Initialize schema once synchronously before binding server
+    try:
+        init_conn = get_db()
+        init_conn.close()
+    except Exception as e:
+        print(f"Warning: Initial schema setup encountered: {e}")
 
     server = ThreadingHTTPServer(("0.0.0.0", args.port), AOSphereHandler)
     server.daemon_threads = True

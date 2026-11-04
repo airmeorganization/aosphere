@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"aosphere/internal/agentplatform"
 	"aosphere/internal/auth"
+	"aosphere/internal/backup"
 	"aosphere/internal/crm"
 	"aosphere/internal/db"
 	"aosphere/internal/finance"
@@ -36,6 +38,7 @@ type API struct {
 	service           *service.WorkflowService
 	crm               *crm.CRMService
 	hr                *hr.HRService
+	backup            *backup.BackupService
 	webhookDispatcher *agentplatform.WebhookDispatcher
 	env               string
 	clients           map[chan string]string // map[msgChan]orgID
@@ -48,16 +51,19 @@ func NewAPI(s *store.Store, svc *service.WorkflowService, env string) *API {
 	}
 	var crmSvc *crm.CRMService
 	var hrSvc *hr.HRService
+	var backupSvc *backup.BackupService
 	if s != nil && s.DB() != nil {
 		ledgerSvc := ledger.NewLedgerService(s.DB())
 		crmSvc = crm.NewCRMService(s.DB(), ledgerSvc)
 		hrSvc = hr.NewHRService(s.DB(), ledgerSvc)
+		backupSvc = backup.NewBackupService(s.DB(), filepath.Join("data", "backups"))
 	}
 	return &API{
 		store:             s,
 		service:           svc,
 		crm:               crmSvc,
 		hr:                hrSvc,
+		backup:            backupSvc,
 		webhookDispatcher: agentplatform.NewWebhookDispatcher(s),
 		env:               env,
 		clients:           make(map[chan string]string),
@@ -3262,4 +3268,11 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/compliance/soc2/access-review", a.HandleSOC2AccessReview)
 	mux.HandleFunc("/api/compliance/soc2/access-review/generate", a.HandleSOC2GenerateReview)
 	mux.HandleFunc("/api/compliance/soc2/access-review/signoff", a.HandleSOC2SignOff)
+
+	// ----------------- PHASE 10: PACKAGING, BACKUPS & DISASTER RECOVERY -----------------
+	mux.HandleFunc("/api/backup/create", a.HandleBackupCreate)
+	mux.HandleFunc("/api/backup/list", a.HandleBackupList)
+	mux.HandleFunc("/api/backup/restore", a.HandleBackupRestore)
+	mux.HandleFunc("/api/backup/cloud-sync", a.HandleBackupCloudSync)
+	mux.HandleFunc("/api/backup/config", a.HandleBackupConfig)
 }

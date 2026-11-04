@@ -45,3 +45,21 @@ groups:
         annotations:
           summary: "AOSphere average request latency elevated"
           description: "Average request latency exceeded 500ms over a 5 minute window."
+
+      - alert: StaleOrMissingBackups
+        expr: (time() - aosphere_last_successful_backup_timestamp_seconds) > 86400
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AO Sphere Disaster Recovery Backup is Stale (> 24 hours)"
+          description: "No verified backup snapshot has completed in over 24 hours. Immediate disaster recovery review required."
+
+      - alert: DatabaseIntegrityFailed
+        expr: aosphere_database_integrity_status == 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "SQLite Database PRAGMA integrity_check Failed"
+          description: "The primary or snapshot SQLite database reported corruption. Execute recovery runbook immediately."

@@ -1,0 +1,81 @@
+version: '3.8'
+
+services:
+  aosphere:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - AOSPHERE_ENV=${AOSPHERE_ENV:-production}
+      - AOSPHERE_PORT=8080
+      - AOSPHERE_DB_PATH=/var/lib/aosphere/data/aosphere.db
+      - AOSPHERE_SEED=${AOSPHERE_SEED:-false}
+      - AOSPHERE_LOG_LEVEL=${AOSPHERE_LOG_LEVEL:-info}
+      - AOSPHERE_SESSION_SECRET=${AOSPHERE_SESSION_SECRET:-change_this_to_a_secure_random_key_in_production}
+      - S3_ENDPOINT=${S3_ENDPOINT:-}
+      - S3_BUCKET=${S3_BUCKET:-}
+      - S3_REGION=${S3_REGION:-us-east-1}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+    volumes:
+      - aosphere_data:/var/lib/aosphere/data
+    networks:
+      - aosphere_internal
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      - DOMAIN=${DOMAIN:-localhost}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - aosphere
+    networks:
+      - aosphere_internal
+
+  backup-sidecar:
+    image: alpine:3.21
+    restart: unless-stopped
+    environment:
+      - BACKUP_INTERVAL_HOURS=${BACKUP_INTERVAL_HOURS:-6}
+      - BACKUP_PASSPHRASE=${BACKUP_PASSPHRASE:-}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        apk add --no-cache curl jq tzdata
+        echo "Starting AO Sphere Automated Backup Sidecar..."
+        while true; do
+          echo "[`date -u`] Initiating scheduled WAL checkpoint and backup..."
+          curl -s -X POST http://aosphere:8080/api/backup/create \
+            -H "Content-Type: application/json" \
+            -d "{\"prefix\": \"auto_cron\", \"passphrase\": \"$$BACKUP_PASSPHRASE\", \"upload_cloud\": true}" || true
+          echo ""
+          SLEEP_SECS=$$(( $${BACKUP_INTERVAL_HOURS:-6} * 3600 ))
+          echo "[`date -u`] Sleeping for $$SLEEP_SECS seconds..."
+          sleep $$SLEEP_SECS
+        done
+    depends_on:
+      - aosphere
+    networks:
+      - aosphere_internal
+
+volumes:
+  aosphere_data:
+    driver: local
+  caddy_data:
+    driver: local
+  caddy_config:
+    driver: local
+
+networks:
+  aosphere_internal:
+    driver: bridge
+

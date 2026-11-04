@@ -1,0 +1,68 @@
+#cloud-config
+# Hetzner Cloud Init Script for AO Sphere BOS Monolith
+package_update: true
+package_upgrade: true
+
+packages:
+  - curl
+  - git
+  - ufw
+  - fail2ban
+  - jq
+  - ca-certificates
+
+users:
+  - name: deploy
+    groups: sudo, docker
+    shell: /bin/bash
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleDeployKeyPlaceholder
+
+write_files:
+  - path: /etc/systemd/system/aosphere.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=AO Sphere Autonomous Business Operating System
+      Requires=docker.service
+      After=docker.service network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      WorkingDirectory=/opt/aosphere
+      ExecStart=/usr/bin/docker compose up -d --remove-orphans
+      ExecStop=/usr/bin/docker compose down
+      TimeoutStartSec=0
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  # Install Docker CE official repository
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+  - apt-get update
+  - apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+  # Configure UFW firewall
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow 22/tcp comment 'SSH'
+  - ufw allow 80/tcp comment 'HTTP Caddy'
+  - ufw allow 443/tcp comment 'HTTPS Caddy'
+  - ufw allow 443/udp comment 'HTTP3 Caddy'
+  - ufw --force enable
+
+  # Setup application directory
+  - mkdir -p /opt/aosphere /var/lib/aosphere/data /var/lib/aosphere/backups
+  - chown -R 10001:10001 /var/lib/aosphere
+
+  # Enable systemd unit
+  - systemctl daemon-reload
+  - systemctl enable aosphere.service
+

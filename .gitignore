@@ -5,6 +5,7 @@
 *.so
 *.dylib
 aosphere
+dist/
 
 # Database & Runtime Data
 data/*.db

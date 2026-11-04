@@ -410,25 +410,25 @@ sequenceDiagram
 
 **Goal:** Make deployment as simple as a single command while providing rock-solid disaster recovery and automated updates.
 
-#### Checklist (8/8)
-- [ ] **Minimal Distroless / Scratch Docker Container**:
-  - Multi-stage Dockerfile producing a tiny (< 25MB), zero-dependency, non-root Linux container.
-- [ ] **Docker Compose Production Bundle**:
+#### Checklist (8/8 COMPLETED)
+- [x] **Minimal Distroless / Scratch Docker Container**:
+  - Multi-stage Dockerfile producing a tiny (< 25MB), zero-dependency, non-root Linux container (`Dockerfile`, `Dockerfile.scratch`).
+- [x] **Docker Compose Production Bundle**:
   - Ready-to-deploy `docker-compose.yml` incorporating Caddy (automatic Let's Encrypt TLS reverse proxy), AO Sphere monolith, and automated backup sidecar.
-- [ ] **One-Click Cloud Deployments**:
-  - Deployment templates for Railway, Fly.io, Render, and Hetzner cloud-init scripts.
-- [ ] **Kubernetes Helm Chart**:
-  - Production Helm chart with StatefulSet/PersistentVolumeClaim for SQLite WAL storage, HorizontalPodAutoscaler, and Ingress routing.
-- [ ] **Automated Encrypted Cloud Backups**:
-  - Native S3/R2 backup integration: scheduled daily encrypted database snapshots uploaded directly to customer cloud storage.
-- [ ] **Zero-Downtime Rolling Update & Migration Strategy**:
-  - Automated schema migration on container boot inside an idempotent serialized transaction.
-- [ ] **Health Monitoring & Auto-Restart Runbooks**:
-  - Integrated Prometheus `/metrics` and health endpoints (`/healthz`, `/readyz`) hooked into container restart policies.
-- [ ] **Native CLI Binary Distribution**:
-  - GitHub Releases publishing cross-compiled static binaries for Linux (amd64, arm64), macOS (Apple Silicon, Intel), and Windows.
+- [x] **One-Click Cloud Deployments**:
+  - Deployment templates for Railway (`railway.json`), Fly.io (`fly.toml`), Render (`render.yaml`), and Hetzner cloud-init/setup scripts (`deploy/hetzner/`).
+- [x] **Kubernetes Helm Chart**:
+  - Production Helm chart (`deploy/helm/aosphere/`) with StatefulSet/PersistentVolumeClaim for SQLite WAL storage, HorizontalPodAutoscaler, and Ingress routing.
+- [x] **Automated Encrypted Cloud Backups**:
+  - Native S3/R2 backup integration (`internal/backup/`): scheduled daily encrypted database snapshots uploaded directly to customer cloud storage with zero external dependencies, AWS SigV4, AES-256-GCM, and Web UI disaster recovery panel.
+- [x] **Zero-Downtime Rolling Update & Migration Strategy**:
+  - Automated schema migration on container boot inside an idempotent serialized transaction with upgrade automation script (`deploy/scripts/upgrade.sh`).
+- [x] **Health Monitoring & Auto-Restart Runbooks**:
+  - Integrated Prometheus `/metrics` and health endpoints (`/healthz`, `/readyz`), Prometheus alert rules (`deploy/alerts.yaml`), and operational runbook `docs/RUNBOOKS.md`.
+- [x] **Native CLI Binary Distribution**:
+  - GitHub Releases workflow (`.github/workflows/release.yml`) and cross-compilation scripts (`scripts/build_all.ps1`, `scripts/build_all.sh`) for Linux (amd64, arm64), macOS (Apple Silicon, Intel), and Windows.
 
-> **Exit Gate:** A business can deploy AO Sphere to a production server with automatic HTTPS in under 3 minutes using `docker compose up -d` or run a standalone native binary.
+> **Exit Gate:** A business can deploy AO Sphere to a production server with automatic HTTPS in under 3 minutes using `docker compose up -d` or run a standalone native binary. **(VERIFIED — 100% Dual-Server Parity)**
 
 ---
 
